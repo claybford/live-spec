@@ -32,8 +32,9 @@ python3 live-spec-validate.py --emit       # also print derived canonical facts
 
 Exit `0` = all structural checks passed, `1` = one or more failed, `2` = file unreadable.
 
-It checks four things: every `href="#x"` resolves to a matching `id`, no duplicate ids,
-count checksums, and decision-log reason cells within the 40-word cap.
+It checks five things: every `href="#x"` resolves to a matching `id`, no duplicate ids,
+count checksums, decision-log reason cells within the 40-word cap, and no volatile
+`§`-number section references (references go by stable named anchor).
 
 Counts are **not** hard-coded. Each is derived from the enumeration it counts — the
 `<h4 id="pN">` set, the `#regime-diffs` list — and the number-words in the prose are checked

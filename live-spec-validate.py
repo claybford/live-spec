@@ -12,7 +12,7 @@ Exit 0 = every structural check passed. Exit 1 = one or more failed. Exit 2 =
 file unreadable.
 
 SCOPE: structural drift only — broken anchors, duplicate ids, count-checksum
-mismatches, over-long decision cells. It cannot tell
+mismatches, over-long decision cells, volatile §-number references. It cannot tell
 whether the prose is *true*, only whether the file is internally consistent.
 Green means "not self-contradictory", not "correct".
 
@@ -113,6 +113,12 @@ def validate(raw):
             if w > CELL_WORD_CAP:
                 fails.append(f"[cell] {rid}: reason {w} words > {CELL_WORD_CAP}")
 
+    # 5. volatile ordinals — §-number references are banned (dl-novolatile);
+    #    references go by stable named anchor
+    n = len(re.findall(r"&sect;\s*\d", body))
+    if n:
+        fails.append(f"[ordinal] {n} volatile section-reference(s) (&sect; + digit)")
+
     return facts, fails
 
 
@@ -146,7 +152,8 @@ def main(argv):
     print(f"PASS — {path}: {facts['cornerstones']} cornerstones, "
           f"{facts['principles']} principles, "
           f"{facts['regime differences']} regime differences; "
-          f"anchors resolve, no dup ids, cells <= {CELL_WORD_CAP}w")
+          f"anchors resolve, no dup ids, cells <= {CELL_WORD_CAP}w, "
+          f"no volatile section refs")
     return 0
 
 

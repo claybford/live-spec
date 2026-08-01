@@ -89,7 +89,7 @@
   file &rarr; make one move (close an unknown &middot; decide &middot; recompute &middot;
   extend + fence &middot; de-drift &middot; flag an event &middot; sweep) &rarr; write back to the
   one canonical place &rarr; reconcile the touched node's one-hop neighbors
-  (referrers, cited rows, copies, counts, status [, indexed artifact]) &rarr;
+  (referrers, cited rows, copies, counts, status, counterparts [, indexed artifact]) &rarr;
   make one commit.&lt;/p&gt;
 
 &lt;h2 id="params"&gt;Key Parameters &mdash; single source of truth&lt;/h2&gt;
@@ -138,7 +138,7 @@
 <tr id="v-wiredcount"><td><strong>Count checksum</strong></td><td>A stated cardinality linked to the one enumeration it counts &mdash; the only check that detects a silently dropped item (<a href="#dl-counts">dl-counts</a>).</td></tr>
 <tr id="v-decisionlog"><td><strong>Decision log</strong></td><td>The document's settled decisions, current-state: each choice with the alternative it beat and the reason. A maintained table, not a record (<a href="#p11">P11</a>).</td></tr>
 <tr id="v-deadend"><td><strong>Ruled-out-hypotheses register</strong></td><td>Investigated-and-disproven causes, kept apart from the decision log (<a href="#p17">P17</a>).</td></tr>
-<tr id="v-diagnostic"><td><strong>Diagnostic register</strong></td><td>Confirmed recurring failures, one row each: symptom &middot; tell &middot; fix. Sibling of the ruled-out register &mdash; eliminated causes there, confirmed recurring ones here (<a href="#regimes">two regimes</a>).</td></tr>
+<tr id="v-diagnostic"><td><strong>Diagnostic register</strong></td><td>Confirmed recurring failures, one row each: symptom &middot; tell &middot; fix. Sibling of the <a href="#v-deadend">ruled-out register</a> &mdash; eliminated causes there, confirmed recurring ones here (<a href="#regimes">two regimes</a>).</td></tr>
 <tr id="v-scopefence"><td><strong>Scope fence</strong></td><td>Explicit non-goals and off-limits critiques, written to pre-empt wrong directions.</td></tr>
 <tr id="v-directive"><td><strong>Prime directive</strong></td><td>One top-level stance governing <em>how</em> every edit is made &mdash; the positive complement to the scope fence (<a href="#p18">P18</a>).</td></tr>
 <tr id="v-bootloader"><td><strong>Bootloader</strong></td><td>The short top-of-document orientation; a derived view of the lock / open / risk lists (<a href="#p14">P14</a>).</td></tr>
@@ -182,7 +182,7 @@
 <p><strong>Rule:</strong> treat restatement as a defect and remove it deliberately &mdash; but never merge near-duplicates that encode a real boundary (requested vs. granted, internal vs. wire); state one as a delta of the other (<a href="#dl-nearcopy">dl-nearcopy</a>). <strong>Why:</strong> prose copies of canonical values diverge silently; de-drift is real work, not cosmetics.</p>
 
 <h4 id="p3">P3 &middot; Addressability &amp; navigation</h4>
-<p><strong>Rule:</strong> give every claim a stable anchor, link densely, provide a TOC. <strong>Why:</strong> a reference is only useful if it can be followed, and an edit must land on the right element.</p>
+<p><strong>Rule:</strong> give every claim a stable anchor, link densely, provide a TOC; declared counterparts (siblings, pairs) link both ways (<a href="#dl-bilink">dl-bilink</a>). <strong>Why:</strong> a reference is only useful if it can be followed, and an edit must land on the right element.</p>
 
 <h4 id="p4">P4 &middot; Self-documenting conventions</h4>
 <p><strong>Rule:</strong> write the document's editing rules inside the document, each as an objective, mechanically checkable condition. <strong>Why:</strong> the next editor is a fresh model; a convention that turns on judgment ("log <em>material</em> edits") is applied differently every session and decays (<a href="#dl-gate">dl-gate</a>).</p>
@@ -267,6 +267,7 @@
       <li><em>inbound</em> &mdash; every referrer still holds;</li>
       <li><em>outbound</em> &mdash; cited rows still say what it assumes; gated items exist; every linked anchor resolves;</li>
       <li><em>copies</em> &mdash; no stale restatement survives;</li>
+      <li><em>counterparts</em> &mdash; declared sibling/pair relationships still link in both directions (<a href="#dl-bilink">dl-bilink</a>);</li>
       <li><em>counts</em> &mdash; every <a href="#v-wiredcount">count checksum</a> over a set the edit changed still matches (<a href="#dl-counts">dl-counts</a>);</li>
       <li><em>status</em> &mdash; the node's own tag is still right;</li>
       <li><em>indexed artifact (live-system)</em> &mdash; it still matches the external artifact it indexes (<a href="#p7">P7</a>).</li>
@@ -407,6 +408,7 @@
 <tr id="dl-nearcopy"><td>Never merge near-duplicates that encode a real boundary; state one as a delta of the other</td><td>Collapsing every suspected restatement on sight</td><td>De-drift can <em>cause</em> error; confirm same-fact before collapsing (<a href="#p2">P2</a>).</td></tr>
 <tr id="dl-nohist"><td>No version stamps, change notes, or derivation narrative in the top matter; history lives in git</td><td>A header version stamp and derivation blockquote</td><td>All past-tense history with existing homes; up top it is a pure drift surface (<a href="#p1">P1</a> applied to the document's own history, <a href="#p14">P14</a>).</td></tr>
 <tr id="dl-connectivity"><td>Verification is connectivity-triggered: a mandatory one-hop <a href="#v-neighborhood">neighborhood check</a> in write-back, fixed <code>[ADAPT]</code> edge list, recursion only into changed neighbors</td><td>An optional audit move; a fixed cadence; transitive blast radius; a new principle</td><td>Tying the check to touching makes it unforgettable; one-hop bounds the work; a fixed list keeps rotating editors running the same check (<a href="#p4">P4</a>).</td></tr>
+<tr id="dl-bilink"><td>Declared counterparts (siblings, pairs) link both directions; checked as a neighborhood-check edge</td><td>Universal backlink obligation; no rule</td><td>A one-way sibling claim leaves the counterpart asserting nothing; universal backlinks are link spam on hubs like <a href="#p1">P1</a>. Rationed to declared pairs, it is one more objective edge (<a href="#p4">P4</a>).</td></tr>
 <tr id="dl-validator"><td>Structural conventions run as a companion <code>live-spec-validate.py</code> (stdlib, no browser); a red result blocks the commit</td><td>Hand-run checks only; an in-page <code>&lt;script&gt;</code> banner; a build step that rewrites roll-ups</td><td>A convention a session must remember to run decays into a hope; the script makes it a gate (<a href="#p4">P4</a>). The artifact stays tooling-free to read &mdash; the validator is maintenance automation, like git (<a href="#substrate">substrate notes</a>).</td></tr>
 <tr id="dl-watchreg"><td>Minimal inline <code>[WATCH]</code>; metadata in a <a href="#v-watch">watch entry</a> in the open list</td><td>Universal as-of dating; a separate watch table</td><td>Dating everything is a document-wide drift surface with no payload; a watch has an open item's anatomy, so it files there and <a href="#p9">P9</a> gating applies free.</td></tr>
 <tr id="dl-projects"><td>A fifth <a href="#generalize">type-mapping</a> column: <em>project</em>, scoped or continuous</td><td>Folding projects into the process column; a new axis</td><td>Distinct store and measurements earn a column; scoped-vs-continuous is the <a href="#regimes">regime</a> in project clothes.</td></tr>

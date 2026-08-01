@@ -20,7 +20,7 @@ external artifact is this repo's git history.
 ## Read it
 
 Open `live-spec.html` in any browser, or read the raw HTML — it degrades to plain semantic
-markup with no network. To start your own spec, copy the seed skeleton in §1 verbatim and
+markup with no network. To start your own spec, copy the seed skeleton (the `#seed` block) verbatim and
 **nothing else** from the file.
 
 ## Validate

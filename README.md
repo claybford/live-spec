@@ -32,7 +32,6 @@ the agent; yours is just that one sentence.
 | File | What it is |
 | --- | --- |
 | `live-spec-validate.py` | Optional structural checker (stdlib only). Catches drift — broken anchors, duplicate ids, stale count checksums, over-cap decision cells, volatile `§` references. Green means "not self-contradictory," not "correct." |
-| `CLAUDE.md` | Working notes for AI sessions operating on this repo. Auto-loaded by name — keep the capitalization. |
 
 Run it before committing:
 

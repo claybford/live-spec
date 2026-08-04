@@ -27,11 +27,11 @@ for it: a persistent, cross-session, human- and machine-readable definition that
 future session (or you) can pick up cold. The spec's copy-the-seed instruction is for
 the agent; yours is just that one sentence.
 
-## Supporting files
+## The validator
 
-| File | What it is |
-| --- | --- |
-| `live-spec-validate.py` | Optional structural checker (stdlib only). Catches drift — broken anchors, duplicate ids, stale count checksums, over-cap decision cells, volatile `§` references. Green means "not self-contradictory," not "correct." |
+`live-spec-validate.py` is an optional structural checker (stdlib only) that catches drift —
+broken anchors, duplicate ids, stale count checksums, over-cap decision cells, volatile `§`
+references. Green means "not self-contradictory," not "correct."
 
 Run it before committing:
 

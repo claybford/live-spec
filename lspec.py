@@ -248,6 +248,10 @@ def file_at(commit, path):
 def stamp(paths):
     try:
         head = git("rev-parse", "--short", "HEAD").strip()
+        if os.environ.get("LSPEC_BASIS") == "staged":
+            # The hook checks the staged tree itself; "differs from HEAD" is the
+            # commit's whole point, so the uncommitted flag would cry wolf.
+            return f"basis {head} (staged tree)", False
         dirty = git("status", "--porcelain", "--", *paths).strip()
         return f"basis {head}" + (" + uncommitted changes" if dirty else ""), bool(dirty)
     except (RuntimeError, OSError):

@@ -11,7 +11,8 @@ git checkout-index -a --prefix="$tmp/"
 cd "$tmp"
 # Stamps and diffs speak about the staged tree, not the working tree. Git may
 # hand hooks a *relative* GIT_DIR/GIT_INDEX_FILE — pin both absolute before cd.
-export GIT_DIR="$root/.git" GIT_WORK_TREE="$tmp" GIT_INDEX_FILE="$root/.git/index"
+export GIT_DIR="$root/.git" GIT_WORK_TREE="$tmp" GIT_INDEX_FILE="$root/.git/index" \
+       LSPEC_BASIS=staged
 # Gate with the checker being committed, falling back to the working-tree one
 # (e.g. the commit that first adds lspec.py to a repo that already has specs).
 tool="$tmp/lspec.py"

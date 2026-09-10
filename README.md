@@ -38,12 +38,14 @@ python3 lspec.py check [MAIN] [--diff BASE] [--neighborhood TARGET]
 python3 lspec.py show TARGET [--text|--graph]
 python3 lspec.py neighbors TARGET           # inbound, outbound, counterparts, dependents; mechanical results; reviews owed
 python3 lspec.py impact BASE                # elements changed / moved / removed since BASE and the claims each puts in question
-python3 lspec.py mv OLD NEW                 # rename a file or an anchor with reference repair; leaves a diff, never commits
-python3 lspec.py review TARGET... [-m MSG]  # record a review event: a `review:` commit naming the dependent claims
+python3 lspec.py mv OLD NEW                 # rename a file or an anchor with reference repair; stages the rename, never commits
+python3 lspec.py review CLAIM... [-m MSG]   # record a review event: a `review:` commit naming the dependent claims
 ```
 
-`TARGET` is `path#id`, or `#id` in MAIN (default `live-spec.html`). Read-only verbs
-never touch files or git; `mv` edits files, `review` commits, nothing else does.
+`TARGET` is `path#id`, or `#id` in MAIN (default `live-spec.html`); `CLAIM` is the
+address of the dependent claim — the end that owes the review, not its target.
+Read-only verbs never touch files or git; `mv` edits files, `review` commits, nothing
+else does.
 
 `check` covers what the spec's conventions make mechanical: anchors in-file and `path#id`
 across a collection, duplicate ids, count checksums (declared on the enumeration by
@@ -57,7 +59,8 @@ stamped with the commit it was computed against.
 
 Exit `0` pass, `1` a check failed, `2` unreadable input or a refused operation.
 
-**Hook.** `hooks/pre-commit` runs `check` against the staged tree; red blocks the commit.
+**Hook.** `hooks/pre-commit` runs the staged copy of `lspec.py check` against the
+staged tree; red blocks the commit.
 
 ```
 ln -sf ../../hooks/pre-commit .git/hooks/pre-commit

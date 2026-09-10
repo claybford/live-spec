@@ -1,5 +1,5 @@
 READ THIS FIRST, BEFORE ANYTHING ELSE, DO NOT SKIP:
-run `python3 lspec.py start live-spec.html` and read everything it prints, every line, to the "==== end" marker. If you did not see that marker the output was cut off: read live-spec.html in full another way. No ranged views, no search instead of reading.
+run `python3 lspec.py start live-spec.html` and read everything it prints, every line, to the end of its output. The "==== end live-spec.html ====" marker closes the delivered file; if you did not see it the output was cut off: read live-spec.html in full another way. No ranged views, no search instead of reading.
 
 This repo lives to serve the development of ./live-spec.html
 ./live-spec.html has a friend, lspec.py, that does what it says on the tin; the pre-commit hook in ./hooks runs `check` on every commit.

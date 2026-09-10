@@ -14,7 +14,8 @@
   lspec impact BASE                elements changed / moved / removed since BASE,
                                    and the dependent claims each puts in question
   lspec mv OLD NEW                 rename a file or an anchor with reference repair;
-                                   leaves an inspectable diff, never commits
+                                   never commits (a file rename is staged for one
+                                   commit; an anchor rename is left as a diff)
   lspec review CLAIM... [-m MSG]   record a review event: commit typed `review:`
                                    naming the dependent claims, empty when clean
 
@@ -694,8 +695,7 @@ def cmd_check(args):
         derive(s)
         counts = ", ".join(f"{n} {g[0]}" for g, n in s.count_groups) or "no counts declared"
         print(f"PASS — {len(col.specs)} file(s); {rel(col.main)}: {counts}; "
-              f"anchors resolve, no dup ids, cells <= {CELL_WORD_CAP}w, "
-              f"no volatile refs, split rows reconcile")
+              f"all structural checks green")
     if args.neighborhood:
         print()
         neighborhood(col, *col.parse_target(args.neighborhood))

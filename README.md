@@ -71,3 +71,4 @@ Hooks do not clone with the repo, so run `python3 lspec.py check` in CI as well.
 Every session-event is a commit; a clean full sweep is an empty `audit:` commit
 (`git commit --allow-empty`); a recorded review is a `review:` commit naming its targets.
 History lives in git, never in the document body.
+# probe

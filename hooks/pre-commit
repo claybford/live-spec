@@ -9,8 +9,13 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 git checkout-index -a --prefix="$tmp/"
 cd "$tmp"
-export GIT_DIR="$root/.git" GIT_WORK_TREE="$root"
-if ! python3 "$root/lspec.py" check "$main"; then
-  echo "pre-commit: lspec check failed; fix or commit with --no-verify" >&2
+# Stamps and diffs speak about the staged tree, not the working tree.
+export GIT_DIR="$root/.git" GIT_WORK_TREE="$tmp"
+# Gate with the checker being committed, falling back to the working-tree one
+# (e.g. the commit that first adds lspec.py to a repo that already has specs).
+tool="$tmp/lspec.py"
+[ -f "$tool" ] || tool="$root/lspec.py"
+if ! python3 "$tool" check "$main"; then
+  echo "pre-commit: lspec check failed; red blocks the commit (dl-hook)" >&2
   exit 1
 fi

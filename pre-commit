@@ -1,0 +1,16 @@
+#!/bin/sh
+# lspec pre-commit hook: run `lspec check` against the *staged* tree.
+# Red blocks the commit (dl-hook). Install:  ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
+# Hooks do not clone; run the same check in CI.
+set -e
+root=$(git rev-parse --show-toplevel)
+main=${LSPEC_MAIN:-live-spec.html}
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+git checkout-index -a --prefix="$tmp/"
+cd "$tmp"
+export GIT_DIR="$root/.git" GIT_WORK_TREE="$root"
+if ! python3 "$root/lspec.py" check "$main"; then
+  echo "pre-commit: lspec check failed; fix or commit with --no-verify" >&2
+  exit 1
+fi

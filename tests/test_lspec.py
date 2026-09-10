@@ -195,7 +195,7 @@ class G(unittest.TestCase):
 
     def test_show_and_graph(self):
         d = repo(); rc, out = cli(d, "show", "motor.html#power", "--text")
-        self.assertEqual(out.strip(), "120 kW, see main.")
+        self.assertIn("basis ", out); self.assertIn("120 kW, see main.", out)
         rc, out = cli(d, "show", "--graph", "main.html")
         self.assertIn("motor.html  <- main.html (dl-split-motor)", out)
         self.assertIn("main.html#claim -> motor.html#power", out)
@@ -250,6 +250,8 @@ class W(unittest.TestCase):
         self.assertIn('href="sub/motor.html#power"', m); self.assertNotIn("\\", m)
         self.assertIn('href="../main.html#claim"', open(os.path.join(d, "sub", "motor.html")).read())
         commit(d, "docs: move")
+        edit(d, os.path.join("sub", "motor.html"), "120 kW", "105 kW")
+        commit(d, "docs: derate")
         with p1, p2:
             rc, out = cli(d, "review", "main.html#claim")
         self.assertEqual(rc, 0, out); self.assertNotIn("\\", sh("git", "log", "-1", "--format=%s", cwd=d))
@@ -378,6 +380,148 @@ class H(unittest.TestCase):
     def test_colon_form_still_rejected(self):
         rc, out = run(motor_extra='<ul data-count="h3:sessions"><li>a</li></ul>')
         self.assertIn("bad data-count declaration 'h3:sessions'", out)
+
+
+class N(unittest.TestCase):
+    """Regressions from the consolidated review."""
+
+    def _two_claims(self):
+        """Two dependents sharing one href; claim is a name-prefix of claim2."""
+        d = repo()
+        edit(d, "main.html", "motor power</a>.</p>",
+             'motor power</a>.</p>\n<p id="claim2">Also <a rel="depends-on" href="motor.html#power">power</a>.</p>')
+        commit(d, "docs: add claim2")
+        edit(d, "motor.html", "120 kW", "105 kW")
+        commit(d, "docs: derate")
+        return d
+
+    def test_review_names_match_exactly(self):
+        d = self._two_claims()
+        rc, out = cli(d, "review", "main.html#claim2")
+        self.assertEqual(rc, 0, out)
+        rc, out = cli(d, "impact", "HEAD")
+        outstanding = out.split("OUTSTANDING")[1]
+        self.assertIn("main.html#claim ", outstanding)   # trailing space: not claim2
+        self.assertNotIn("claim2", outstanding)
+
+    def test_shared_href_inherits_first_introduction(self):
+        """Pinned approximation: per-href pickaxe gives both claims the first
+        link's introduction commit (safe direction: spurious-owed, never cleared)."""
+        d = self._two_claims()
+        rc, out = cli(d, "impact", "HEAD")
+        first = sh("git", "log", "--format=%h", "--reverse", cwd=d).split()[0]
+        self.assertEqual(out.count(f"baseline {first} (introduced)"), 2)
+
+    def test_review_refuses_when_nothing_owed(self):
+        d = repo(); rc, out = cli(d, "review", "main.html#claim")
+        self.assertEqual(rc, 2); self.assertIn("nothing is owed", out)
+
+    def test_review_refuses_unrelated_staged_changes(self):
+        d = repo(); edit(d, "motor.html", "120 kW", "105 kW"); commit(d, "docs: derate")
+        open(os.path.join(d, "notes.txt"), "w").write("x")
+        sh("git", "add", "notes.txt", cwd=d)
+        rc, out = cli(d, "review", "main.html#claim")
+        self.assertEqual(rc, 2); self.assertIn("unrelated", out)
+
+    def test_invalid_base_exits_2(self):
+        d = repo()
+        rc, out = cli(d, "impact", "nonsense123")
+        self.assertEqual(rc, 2); self.assertIn("cannot resolve", out)
+        rc, out = cli(d, "check", "--diff", "nonsense123")
+        self.assertEqual(rc, 2); self.assertIn("cannot resolve", out)
+
+    def test_dirty_detected_from_subdirectory(self):
+        d = repo(); sub = os.path.join(d, "sub"); os.makedirs(sub)
+        edit(d, "motor.html", "120 kW", "105 kW")   # uncommitted
+        cwd = os.getcwd(); os.chdir(sub)
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                lspec.main(["lspec", "--main", "../main.html", "start"])
+        finally:
+            os.chdir(cwd)
+        self.assertIn("[uncommitted]", out.getvalue())
+
+    def test_show_graph_standalone(self):
+        d = repo(); rc, out = cli(d, "show", "--graph")
+        self.assertEqual(rc, 0, out); self.assertIn("collection:", out)
+
+    def test_inbound_load_hint_and_empty_none(self):
+        d = repo()
+        open(os.path.join(d, "sub.html"), "w").write(
+            '<html><body><main><p id="sclaim">x <a rel="depends-on" href="motor.html#power">p</a></p></main></body></html>')
+        edit(d, "motor.html", "\n</main>",
+             '\n<table><tr id="dl-split-sub"><td><a href="sub.html">s</a> holds sub</td>'
+             '<td>keep in motor</td><td>own clock.</td></tr></table>\n</main>')
+        commit(d, "docs: split sub")
+        rc, out = cli(d, "neighbors", "motor.html#power")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("inbound (2):", out)
+        self.assertIn("sub.html#sclaim [depends-on]  (load whole: lspec show sub.html)", out)
+        rc, out = cli(d, "neighbors", "main.html#top")
+        self.assertIn("inbound (0): none", out)
+
+    def test_mv_anchor_repairs_dot_slash_href(self):
+        d = repo()
+        edit(d, "main.html", 'href="motor.html#power"', 'href="./motor.html#power"')
+        commit(d, "docs: dot-slash")
+        rc, out = cli(d, "mv", "motor.html#power", "motor.html#rated")
+        self.assertEqual(rc, 0, out)
+        self.assertIn('href="motor.html#rated"', open(os.path.join(d, "main.html")).read())
+        rc, out = cli(d, "check"); self.assertEqual(rc, 0, out)
+
+    def test_mv_file_stages_rename_and_repairs(self):
+        d = repo(); rc, out = cli(d, "mv", "motor.html", "drive.html")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(sh("git", "diff", "--name-only", cwd=d), "")   # nothing unstaged
+        staged = sh("git", "diff", "--cached", "--name-status", cwd=d)
+        self.assertIn("R", staged); self.assertIn("drive.html", staged)
+
+    def test_composite_numerals(self):
+        items = "".join("<li>x</li>" for _ in range(21))
+        good = f'</table><p>the twenty-one modes</p><ol data-count="modes">{items}</ol><table>'
+        rc, out = run(main_extra=good)
+        self.assertEqual(rc, 0, out)
+        spaced = f'</table><p>the twenty one modes</p><ol data-count="modes">{items}</ol><table>'
+        rc, out = run(main_extra=spaced)
+        self.assertEqual(rc, 0, out)
+        bad = f'</table><p>the twenty modes</p><ol data-count="modes">{items}</ol><table>'
+        rc, out = run(main_extra=bad)
+        self.assertIn('"twenty modes" contradicts enumeration (= 21)', out)
+
+    def test_rows_found_with_reordered_attrs_and_colspan(self):
+        rc, out = run(main_extra='<tr class="x" id="dl-long"><td>s</td><td>r</td><td colspan="2">'
+                      + "w " * 41 + '</td></tr>')
+        self.assertEqual(rc, 1); self.assertIn("[cell] main.html: dl-long", out)
+
+    def test_split_row_with_reordered_attrs(self):
+        row = ('<tr class="s" id="dl-split-extra"><td><a href="extra.html">x</a> holds it</td>'
+               '<td>keep in main</td><td>own clock.</td></tr>')
+        rc, out = run(main_extra=row, motor_extra='<a href="extra.html">e</a>',
+                      files={"extra.html": '<p id="a">x</p>'})
+        self.assertEqual(rc, 0, out); self.assertIn("3 file(s)", out)
+
+    def test_void_element_anchor_resolves_cross_file(self):
+        rc, out = run(main_extra='</table><a href="motor.html#sep">s</a><table>',
+                      motor_extra='<hr id="sep">')
+        self.assertEqual(rc, 0, out)
+
+    def test_neighbors_on_void_element(self):
+        d = repo()
+        edit(d, "motor.html", "\n</main>", '\n<hr id="sep">\n</main>')
+        rc, out = cli(d, "neighbors", "motor.html#sep")
+        self.assertEqual(rc, 0, out); self.assertIn("PASS target exists", out)
+
+    def test_broken_pipe_exits_nonzero(self):
+        import unittest.mock as mock
+        d = repo(); cwd = os.getcwd(); os.chdir(d)
+        try:
+            with mock.patch("builtins.print", side_effect=BrokenPipeError), \
+                 mock.patch("os.dup2"):
+                rc = lspec.main(["lspec", "--main", "main.html", "check"])
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 1)
 
 
 class L(unittest.TestCase):

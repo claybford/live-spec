@@ -6,22 +6,24 @@
   lspec check [MAIN] [--diff BASE] [--neighborhood TARGET]
                                    structural checks; optionally the neighborhood
                                    of every element changed since BASE, or of TARGET
-  lspec show TARGET [--text]       the exact element (or its normalized text)
+  lspec show TARGET [--text]       the exact element (or its normalized text);
+                                   a bare FILE delivers it whole; --graph prints
+                                   the collection graph (no target needed)
   lspec neighbors TARGET           inbound, outbound, counterparts, dependents;
                                    mechanical results and reviews owed
   lspec impact BASE                elements changed / moved / removed since BASE,
                                    and the dependent claims each puts in question
   lspec mv OLD NEW                 rename a file or an anchor with reference repair;
                                    leaves an inspectable diff, never commits
-  lspec review TARGET... [-m MSG]  record a review event: commit typed `review:`
+  lspec review CLAIM... [-m MSG]   record a review event: commit typed `review:`
                                    naming the dependent claims, empty when clean
 
 TARGET is `path#id` (path relative to cwd) or `#id` in MAIN. MAIN defaults to
 live-spec.html when present; pass --main to override. Read-only verbs never
 touch files or git; mv edits files, review commits — nothing else does.
 
-Exit 0 = pass. 1 = a check failed or reviews are owed (impact/neighbors report
-only; exit 0). 2 = unreadable input, bad target, or refused operation.
+Exit 0 = pass. 1 = a check failed (impact/neighbors only report owed reviews;
+they exit 0). 2 = unreadable input, bad target, or refused operation.
 
 WHAT IS PROVED. A link resolves; an id is unique; a stated count matches its
 enumeration; a cell is within cap; a file is justified by exactly one split row;
@@ -40,7 +42,11 @@ A#S; if none, the commit that introduced the link. Review is owed iff B#T's
 normalized text at HEAD differs from its text in the baseline tree (or B#T is
 gone). Uncommitted changes never clear anything and are flagged. A renamed
 target has no history under its new id, so it is owed (address-only when its
-text is unchanged) — a rename resets review.
+text is unchanged) — a rename resets review. The introduction fallback is a
+per-href pickaxe: two claims sharing one href inherit the first link's
+introduction commit, and a plain link upgraded to depends-on inherits the old
+introduction — both err toward a spurious obligation, the safe direction; an
+explicit `review:` commit sets a precise baseline.
 
 STAMP (dl-concurrency). Every run reports the commit it was computed against
 and whether the working tree differs.
@@ -55,9 +61,11 @@ import sys
 from html.parser import HTMLParser
 
 CELL_WORD_CAP = 40
+# Word numerals resolve through twenty-nine (spaced or hyphenated composites).
 NUM = ("zero one two three four five six seven eight nine ten eleven twelve "
        "thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty").split()
 WORD2NUM = {w: i for i, w in enumerate(NUM)}
+WORD2NUM.update({f"twenty-{NUM[i]}": 20 + i for i in range(1, 10)})
 VOID = {"br", "hr", "meta", "link", "img", "input", "col", "wbr", "source"}
 READ_ONLY = ["start", "check", "show", "neighbors", "impact"]
 MUTATING = ["mv", "review"]
@@ -105,6 +113,9 @@ class Spec(HTMLParser):
         if a.get("data-count"):
             self.count_decls.append((a["data-count"], self._off(), tag))
         if tag in VOID:
+            if eid and eid not in self.elems:
+                start = self._off()
+                self.elems[eid] = (start, self.raw.find(">", start) + 1)
             return
         parent = self._stack[-1][1] if self._stack else None
         self._stack.append((tag, eid or parent, eid, self._off()))
@@ -146,7 +157,11 @@ class Spec(HTMLParser):
         return [l for l in self.links if s <= l["off"] < e]
 
     def rows(self, prefix="dl-"):
-        return re.findall(rf'<tr id="({prefix}[^"]+)">(.*?)</tr>', self.body, re.S)
+        """Decision-log rows from the parser's element spans, so attribute
+        order and extra attributes on <tr>/<td> cannot hide a row."""
+        out = [(s, eid, self.raw[s:e]) for eid, (s, e) in self.elems.items()
+               if self.tags.get(eid) == "tr" and eid.startswith(prefix)]
+        return [(eid, row) for _, eid, row in sorted(out)]
 
 
 def norm(fragment, sep=" "):
@@ -238,15 +253,44 @@ def stamp(paths):
         return "basis: not a git checkout", False
 
 
+def require_commit(base):
+    """BASE must name a real commit, or diffs silently become all-ADDED noise."""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
+                           capture_output=True, text=True)
+        return r.returncode == 0
+    except OSError:
+        return False
+
+
+def uncommitted(rels):
+    """-> (stamp line, set of canonical paths with uncommitted changes).
+    Porcelain paths are repo-root-relative; resolve them against the root so
+    running from a subdirectory flags the same paths."""
+    line, dirty = stamp(rels)
+    paths = set()
+    if dirty:
+        root = repo_root() or os.getcwd()
+        for ln in git("status", "--porcelain", "--", *rels, check=False).splitlines():
+            paths.add(canon(os.path.join(root, ln[3:].split(" -> ")[-1].strip('"'))))
+    return line, paths
+
+
 def review_baseline(a_path, src, href):
     """Newest review commit naming a_path#src, else the commit introducing the
-    link; None if the link is not in history."""
-    name = re.escape(f"{repo_rel(a_path)}#{src}")
-    out = git("log", "-1", "--format=%H", "-E", f"--grep=^review:.*{name}", check=False)
-    if out.strip():
-        return out.strip(), "review"
+    link; None if the link is not in history. Names are matched exactly after
+    splitting the subject's list — a review of A#p19 is not a review of A#p1."""
+    name = f"{repo_rel(a_path)}#{src}"
+    root = repo_root()
+    out = git("log", "--format=%H%x00%s", "--grep=^review:", check=False, cwd=root)
+    for line in out.splitlines():
+        sha, _, subject = line.partition("\x00")
+        named = [n.strip() for n in subject.removeprefix("review:").split(",")]
+        if name in named:
+            return sha, "review"
+    # pathspecs are cwd-relative; run from the root so repo_rel paths hold
     out = git("log", "--format=%H", "--reverse", "-S", f'href="{href}"', "--",
-              repo_rel(a_path), check=False)
+              repo_rel(a_path), check=False, cwd=root)
     first = out.split()[0] if out.split() else None
     return first, "introduced"
 
@@ -272,7 +316,7 @@ class Collection:
                 self.fails.append(f"[collection] cannot read {rel(p)}: {e}")
                 continue
             for rid, row in self.specs[p].rows("dl-split-"):
-                tds = re.findall(r"<td>(.*?)</td>", row, re.S)
+                tds = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S)
                 files = re.findall(r'href="([^"#]+\.html)(?:#[^"]*)?"', tds[0]) if tds else []
                 if len(files) != 1:
                     self.fails.append(f"[split] {rid} in {rel(p)}: selection "
@@ -339,8 +383,8 @@ def html_files(root):
     """All .html under root. In a git checkout: tracked plus untracked files
     that .gitignore does not exclude (nested repos are skipped by git itself).
     Otherwise a plain walk skipping dot-directories."""
-    r = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z",
-                        "--", root], capture_output=True, text=True)
+    r = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard",
+                        "--full-name", "-z", "--", root], capture_output=True, text=True)
     if r.returncode == 0:
         top = repo_root()
         return sorted(canon(os.path.join(top, y)) for y in r.stdout.split("\0")
@@ -395,21 +439,36 @@ def _direct_children(raw, start, end, kinds=("li", "tr")):
     return n
 
 
-def count_checksums(spec, facts, fails, rel):
+NUMTOK = r"([A-Za-z]+(?:-[A-Za-z]+)?)"
+
+
+def _numval(far, near):
+    """-> (value, token) of a one- or two-token numeral before a noun, else
+    (None, None). 'twenty one' and 'twenty-one' resolve as composites."""
+    if near in WORD2NUM:
+        if far == "twenty" and 0 < WORD2NUM[near] < 10:
+            return 20 + WORD2NUM[near], f"{far} {near}"
+        return WORD2NUM[near], near
+    if far in WORD2NUM:
+        return WORD2NUM[far], far
+    return None, None
+
+
+def count_checksums(spec, facts, fails, where):
     for e in getattr(spec, "count_errors", []):
-        fails.append(f"[count] {rel}: {e}")
+        fails.append(f"[count] {where}: {e}")
     plan = sorted(facts.items(), key=lambda kv: -len(kv[0]))   # longest noun first
     for noun, n in plan:
         seen = False
-        for m in re.finditer(rf"(\w+)\s+(?:(\w+)\s+)?{noun}\b", spec.body, re.I):
-            near, far = (m.group(2) or "").lower(), m.group(1).lower()
-            tok = near if near in WORD2NUM else far
-            if tok in WORD2NUM:
+        for m in re.finditer(rf"{NUMTOK}\s+(?:{NUMTOK}\s+)?{noun}\b", spec.body, re.I):
+            far, near = m.group(1).lower(), (m.group(2) or "").lower()
+            val, tok = _numval(far, near)
+            if val is not None:
                 seen = True
-                if WORD2NUM[tok] != n:
-                    fails.append(f'[count] {rel}: "{tok} {noun}" contradicts enumeration (= {n})')
+                if val != n:
+                    fails.append(f'[count] {where}: "{tok} {noun}" contradicts enumeration (= {n})')
         if n and not seen:
-            fails.append(f'[count] {rel}: no numeric "{noun}" claim to check against '
+            fails.append(f'[count] {where}: no numeric "{noun}" claim to check against '
                          f'its enumeration (= {n})')
 
 
@@ -457,7 +516,7 @@ def check_structure(col):
                              f"— the dependent claim cannot be named")
         count_checksums(s, derive(s), fails, r)
         for rid, row in s.rows():
-            tds = re.findall(r"<td>(.*?)</td>", row, re.S)
+            tds = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S)
             if len(tds) >= 3 and words(tds[2]) > CELL_WORD_CAP:
                 fails.append(f"[cell] {r}: {rid} reason {words(tds[2])} words > {CELL_WORD_CAP}")
         n = volatile_ordinals(s, col.specs)
@@ -511,50 +570,57 @@ def owed_reviews(col, dirty_paths=None):
         return [{"dependent": (fp, l["src"]), "target": (tp, fr), "kind": "unknown",
                  "baseline": None, "note": "not a git checkout"}
                 for fp, l, tp, fr in col.depends_on_edges()]
-    cache = {}
+    cache, seen = {}, {}
     for fp, l, tp, fr in col.depends_on_edges():
         if l["src"] is None:
             continue
         base, how = review_baseline(fp, l["src"], l["href"])
+        pair = (fp, l["src"], tp, fr)
         rec = {"dependent": (fp, l["src"]), "target": (tp, fr), "baseline": base, "how": how}
         if base is None:
             rec.update(kind="new", note="link not yet committed")
-            owed.append(rec)
-            continue
-        key = (base, tp)
-        if key not in cache:
-            cache[key] = file_at(base, tp)
-        head_key = ("HEAD", tp)
-        if head_key not in cache:
-            cache[head_key] = file_at("HEAD", tp)
-        bspec, hspec = cache[key], cache[head_key]
-        if hspec is None or fr not in hspec.elems:
-            rec.update(kind="removed", note=f"{addr(tp, fr)} not at HEAD")
-            owed.append(rec)
-            continue
-        btext = bspec.text(fr) if bspec else None
-        htext = hspec.text(fr)
-        if btext is None:
-            # id absent at baseline: renamed or new -> address-only if some element had this text
-            same = [i for i in (bspec.elems if bspec else []) if bspec.text(i) == htext]
-            rec.update(kind="address", note=f"id absent at baseline"
-                       + (f" (text matches former {same[0]!r})" if same else ""))
-            owed.append(rec)
-        elif btext != htext:
-            rec.update(kind="content", note=(btext, htext))
-            owed.append(rec)
-        # moved source: same href in baseline file under a different source id
-        bfp = cache.setdefault((base, fp), file_at(base, fp))
-        if bfp:
-            prior = [x["src"] for x in bfp.links if x["href"] == l["href"]]
-            if prior and l["src"] not in prior:
-                owed.append({"dependent": (fp, l["src"]), "target": (tp, fr), "baseline": base,
-                             "how": how, "kind": "source-moved",
-                             "note": f"claim was {prior[0]!r} at baseline"})
+            owed.append(rec); seen[pair] = rec
+        else:
+            key = (base, tp)
+            if key not in cache:
+                cache[key] = file_at(base, tp)
+            head_key = ("HEAD", tp)
+            if head_key not in cache:
+                cache[head_key] = file_at("HEAD", tp)
+            bspec, hspec = cache[key], cache[head_key]
+            if hspec is None or fr not in hspec.elems:
+                rec.update(kind="removed", note=f"{addr(tp, fr)} not at HEAD")
+                owed.append(rec); seen[pair] = rec
+                continue
+            btext = bspec.text(fr) if bspec else None
+            htext = hspec.text(fr)
+            if btext is None:
+                # id absent at baseline: renamed or new -> address-only if some element had this text
+                same = [i for i in (bspec.elems if bspec else []) if bspec.text(i) == htext]
+                rec.update(kind="address", note=f"id absent at baseline"
+                           + (f" (text matches former {same[0]!r})" if same else ""))
+                owed.append(rec); seen[pair] = rec
+            elif btext != htext:
+                rec.update(kind="content", note=(btext, htext))
+                owed.append(rec); seen[pair] = rec
+            # moved source: same href in baseline file under a different source id —
+            # reported only when the pair owes nothing else (one line per obligation)
+            bfp = cache.setdefault((base, fp), file_at(base, fp))
+            if bfp and pair not in seen:
+                prior = [x["src"] for x in bfp.links if x["href"] == l["href"]]
+                if prior and l["src"] not in prior:
+                    rec = {"dependent": (fp, l["src"]), "target": (tp, fr), "baseline": base,
+                           "how": how, "kind": "source-moved",
+                           "note": f"claim was {prior[0]!r} at baseline"}
+                    owed.append(rec); seen[pair] = rec
         if dirty_paths and tp in dirty_paths:
-            owed.append({"dependent": (fp, l["src"]), "target": (tp, fr), "baseline": base,
-                         "how": how, "kind": "uncommitted",
-                         "note": "target has uncommitted changes; nothing clears until committed"})
+            if pair in seen:
+                seen[pair]["dirty"] = True
+            else:
+                rec = {"dependent": (fp, l["src"]), "target": (tp, fr), "baseline": base,
+                       "how": how, "kind": "uncommitted",
+                       "note": "target has uncommitted changes; nothing clears until committed"}
+                owed.append(rec); seen[pair] = rec
     return owed
 
 
@@ -566,6 +632,8 @@ def print_owed(owed, prefix="REVIEW", col=None):
     for r in owed:
         d, t = r["dependent"], r["target"]
         line = f"  {addr(*d)}  depends-on {addr(*t)}  [{r['kind']}]"
+        if r.get("dirty"):
+            line += "  [target has uncommitted changes; nothing clears until committed]"
         if col:
             line += load_hint(col, d[0], t[0])
         if r["kind"] == "content":
@@ -632,6 +700,10 @@ def cmd_check(args):
         print()
         neighborhood(col, *col.parse_target(args.neighborhood))
     if args.diff:
+        if not require_commit(args.diff):
+            print(f"lspec check: cannot resolve --diff base {args.diff!r} to a commit",
+                  file=sys.stderr)
+            return 2
         changed = changed_targets(col, args.diff)
         print(f"\nneighborhoods of {len(changed)} element(s) changed since {args.diff}:")
         for p, frag in changed:
@@ -651,13 +723,17 @@ def changed_targets(col, base):
 
 def cmd_show(args):
     col = load(args)
+    print(stamp([rel(x) for x in col.specs])[0])
+    if args.graph:
+        print_graph(col)
+        return 0
+    if not args.target:
+        print("lspec show: a target is required unless --graph", file=sys.stderr)
+        return 2
     try:
         p, frag = col.parse_target(args.target)
     except ValueError as e:
         print(f"lspec show: {e}", file=sys.stderr); return 2
-    if args.graph:
-        print_graph(col)
-        return 0
     if not frag:
         deliver(p, col.specs[p].raw)
         return 0
@@ -719,9 +795,10 @@ def neighborhood(col, p, frag):
             if back:
                 counter.append(addr(t, fr))
     print("EDGES")
-    print(f"  inbound ({len(inbound)}):  " + ", ".join(
+    print(f"  inbound ({len(inbound)}): " + (", ".join(
         f"{addr(fp, l['src'])}{' [depends-on]' if l['rel']=='depends-on' else ''}"
-        for fp, l in inbound) or "  inbound: none")
+        f"{load_hint(col, fp)}"
+        for fp, l in inbound) or "none"))
     outs = [addr(resolve(p, l['href'])[0] or p, resolve(p, l['href'])[1])
             for l in outbound if resolve(p, l["href"]) != (None, None)]
     print(f"  outbound ({len(outs)}): " + ", ".join(outs))
@@ -749,8 +826,12 @@ def cmd_impact(args):
     col = load(args)
     if repo_root() is None:
         print("lspec impact: not a git checkout", file=sys.stderr); return 2
-    print(stamp([rel(x) for x in col.specs])[0])
     base = args.base
+    if not require_commit(base):
+        print(f"lspec impact: cannot resolve base {base!r} to a commit", file=sys.stderr)
+        return 2
+    line, dpaths = uncommitted([rel(x) for x in col.specs])
+    print(line)
     any_change = False
     for p, s in col.specs.items():
         cls = classify(s, file_at(base, p))
@@ -773,6 +854,7 @@ def cmd_impact(args):
                         print(f"  REVIEW {addr(fp, l['src'])}  depends-on {addr(p, fr)}"
                               f"  [target {'removed' if st == 'removed' else 'renamed'}]")
     # moved sources since base
+    moved = set()
     for p, s in col.specs.items():
         b = file_at(base, p)
         if not b:
@@ -783,11 +865,14 @@ def cmd_impact(args):
             prior = [x["src"] for x in b.links if x["href"] == l["href"]]
             if prior and l["src"] not in prior:
                 any_change = True
+                moved.add((p, l["src"]))
                 print(f"SOURCE-MOVED {addr(p, l['src'])}  (was #{prior[0]})  depends-on {l['href']}")
     if not any_change:
         print(f"no element changed since {base}")
     print()
-    print_owed(owed_reviews(col), prefix="OUTSTANDING (against review baselines)", col=col)
+    owed = [r for r in owed_reviews(col, dpaths)
+            if not (r["kind"] == "source-moved" and r["dependent"] in moved)]
+    print_owed(owed, prefix="OUTSTANDING (against review baselines)", col=col)
     return 0
 
 
@@ -806,15 +891,11 @@ def cmd_start(args):
     rc = cmd_check(argparse.Namespace(main=args.main, neighborhood=None, diff=None))
     print()
     rels = [rel(x) for x in col.specs]
-    _, dirty = stamp(rels)
-    dirty_paths = set()
-    if dirty:
-        for line in git("status", "--porcelain", "--", *rels, check=False).splitlines():
-            dirty_paths.add(canon(line[3:].strip()))
+    _, dirty_paths = uncommitted(rels)
     print_owed(owed_reviews(col, dirty_paths), col=col)
     print("\nverbs — read-only: " + " ".join(READ_ONLY) + "   mutating: " + " ".join(MUTATING))
     print("  start MAIN [--with FILE…] · check [--diff BASE] [--neighborhood T] · show T [--text] | show FILE (whole) | show --graph · "
-          "neighbors T · impact BASE · mv OLD NEW · review T... [-m MSG]")
+          "neighbors T · impact BASE · mv OLD NEW · review CLAIM... [-m MSG]")
     return rc
 
 
@@ -855,13 +936,14 @@ def mv_anchor(col, old, new):
         print(f"lspec mv: id {nfrag!r} already exists in {rel(p)} (collision)",
               file=sys.stderr); return 2
     touched = {}
-    touched[p] = rewrite(p, [(rf'\bid="{re.escape(frag)}"', f'id="{nfrag}"'),
+    touched[p] = rewrite(p, [(rf'(?<![-\w])id="{re.escape(frag)}"', f'id="{nfrag}"'),
                              (rf'href="#{re.escape(frag)}"', f'href="#{nfrag}"')])
     for q in col.specs:
         if q == p:
             continue
         r = posix(os.path.relpath(p, os.path.dirname(q)))
-        n = rewrite(q, [(rf'href="{re.escape(r)}#{re.escape(frag)}"', f'href="{r}#{nfrag}"')])
+        n = rewrite(q, [(rf'href="(?:\./)?{re.escape(r)}#{re.escape(frag)}"',
+                         f'href="{r}#{nfrag}"')])
         if n:
             touched[q] = n
     print(f"renamed {addr(p, frag)} -> {addr(p, nfrag)}")
@@ -882,7 +964,7 @@ def mv_file(col, old, new):
         print("lspec mv: renaming main; update your instruction file's `lspec start` line "
               "by hand", file=sys.stderr)
     if repo_root():
-        git("mv", repo_rel(op), repo_rel(np_))
+        git("mv", repo_rel(op), repo_rel(np_), cwd=repo_root())
     else:
         os.rename(op, np_)
     touched = {}
@@ -908,10 +990,13 @@ def mv_file(col, old, new):
         n = rewrite(np_, pairs)
         if n:
             touched[np_] = n
+    if repo_root():
+        git("add", "--", *[repo_rel(q) for q in {np_, *touched}], cwd=repo_root())
     print(f"renamed {rel(op)} -> {rel(np_)}")
     for q, n in touched.items():
         print(f"  {rel(q)}: {n} reference(s) rewritten")
-    print("external references cannot be repaired; nothing committed")
+    print("external references cannot be repaired; the rename and its repairs are "
+          "staged — one commit records the rename")
     main = np_ if op == col.main else col.main
     return after_mv(main)
 
@@ -928,8 +1013,8 @@ def cmd_review(args):
     col = load(args)
     if repo_root() is None:
         print("lspec review: not a git checkout", file=sys.stderr); return 2
-    names, files = [], set()
-    for t in args.targets:
+    names, files, claims = [], set(), []
+    for t in args.claims:
         try:
             p, frag = col.parse_target(t)
         except ValueError as e:
@@ -942,10 +1027,25 @@ def cmd_review(args):
             print(f"lspec review: {addr(p, frag)} has no depends-on link; nothing to review",
                   file=sys.stderr); return 2
         names.append(f"{repo_rel(p)}#{frag}")
+        claims.append((p, frag))
         files.add(repo_rel(p))
         for l in deps:
             tgt, _ = resolve(p, l["href"])
             files.add(repo_rel(tgt or p))
+    # A review discharges an obligation; it never manufactures one.
+    _, dpaths = uncommitted([rel(x) for x in col.specs])
+    owed = {r["dependent"] for r in owed_reviews(col, dpaths)}
+    clear = [addr(p, f) for p, f in claims if (p, f) not in owed]
+    if clear:
+        print("lspec review: nothing is owed for " + ", ".join(clear)
+              + " — a review names the obligation it clears", file=sys.stderr)
+        return 2
+    # The commit carries the named claims and their targets, nothing else.
+    extra = set(git("diff", "--cached", "--name-only").splitlines()) - files
+    if extra:
+        print("lspec review: unrelated changes are staged (" + ", ".join(sorted(extra))
+              + "); commit or unstage them first", file=sys.stderr)
+        return 2
     fails = check_structure(col)
     if fails:
         print("lspec review: collection is red; a review must land on a green tree:",
@@ -953,7 +1053,7 @@ def cmd_review(args):
         for f in fails:
             print("  " + f, file=sys.stderr)
         return 2
-    git("add", "--", *sorted(files))
+    git("add", "--", *sorted(files), cwd=repo_root())
     subject = "review: " + ", ".join(names)
     msg = subject + (f"\n\n{args.message}" if args.message else "")
     git("commit", "--allow-empty", "-q", "-m", msg)
@@ -972,26 +1072,33 @@ def main(argv):
     s.add_argument("--with", dest="with_", nargs="+", metavar="FILE", help="also deliver these supporting specs whole")
     c = sub.add_parser("check"); c.add_argument("main_pos", nargs="?")
     c.add_argument("--diff", metavar="BASE"); c.add_argument("--neighborhood", metavar="TARGET")
-    sh = sub.add_parser("show"); sh.add_argument("target", help="path#id for an element; a bare path delivers the file whole")
+    sh = sub.add_parser("show"); sh.add_argument("target", nargs="?", help="path#id for an element; a bare path delivers the file whole; omit with --graph")
     sh.add_argument("--text", action="store_true"); sh.add_argument("--graph", action="store_true")
     n = sub.add_parser("neighbors"); n.add_argument("target")
     i = sub.add_parser("impact"); i.add_argument("base", nargs="?", default="HEAD")
     m = sub.add_parser("mv"); m.add_argument("old"); m.add_argument("new")
-    r = sub.add_parser("review"); r.add_argument("targets", nargs="+"); r.add_argument("-m", "--message")
+    r = sub.add_parser("review"); r.add_argument("claims", nargs="+", metavar="CLAIM",
+                                                 help="the dependent claim(s) reviewed, path#id")
+    r.add_argument("-m", "--message")
     args = ap.parse_args(argv[1:])
     if args.verb is None:
         args.verb = "check"; args.main_pos = None; args.diff = None; args.neighborhood = None
     if getattr(args, "main_pos", None):
         args.main = args.main_pos
     try:
-        return {"start": cmd_start, "check": cmd_check, "show": cmd_show,
-                "neighbors": cmd_neighbors, "impact": cmd_impact, "mv": cmd_mv,
-                "review": cmd_review}[args.verb](args)
+        rc = {"start": cmd_start, "check": cmd_check, "show": cmd_show,
+              "neighbors": cmd_neighbors, "impact": cmd_impact, "mv": cmd_mv,
+              "review": cmd_review}[args.verb](args)
+        sys.stdout.flush()   # surface EPIPE here, not at interpreter shutdown
+        return rc
     except RuntimeError as e:
         print(f"lspec {args.verb}: {e}", file=sys.stderr)
         return 2
     except BrokenPipeError:
-        return 0
+        # A truncated pipe must not read as success: drop further output and
+        # exit nonzero so `lspec check | head` cannot hide a red result.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 1
 
 
 if __name__ == "__main__":

@@ -128,6 +128,9 @@
        from what you received, or the tool reported any truncation, the delivery
        was cut: read the file in full another way before doing anything else.
        No ranged views, no search instead of reading.
+       This gates every request in the repo &mdash; questions and read-only
+       tasks included. If the request looks answerable without the load, load
+       anyway; search and partial reads are not a substitute.
        A supporting spec is loaded the same way: `lspec show FILE`, or read it
        whole. --&gt;
 

@@ -20,58 +20,39 @@ pattern operating, not just described.
 Open it in any browser, or read the raw HTML — single file, one water.css link, degrades
 to plain semantic markup with no network.
 
-**To use the pattern:** hand `live-spec.html` to an AI chat or coding agent along with
-the work you want captured — a system design, a plan, a project to monitor and maintain —
-and say "capture this into this format." The agent instantiates a living specification
-for it: a persistent, cross-session, human- and machine-readable definition that any
-future session (or you) can pick up cold. The spec's copy-the-seed instruction is for
-the agent; yours is just that one sentence.
+## Using the pattern
+
+Hand `live-spec.html` to an AI chat or coding agent along with the work you want
+captured — a system design, a plan, a project to monitor and maintain — and say
+"capture this into this format." The agent instantiates a living specification for it:
+a persistent, cross-session, human- and machine-readable definition that any future
+session (or you) can pick up cold. The spec's copy-the-seed instruction is for the
+agent; yours is just that one sentence.
+
+A spec stays one file until it earns a second: a split happens only when a session can
+write the decision-log row that justifies the new file, the main file is always the
+entry point, and a supporting spec is loaded only when work crosses into it (P19).
 
 ## The tool: `lspec.py`
 
-`lspec.py` is optional maintenance automation (stdlib only), like git. It is not part of
-the state: the spec reads without it, and the session protocol says what to do by hand.
-
-```
-python3 lspec.py start MAIN                 # deliver MAIN whole, build the collection, run checks, list owed reviews and verbs
-python3 lspec.py check [MAIN] [--diff BASE] [--neighborhood TARGET]
-python3 lspec.py show TARGET [--text|--graph]
-python3 lspec.py neighbors TARGET           # inbound, outbound, counterparts, dependents; mechanical results; reviews owed
-python3 lspec.py impact BASE                # elements changed / moved / removed since BASE and the claims each puts in question
-python3 lspec.py mv OLD NEW                 # rename a file or an anchor with reference repair; stages the rename, never commits
-python3 lspec.py review CLAIM... [-m MSG]   # record a review event: a `review:` commit naming the dependent claims
-```
-
-`TARGET` is `path#id`, or `#id` in MAIN (default `live-spec.html`); `CLAIM` is the
-address of the dependent claim — the end that owes the review, not its target.
-Read-only verbs never touch files or git; `mv` edits files, `review` commits, nothing
-else does.
-
-`check` covers what the spec's conventions make mechanical: anchors in-file and `path#id`
-across a collection, duplicate ids, count checksums (declared on the enumeration by
-`data-count="noun"` or `data-count="prefix=noun"`, so an instance checks its own nouns), over-cap decision cells, volatile `§`
-references, split-row bijection, `depends-on` links with no nameable source claim. Review
-obligations follow dl-reviewgit: a claim owes review when its target's text differs from
-the tree of the last `review:` commit naming it (or the commit that introduced the link);
-a renamed target is owed address-only; a moved source is reported; uncommitted changes
-never clear anything. Green means "not self-contradictory," not "correct." Every run is
-stamped with the commit it was computed against.
-
-Exit `0` pass, `1` a check failed, `2` unreadable input or a refused operation.
-
-**Hook.** `hooks/pre-commit` runs the staged copy of `lspec.py check` against the
-staged tree; red blocks the commit.
-
-```
-ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
-```
-
-Hooks do not clone with the repo, so run `python3 lspec.py check` in CI as well. Tests
-(tempdir fixtures with controlled defects, nothing committed): `python3 -m unittest tests.test_lspec`.
+`lspec.py` is optional maintenance automation (stdlib only), not part of the state:
+the spec reads without it, and the session protocol says what to do by hand. It feeds
+a session the spec whole (`lspec start`), runs the conventions the spec makes
+mechanical as a commit-time gate (`check`), computes owed reviews from git history
+(`neighbors`, `impact`), and makes renames and recorded reviews operations (`mv`,
+`review`). Green means "not self-contradictory," not "correct" — what it can't compute
+stays by-hand judgment. The semantics live in the spec and the tool's docstring;
+`lspec start` lists the verbs.
 
 ## Working on this repo
 
+An agent session starts with CLAUDE.md: run `python3 lspec.py start live-spec.html`
+and read everything it prints, to the end marker, before anything else.
+
 Every session-event is a commit; a clean full sweep is an empty `audit:` commit
-(`git commit --allow-empty`); a recorded review is a `review:` commit naming its targets.
-History lives in git, never in the document body.
-# probe
+(`git commit --allow-empty`); a recorded review is a `review:` commit naming the
+dependent claims it clears. History lives in git, never in the document body.
+
+The pre-commit hook runs the staged copy of `check`; red blocks the commit:
+`ln -sf ../../hooks/pre-commit .git/hooks/pre-commit`. Hooks don't clone, so run
+`python3 lspec.py check` in CI. Tests: `python3 -m unittest tests.test_lspec`.

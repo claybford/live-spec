@@ -489,6 +489,27 @@ class N(unittest.TestCase):
         rc, out = run(main_extra=bad)
         self.assertIn('"twenty modes" contradicts enumeration (= 21)', out)
 
+    def test_numerals_past_twenty(self):
+        def check(n, claim, expect):
+            items = "".join("<li>x</li>" for _ in range(n))
+            extra = f'</table><p>the {claim} modes</p><ol data-count="modes">{items}</ol><table>'
+            rc, out = run(main_extra=extra)
+            if expect == "ok":
+                self.assertEqual(rc, 0, out)
+            else:
+                self.assertIn(expect, out)
+        check(30, "thirty", "ok")
+        check(32, "thirty-two", "ok")
+        check(32, "thirty two", "ok")
+        check(99, "ninety-nine", "ok")
+        check(99, "ninety nine", "ok")
+        check(100, "one hundred", "ok")
+        check(100, "hundred", "ok")
+        check(300, "three hundred", "ok")
+        check(31, "thirty-two", '"thirty-two modes" contradicts enumeration (= 31)')
+        check(31, "thirty two", '"thirty two modes" contradicts enumeration (= 31)')
+        check(30, "twenty-nine", '"twenty-nine modes" contradicts enumeration (= 30)')
+
     def test_rows_found_with_reordered_attrs_and_colspan(self):
         rc, out = run(main_extra='<tr class="x" id="dl-long"><td>s</td><td>r</td><td colspan="2">'
                       + "w " * 41 + '</td></tr>')

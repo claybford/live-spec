@@ -62,11 +62,18 @@ import sys
 from html.parser import HTMLParser
 
 CELL_WORD_CAP = 40
-# Word numerals resolve through twenty-nine (spaced or hyphenated composites).
+# Word numerals resolve through ninety-nine and round hundreds (spaced or
+# hyphenated composites): units to twenty, tens, tens-units, "hundred".
 NUM = ("zero one two three four five six seven eight nine ten eleven twelve "
        "thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty").split()
+TENS = "thirty forty fifty sixty seventy eighty ninety".split()
 WORD2NUM = {w: i for i, w in enumerate(NUM)}
 WORD2NUM.update({f"twenty-{NUM[i]}": 20 + i for i in range(1, 10)})
+WORD2NUM.update({t: 30 + 10 * i for i, t in enumerate(TENS)})
+WORD2NUM.update({f"{t}-{NUM[u]}": 30 + 10 * i + u
+                 for i, t in enumerate(TENS) for u in range(1, 10)})
+WORD2NUM.update({"hundred": 100})
+TENS_WORDS = {"twenty", *TENS}
 VOID = {"br", "hr", "meta", "link", "img", "input", "col", "wbr", "source"}
 READ_ONLY = ["start", "check", "show", "neighbors", "impact"]
 MUTATING = ["mv", "review"]
@@ -449,10 +456,13 @@ NUMTOK = r"([A-Za-z]+(?:-[A-Za-z]+)?)"
 
 def _numval(far, near):
     """-> (value, token) of a one- or two-token numeral before a noun, else
-    (None, None). 'twenty one' and 'twenty-one' resolve as composites."""
+    (None, None). Tens-unit composites resolve spaced ('thirty one') or
+    hyphenated ('thirty-one'); units before 'hundred' multiply ('one hundred')."""
     if near in WORD2NUM:
-        if far == "twenty" and 0 < WORD2NUM[near] < 10:
-            return 20 + WORD2NUM[near], f"{far} {near}"
+        if near == "hundred" and 0 < WORD2NUM.get(far, 0) < 10:
+            return WORD2NUM[far] * 100, f"{far} {near}"
+        if far in TENS_WORDS and 0 < WORD2NUM[near] < 10:
+            return WORD2NUM[far] + WORD2NUM[near], f"{far} {near}"
         return WORD2NUM[near], near
     if far in WORD2NUM:
         return WORD2NUM[far], far

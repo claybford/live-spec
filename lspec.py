@@ -664,12 +664,18 @@ def print_owed(owed, prefix="REVIEW", col=None):
 
 def deliver(path, raw):
     """Print a spec whole, framed so truncation is detectable."""
-    print(f"==== {rel(path)} — {len(raw.splitlines())} lines, {len(raw)} bytes. "
-          f"Read every line to the end marker; it is a load unit ====")
+    r = rel(path)
+    print(f"==== {r} — {len(raw.splitlines())} lines, {len(raw)} bytes ====")
+    print(f'This header opens a whole-file delivery. Read every line that follows, '
+          f'down to the closing line "==== end {r} ====". If that closing line '
+          f'never appears, or your tool reported truncation, the delivery was cut: '
+          f'read the file in full by other means before doing anything else.')
     print(raw)
-    print(f"==== end {rel(path)} ====")
-    print("If the line above is not visible to you, this output was truncated: "
-          "read the file in full by other means before doing anything else.\n")
+    print(f"==== end {r} ====")
+    print(f'This closes a whole-file delivery that opened with a header line '
+          f'beginning "==== {r} —". If you did not see that header, or your tool '
+          f'reported truncation, the delivery was cut: read the file in full by '
+          f'other means before doing anything else.\n')
 
 
 def load_hint(col, *paths):

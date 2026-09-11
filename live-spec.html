@@ -122,9 +122,12 @@
      text a session sees before it has adopted any rule:
        READ THIS FIRST, BEFORE ANYTHING ELSE, DO NOT SKIP:
        run `lspec start MAIN` if it is installed, otherwise read MAIN; either
-       way every line, end to end, to the "==== end" marker or the last line.
-       No ranged views, no search instead of reading. If the end marker is
-       not visible to you the output was cut off: read the file another way.
+       way every line, end to end &mdash; from the opening header line beginning
+       "==== MAIN &mdash;" through the closing line "==== end MAIN ====" (reading
+       the file directly: to its last line). If either framing line is missing
+       from what you received, or the tool reported any truncation, the delivery
+       was cut: read the file in full another way before doing anything else.
+       No ranged views, no search instead of reading.
        A supporting spec is loaded the same way: `lspec show FILE`, or read it
        whole. --&gt;
 
@@ -471,6 +474,7 @@
 <tr id="dl-cli"><td>One tool, <code>lspec</code>, git-style verbs: <code>start &middot; check &middot; show &middot; neighbors &middot; impact</code> read-only, <code>mv &middot; review</code> mutating; the surface lives in <code>start</code>'s output, the document binds steps to verbs</td><td>A validator plus ad hoc scripts; one verb with a flag grammar; composable pipe tools; a command list in the document</td><td>Read/write separation as a property of the verb list needs no naming convention; verbs are discoverable from a tool signature, flags are not; a list in the document is a stale second home (<a href="#p1">P1</a>).</td></tr>
 <tr id="dl-graphderived"><td>The collection graph is a derived, disposable view built from current files; main is named as the argument to <code>start</code></td><td>A manifest or inventory kept by hand; a config file naming main; a marker inside the file</td><td>Every alternative is a second home for facts the files already state; a fact supplied once per session at the call site cannot drift; the graph is refreshed after every edit (<a href="#p1">P1</a>, <a href="#dl-nohist">dl-nohist</a>).</td></tr>
 <tr id="dl-concurrency"><td>Git serialization is the concurrency model: every tool result is stamped with its basis commit and flags uncommitted state; no locking</td><td>Locking or session tokens; merge machinery for concurrent agents; unstamped results</td><td>The fence excludes collaboration mechanics; git already forces the second committer to merge, and a stamped result lets a session detect its own staleness. A clobbered edit is a git merge problem, not a new one.</td></tr>
+<tr id="dl-framing"><td>Whole-file deliveries are framed at both ends; each frame line names its counterpart; completeness is a two-sided test (header and end marker visible, no truncation notice)</td><td>The end marker alone as the completeness test</td><td>A harness can cut the head of the output, leaving the end marker visible; the one-sided test then passes on a partial load and the session edits state it never read.</td></tr>
 </tbody>
 </table>
 

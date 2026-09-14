@@ -13,8 +13,8 @@ cornerstones, nineteen principles, the session protocol, and how the pattern map
 hardware, software, process, agentic, and project work, in both the forward-design and
 live-system regimes.
 
-It also *is* its own example: a live-system-regime spec that follows every rule it
-teaches, with its git history as the indexed external artifact. Reading it shows the
+It also *is* its own example: a live-system-regime spec applying the pattern to
+itself, with its git history as the indexed external artifact. Reading it shows the
 pattern operating, not just described.
 
 Open it in any browser, or read the raw HTML — single file, one water.css link, degrades
@@ -40,17 +40,19 @@ the spec reads without it, and the session protocol says what to do by hand. It 
 a session the spec whole (`lspec start`), runs the conventions the spec makes
 mechanical as a commit-time gate (`check`), computes owed reviews from git history
 (`neighbors`, `impact`), and makes renames and recorded reviews operations (`mv`,
-`review`). Green means "not self-contradictory," not "correct" — what it can't compute
-stays by-hand judgment. The semantics live in the spec and the tool's docstring;
-`lspec start` lists the verbs.
+`review`). Green means the implemented structural checks passed; semantic
+correctness and review adequacy require judgment. The semantics live in the spec
+and the tool's docstring; `lspec start` lists the verbs.
 
 ## Working on this repo
 
-An agent session starts with CLAUDE.md: run `python3 lspec.py start live-spec.html`
-and read everything it prints, to the end marker, before anything else.
+An agent session starts with AGENTS.md: run `python3 lspec.py start live-spec.html`
+and read everything it prints, from the opening header through the end marker,
+with no reported truncation, before anything else.
 
-Every session-event is a commit; a clean full sweep is an empty `audit:` commit
-(`git commit --allow-empty`); a recorded review is a `review:` commit naming the
+Every session-event is a commit; every full sweep takes an `audit:` commit. A
+clean sweep may update bookkeeping; use `git commit --allow-empty` only when no
+files change; a recorded review is a `review:` commit naming the
 dependent claims it clears. History lives in git, never in the document body.
 
 The pre-commit hook runs the staged copy of `check`; red blocks the commit:

@@ -19,6 +19,9 @@
   lspec review CLAIM... [-m MSG]   record a review event: commit typed `review:`
                                    naming the dependent claims, empty when clean
 
+neighbors requires an anchored TARGET; use `neighbors FILE --whole-file` for
+file-wide output.
+
 TARGET is `path#id` (path relative to cwd) or `#id` in MAIN. MAIN defaults to
 live-spec.html when present; pass --main to override. Read-only verbs never
 touch files or git; mv edits files, review commits — nothing else does.
@@ -26,8 +29,10 @@ touch files or git; mv edits files, review commits — nothing else does.
 Exit 0 = pass. 1 = a check failed (impact/neighbors only report owed reviews;
 they exit 0). 2 = unreadable input, bad target, or refused operation.
 
-WHAT IS PROVED. A link resolves; an id is unique; a stated count matches its
-enumeration; a cell is within cap; a file is justified by exactly one split row;
+WHAT IS CHECKED. Structural PASS does not establish semantic consistency or
+review clearance. A link resolves; an id is unique; a stated count matches its
+enumeration; each cell in a decision row (tr id="dl-…") is within the 40-word
+cap; a file is justified by exactly one split row;
 a depends-on target's rendered text differs from the text in the tree of the
 last review naming the dependent claim; a link's source id differs from the
 basis commit. Nothing here proves a claim true or a review adequate.
@@ -49,8 +54,35 @@ introduction commit, and a plain link upgraded to depends-on inherits the old
 introduction — both err toward a spurious obligation, the safe direction; an
 explicit `review:` commit sets a precise baseline.
 
+SPECIMENS. A pre block marked data-specimen="NAME" is decoded once and checked
+as a single-file specimen: local hyperlinks must use #fragment, never a file
+path, including rel="external" links. Remote URLs remain allowed. Local file
+links fail without consulting the surrounding tree. Ordinary pre blocks remain
+examples only.
+
+COUNTS. Declared enumerations are checked against every recognized assertion
+using integer digits or supported number words. Matching counts do not prove
+item identity or completeness if the assertion changes with the enumeration.
+
+CLAIMS. Both dependency source and target ids must enclose complete claims.
+A heading id covers only its title. Use a section around heading and prose,
+or a row around a tabular claim. The parser cannot judge semantic completeness.
+
+HISTORY. Unavailable trees or an unestablished baseline yield UNKNOWN, never
+clearance. A shallow boundary cannot establish link introduction. Fetch enough
+history (git fetch --unshallow for a shallow clone), or explicitly review the
+claim against committed state and record a new review. Structural checks and
+read-only report exit codes are independent of review clearance.
+
+DELIVERY. Frames name both boundaries; missing boundaries or a truncation notice
+invalidate delivery. Present frames do not prove comprehension or exclude silent
+internal omissions. The byte count is UTF-8. CLI help and start list operations;
+the spec binds protocol steps to them. The collection graph is rebuilt from
+files and split rows, never maintained as a separate manifest.
+
 STAMP (dl-concurrency). Every run reports the commit it was computed against
-and whether the working tree differs.
+and whether the working tree differs. Stamps expose a basis, not a lock; git
+does not prevent concurrent writes in a shared worktree.
 """
 
 import argparse
@@ -60,6 +92,7 @@ import re
 import subprocess
 import sys
 from html.parser import HTMLParser
+from types import SimpleNamespace
 
 CELL_WORD_CAP = 40
 # Word numerals resolve through ninety-nine and round hundreds (spaced or
@@ -211,7 +244,7 @@ def addr(path, frag):
 # =================================================================== git
 
 def git(*args, check=True, cwd=None):
-    r = subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd)
+    r = subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd, check=False)
     if check and r.returncode:
         raise RuntimeError(r.stderr.strip() or f"git {' '.join(args)} failed")
     return r.stdout
@@ -241,15 +274,36 @@ def repo_rel(path):
     """Path relative to the repo root, forward slashes. Both sides go through
     realpath: on Windows os.getcwd() can return the 8.3 short form while git
     reports the long form, and relpath between the two is wrong."""
+    root = repo_root()
+    if root is None:
+        raise HistoryUnavailable("not a git checkout")
     return posix(os.path.relpath(os.path.realpath(os.path.abspath(path)),
-                                 os.path.realpath(os.path.abspath(repo_root()))))
+                                 os.path.realpath(os.path.abspath(root))))
+
+
+class HistoryUnavailable(RuntimeError):
+    """Required git evidence could not be read; never equivalent to absence."""
 
 
 def file_at(commit, path):
-    """Spec for PATH as of COMMIT, or None if absent there."""
-    r = subprocess.run(["git", "show", f"{commit}:{repo_rel(path)}"],
-                       capture_output=True, text=True)
-    return Spec(path, r.stdout) if r.returncode == 0 else None
+    """Spec at COMMIT, None for proven absence; raise for unavailable evidence."""
+    root = repo_root()
+    if root is None:
+        raise HistoryUnavailable("not a git checkout")
+    try:
+        # ls-tree establishes absence separately from a failed object read.
+        entry = git("ls-tree", "-z", commit, "--", repo_rel(path), cwd=root)
+        if not entry:
+            return None
+        header, _, _ = entry.partition("\t")
+        mode, kind, oid = header.split()
+        if kind != "blob":
+            raise HistoryUnavailable(f"{commit}:{repo_rel(path)} is not a file")
+        return Spec(path, git("cat-file", "blob", oid, cwd=root))
+    except HistoryUnavailable:
+        raise
+    except (RuntimeError, OSError) as e:
+        raise HistoryUnavailable(f"cannot read {commit}:{repo_rel(path)}: {e}") from e
 
 
 def stamp(paths):
@@ -269,7 +323,7 @@ def require_commit(base):
     """BASE must name a real commit, or diffs silently become all-ADDED noise."""
     try:
         r = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, check=False)
         return r.returncode == 0
     except OSError:
         return False
@@ -289,22 +343,45 @@ def uncommitted(rels):
 
 
 def review_baseline(a_path, src, href):
-    """Newest review commit naming a_path#src, else the commit introducing the
-    link; None if the link is not in history. Names are matched exactly after
-    splitting the subject's list — a review of A#p19 is not a review of A#p1."""
-    name = f"{repo_rel(a_path)}#{src}"
+    """Return (commit, provenance); raise if history cannot establish a baseline."""
     root = repo_root()
-    out = git("log", "--format=%H%x00%s", "--grep=^review:", check=False, cwd=root)
-    for line in out.splitlines():
-        sha, _, subject = line.partition("\x00")
-        named = [n.strip() for n in subject.removeprefix("review:").split(",")]
-        if name in named:
-            return sha, "review"
-    # pathspecs are cwd-relative; run from the root so repo_rel paths hold
-    out = git("log", "--format=%H", "--reverse", "-S", f'href="{href}"', "--",
-              repo_rel(a_path), check=False, cwd=root)
-    first = out.split()[0] if out.split() else None
-    return first, "introduced"
+    if root is None:
+        raise HistoryUnavailable("not a git checkout")
+    name = f"{repo_rel(a_path)}#{src}"
+    try:
+        shallow = git("rev-parse", "--is-shallow-repository", cwd=root).strip() == "true"
+        boundaries = set()
+        if shallow:
+            shallow_path = git("rev-parse", "--git-path", "shallow", cwd=root).strip()
+            if not os.path.isabs(shallow_path):
+                shallow_path = os.path.join(root, shallow_path)
+            with open(shallow_path, encoding="ascii") as fh:
+                boundaries = set(fh.read().split())
+        out = git("log", "--format=%H%x00%s", "--grep=^review:", cwd=root)
+        for line in out.splitlines():
+            sha, _, subject = line.partition("\x00")
+            named = [n.strip() for n in subject.removeprefix("review:").split(",")]
+            if name in named:
+                # Missing ancestry after this review could hide a newer review.
+                after = set(git("rev-list", "HEAD", "^" + sha, cwd=root).split())
+                if boundaries & after:
+                    raise HistoryUnavailable("history after candidate review is incomplete")
+                return sha, "review"
+        current = file_at("HEAD", a_path)
+        if current is None or not any(l["href"] == href for l in current.links):
+            return None, "uncommitted"
+        if shallow:
+            raise HistoryUnavailable("shallow history cannot establish link introduction")
+        out = git("log", "--format=%H", "--reverse", "-S", f'href="{href}"', "--",
+                  repo_rel(a_path), cwd=root)
+        first = out.split()[0] if out.split() else None
+        if first is None:
+            raise HistoryUnavailable("committed link has no established introduction baseline")
+        return first, "introduced"
+    except HistoryUnavailable:
+        raise
+    except (RuntimeError, OSError) as e:
+        raise HistoryUnavailable(str(e)) from e
 
 
 # ============================================================ collection
@@ -396,11 +473,12 @@ def html_files(root):
     that .gitignore does not exclude (nested repos are skipped by git itself).
     Otherwise a plain walk skipping dot-directories."""
     r = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard",
-                        "--full-name", "-z", "--", root], capture_output=True, text=True)
+                        "--full-name", "-z", "--", root], capture_output=True, text=True, check=False)
     if r.returncode == 0:
         top = repo_root()
-        return sorted(canon(os.path.join(top, y)) for y in r.stdout.split("\0")
-                      if y and y.endswith(".html"))
+        if top is not None:
+            return sorted(canon(os.path.join(top, y)) for y in r.stdout.split("\0")
+                          if y and y.endswith(".html"))
     out = []
     for d, dirs, files in os.walk(root):
         dirs[:] = [x for x in dirs if not x.startswith(".")]
@@ -451,13 +529,17 @@ def _direct_children(raw, start, end, kinds=("li", "tr")):
     return n
 
 
-NUMTOK = r"([A-Za-z]+(?:-[A-Za-z]+)?)"
+NUMTOK = r"([A-Za-z]+(?:-[A-Za-z]+)?|[0-9]+)"
 
 
 def _numval(far, near):
     """-> (value, token) of a one- or two-token numeral before a noun, else
     (None, None). Tens-unit composites resolve spaced ('thirty one') or
     hyphenated ('thirty-one'); units before 'hundred' multiply ('one hundred')."""
+    if near.isdecimal():
+        return int(near), near
+    if far.isdecimal() and not near:
+        return int(far), far
     if near in WORD2NUM:
         if near == "hundred" and 0 < WORD2NUM.get(far, 0) < 10:
             return WORD2NUM[far] * 100, f"{far} {near}"
@@ -475,7 +557,7 @@ def count_checksums(spec, facts, fails, where):
     plan = sorted(facts.items(), key=lambda kv: -len(kv[0]))   # longest noun first
     for noun, n in plan:
         seen = False
-        for m in re.finditer(rf"{NUMTOK}\s+(?:{NUMTOK}\s+)?{noun}\b", spec.body, re.I):
+        for m in re.finditer(rf"(?<![\w.+-]){NUMTOK}\s+(?:{NUMTOK}\s+)?{re.escape(noun)}\b", spec.body, re.I):
             far, near = m.group(1).lower(), (m.group(2) or "").lower()
             val, tok = _numval(far, near)
             if val is not None:
@@ -505,7 +587,7 @@ def volatile_ordinals(spec, collection_paths=()):
     return len(re.findall(r"(?:&sect;|&#167;|§)\s*\d", body))
 
 
-def check_structure(col):
+def check_structure(col, specimens=True):
     fails = list(col.fails)
     for p, s in col.specs.items():
         r = rel(p)
@@ -532,12 +614,29 @@ def check_structure(col):
         count_checksums(s, derive(s), fails, r)
         for rid, row in s.rows():
             tds = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S)
-            if len(tds) >= 3 and words(tds[2]) > CELL_WORD_CAP:
-                fails.append(f"[cell] {r}: {rid} reason {words(tds[2])} words > {CELL_WORD_CAP}")
+            for index, cell in enumerate(tds):
+                label = ("selection", "rejected/replaced", "reason")[index] if index < 3 else f"cell {index + 1}"
+                if words(cell) > CELL_WORD_CAP:
+                    fails.append(f"[cell] {r}: {rid} {label} {words(cell)} words > {CELL_WORD_CAP}")
         n = volatile_ordinals(s, col.specs)
         if n:
             fails.append(f"[ordinal] {r}: {n} volatile section reference(s) "
                          f"(a §N citing an outside document belongs inside its link or <cite>)")
+        if specimens:
+            for match in re.finditer(r'<pre\b[^>]*data-specimen="([^"]+)"[^>]*>(.*?)</pre>', s.raw, re.S):
+                specimen = Spec(p, html.unescape(match[2]))
+                local_links = [link for link in specimen.links
+                               if link["href"].partition("#")[0]
+                               and not is_external(link["href"])]
+                for link in local_links:
+                    fails.append(f"[specimen {match[1]}] [anchor] {r}: "
+                                 f"href={link['href']} — single-file specimens require "
+                                 "#fragment links for local claims, not file paths")
+                # Never resolve a forbidden local link against the enclosing tree.
+                specimen.links = [link for link in specimen.links if link not in local_links]
+                embedded = SimpleNamespace(fails=[], specs={p: specimen})
+                for failure in check_structure(embedded, specimens=False):
+                    fails.append(f"[specimen {match[1]}] {failure}")
     return fails
 
 
@@ -579,7 +678,7 @@ def shorten(s, n=70):
 
 def owed_reviews(col, dirty_paths=None):
     """-> list of dicts: dependent (path,src), target (path,frag), kind,
-    baseline, note. kind in content|address|removed|new|unbuilt."""
+    baseline, note. Unknown history is reported separately from new links."""
     owed = []
     if repo_root() is None:
         return [{"dependent": (fp, l["src"]), "target": (tp, fr), "kind": "unknown",
@@ -589,45 +688,59 @@ def owed_reviews(col, dirty_paths=None):
     for fp, l, tp, fr in col.depends_on_edges():
         if l["src"] is None:
             continue
-        base, how = review_baseline(fp, l["src"], l["href"])
         pair = (fp, l["src"], tp, fr)
-        rec = {"dependent": (fp, l["src"]), "target": (tp, fr), "baseline": base, "how": how}
-        if base is None:
-            rec.update(kind="new", note="link not yet committed")
-            owed.append(rec); seen[pair] = rec
-        else:
-            key = (base, tp)
-            if key not in cache:
-                cache[key] = file_at(base, tp)
-            head_key = ("HEAD", tp)
-            if head_key not in cache:
-                cache[head_key] = file_at("HEAD", tp)
-            bspec, hspec = cache[key], cache[head_key]
-            if hspec is None or fr not in hspec.elems:
-                rec.update(kind="removed", note=f"{addr(tp, fr)} not at HEAD")
+        try:
+            base, how = review_baseline(fp, l["src"], l["href"])
+            rec = {"dependent": (fp, l["src"]), "target": (tp, fr), "baseline": base, "how": how}
+            if base is None:
+                rec.update(kind="new", note="link not yet committed")
                 owed.append(rec); seen[pair] = rec
-                continue
-            btext = bspec.text(fr) if bspec else None
-            htext = hspec.text(fr)
-            if btext is None:
-                # id absent at baseline: renamed or new -> address-only if some element had this text
-                same = [i for i in (bspec.elems if bspec else []) if bspec.text(i) == htext]
-                rec.update(kind="address", note=f"id absent at baseline"
-                           + (f" (text matches former {same[0]!r})" if same else ""))
-                owed.append(rec); seen[pair] = rec
-            elif btext != htext:
-                rec.update(kind="content", note=(btext, htext))
-                owed.append(rec); seen[pair] = rec
-            # moved source: same href in baseline file under a different source id —
-            # reported only when the pair owes nothing else (one line per obligation)
-            bfp = cache.setdefault((base, fp), file_at(base, fp))
-            if bfp and pair not in seen:
-                prior = [x["src"] for x in bfp.links if x["href"] == l["href"]]
-                if prior and l["src"] not in prior:
-                    rec = {"dependent": (fp, l["src"]), "target": (tp, fr), "baseline": base,
-                           "how": how, "kind": "source-moved",
-                           "note": f"claim was {prior[0]!r} at baseline"}
+            else:
+                key = (base, tp)
+                if key not in cache:
+                    cache[key] = file_at(base, tp)
+                head_key = ("HEAD", tp)
+                if head_key not in cache:
+                    cache[head_key] = file_at("HEAD", tp)
+                bspec, hspec = cache[key], cache[head_key]
+                if hspec is None or fr not in hspec.elems:
+                    rec.update(kind="removed", note=f"{addr(tp, fr)} not at HEAD")
                     owed.append(rec); seen[pair] = rec
+                    continue
+                btext = bspec.text(fr) if bspec else None
+                htext = hspec.text(fr)
+                if btext is None:
+                    # id absent at baseline: renamed or new -> address-only if some element had this text
+                    same = [i for i in (bspec.elems if bspec else []) if bspec.text(i) == htext]
+                    rec.update(kind="address", note=f"id absent at baseline"
+                               + (f" (text matches former {same[0]!r})" if same else ""))
+                    owed.append(rec); seen[pair] = rec
+                elif btext != htext:
+                    rec.update(kind="content", note=(btext, htext))
+                    owed.append(rec); seen[pair] = rec
+                # moved source: same href in baseline file under a different source id —
+                # reported only when the pair owes nothing else (one line per obligation)
+                source_key = (base, fp)
+                if source_key not in cache:
+                    cache[source_key] = file_at(base, fp)
+                bfp = cache[source_key]
+                if bfp and pair not in seen:
+                    prior = [x["src"] for x in bfp.links if x["href"] == l["href"]]
+                    if prior and l["src"] not in prior:
+                        rec = {"dependent": (fp, l["src"]), "target": (tp, fr), "baseline": base,
+                               "how": how, "kind": "source-moved",
+                               "note": f"claim was {prior[0]!r} at baseline"}
+                        owed.append(rec); seen[pair] = rec
+        except HistoryUnavailable as e:
+            # Incomplete evidence supersedes any earlier classification of this pair.
+            if pair in seen:
+                owed.remove(seen.pop(pair))
+            rec = {"dependent": (fp, l["src"]), "target": (tp, fr),
+                   "baseline": None, "kind": "unknown", "note": str(e)}
+            if dirty_paths and tp in dirty_paths:
+                rec["dirty"] = True
+            owed.append(rec); seen[pair] = rec
+            continue
         if dirty_paths and tp in dirty_paths:
             if pair in seen:
                 seen[pair]["dirty"] = True
@@ -644,6 +757,9 @@ def print_owed(owed, prefix="REVIEW", col=None):
         print(f"{prefix} OWED: none")
         return
     print(f"{prefix} OWED ({len(owed)})")
+    if any(r["kind"] == "unknown" for r in owed):
+        print("  CLEARANCE UNKNOWN: fetch sufficient history (git fetch --unshallow for a shallow clone),")
+        print("  or explicitly review against committed state and record it with lspec review CLAIM.")
     for r in owed:
         d, t = r["dependent"], r["target"]
         line = f"  {addr(*d)}  depends-on {addr(*t)}  [{r['kind']}]"
@@ -663,9 +779,9 @@ def print_owed(owed, prefix="REVIEW", col=None):
 # ================================================================= verbs
 
 def deliver(path, raw):
-    """Print a spec whole, framed so truncation is detectable."""
+    """Print a spec whole with boundary markers; not a comprehension guarantee."""
     r = rel(path)
-    print(f"==== {r} — {len(raw.splitlines())} lines, {len(raw)} bytes ====")
+    print(f"==== {r} — {len(raw.splitlines())} lines, {len(raw.encode('utf-8'))} bytes ====")
     print(f'This header opens a whole-file delivery. Read every line that follows, '
           f'down to the closing line "==== end {r} ====". If that closing line '
           f'never appears, or your tool reported truncation, the delivery was cut: '
@@ -718,7 +834,7 @@ def cmd_check(args):
               f"all structural checks green")
     if args.neighborhood:
         print()
-        neighborhood(col, *col.parse_target(args.neighborhood))
+        neighborhood(col, *col.parse_target(args.neighborhood), semantic=False)
     if args.diff:
         if not require_commit(args.diff):
             print(f"lspec check: cannot resolve --diff base {args.diff!r} to a commit",
@@ -728,7 +844,9 @@ def cmd_check(args):
         print(f"\nneighborhoods of {len(changed)} element(s) changed since {args.diff}:")
         for p, frag in changed:
             print(load_hint(col, p).strip() or "")
-            neighborhood(col, p, frag)
+            neighborhood(col, p, frag, semantic=False)
+    if args.neighborhood or args.diff:
+        print_semantic()
     return rc
 
 
@@ -775,7 +893,7 @@ def print_graph(col):
         print(f"    {addr(fp, l['src'])} -> {addr(tp, fr)}")
 
 
-def neighborhood(col, p, frag):
+def neighborhood(col, p, frag, semantic=True):
     s = col.specs[p]
     print(f"== {addr(p, frag)}")
     inbound = col.inbound(p, frag)
@@ -825,8 +943,14 @@ def neighborhood(col, p, frag):
     print(f"  counterparts ({len(counter)}): " + ", ".join(counter))
     deps = col.dependents(p, frag)
     print(f"  dependents ({len(deps)}): " + ", ".join(addr(fp, l['src']) + load_hint(col, fp) for fp, l in deps))
-    owed = [r for r in owed_reviews(col) if r["target"] == (p, frag)]
+    owed = [r for r in owed_reviews(col) if r["target"][0] == p
+            and (not frag or r["target"][1] == frag)]
     print_owed(owed, col=col)
+    if semantic:
+        print_semantic()
+
+
+def print_semantic():
     print("SEMANTIC (by hand): do referrers still hold; does cited evidence still support "
           "the claim; is the status still right; do restatements agree.")
 
@@ -837,6 +961,9 @@ def cmd_neighbors(args):
         p, frag = col.parse_target(args.target)
     except ValueError as e:
         print(f"lspec neighbors: {e}", file=sys.stderr); return 2
+    if not frag and not args.whole_file:
+        print("lspec neighbors: use FILE#id, or add --whole-file for file-wide output", file=sys.stderr)
+        return 2
     print(stamp([rel(x) for x in col.specs])[0])
     neighborhood(col, p, frag)
     return 0
@@ -848,7 +975,8 @@ def cmd_impact(args):
         print("lspec impact: not a git checkout", file=sys.stderr); return 2
     base = args.base
     if not require_commit(base):
-        print(f"lspec impact: cannot resolve base {base!r} to a commit", file=sys.stderr)
+        print(f"lspec impact: cannot resolve base {base!r} to a commit. "
+              "Supply an available commit/ref (for example HEAD), or fetch missing history.", file=sys.stderr)
         return 2
     line, dpaths = uncommitted([rel(x) for x in col.specs])
     print(line)
@@ -915,7 +1043,7 @@ def cmd_start(args):
     print_owed(owed_reviews(col, dirty_paths), col=col)
     print("\nverbs — read-only: " + " ".join(READ_ONLY) + "   mutating: " + " ".join(MUTATING))
     print("  start MAIN [--with FILE…] · check [--diff BASE] [--neighborhood T] · show T [--text] | show FILE (whole) | show --graph · "
-          "neighbors T · impact BASE · mv OLD NEW · review CLAIM... [-m MSG]")
+          "neighbors T [--whole-file] · impact BASE · mv OLD NEW · review CLAIM... [-m MSG]")
     return rc
 
 
@@ -1085,7 +1213,7 @@ def cmd_review(args):
 # ================================================================== main
 
 def main(argv):
-    ap = argparse.ArgumentParser(prog="lspec", description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(prog="lspec", description=(__doc__ or "lspec — Living Specification maintenance").split("\n")[0])
     ap.add_argument("--main", help="main spec (default live-spec.html)")
     sub = ap.add_subparsers(dest="verb")
     s = sub.add_parser("start"); s.add_argument("main_pos", nargs="?")
@@ -1095,6 +1223,7 @@ def main(argv):
     sh = sub.add_parser("show"); sh.add_argument("target", nargs="?", help="path#id for an element; a bare path delivers the file whole; omit with --graph")
     sh.add_argument("--text", action="store_true"); sh.add_argument("--graph", action="store_true")
     n = sub.add_parser("neighbors"); n.add_argument("target")
+    n.add_argument("--whole-file", action="store_true", help="allow file-wide neighborhood output")
     i = sub.add_parser("impact"); i.add_argument("base", nargs="?", default="HEAD")
     m = sub.add_parser("mv"); m.add_argument("old"); m.add_argument("new")
     r = sub.add_parser("review"); r.add_argument("claims", nargs="+", metavar="CLAIM",

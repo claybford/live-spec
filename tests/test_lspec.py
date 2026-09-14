@@ -1,5 +1,17 @@
 """Controlled defects on tempdir fixtures. Nothing here is committed state."""
-import os, sys, tempfile, unittest, contextlib, io, argparse
+import argparse
+import contextlib
+import html
+import io
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
 os.environ.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import lspec
@@ -84,12 +96,8 @@ class T(unittest.TestCase):
         rc, out = run(main_extra='</table><pre>&lt;a href="#fake"&gt;</pre><table>'); self.assertEqual(rc, 0, out)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 # ---------------------------------------------------------------- git-aware
-import subprocess, shutil, argparse
 
 def sh(*a, cwd):
     return subprocess.run(a, cwd=cwd, capture_output=True, text=True, check=True).stdout
@@ -559,3 +567,273 @@ class L(unittest.TestCase):
         rc, out = cli(d, "impact", "HEAD")
         self.assertIn("(load whole: lspec show motor.html)", out)   # the changed target is not main
         self.assertNotIn("lspec show main.html", out)                 # main is already loaded
+
+
+# ---------------------------------------------------------------- critique regressions
+
+
+class RevisionRegressions(unittest.TestCase):
+    def fixture(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    @contextlib.contextmanager
+    def in_repo(self, d):
+        before = os.getcwd()
+        try:
+            os.chdir(d)
+            yield
+        finally:
+            os.chdir(before)
+
+    def test_missing_repo_root_is_explicit(self):
+        with mock.patch.object(lspec, 'repo_root', return_value=None):
+            for call in (lambda: lspec.repo_rel('main.html'),
+                         lambda: lspec.review_baseline('main.html', 'claim', '#target')):
+                with self.assertRaisesRegex(lspec.HistoryUnavailable, 'not a git checkout'):
+                    call()
+
+    def test_html_files_falls_back_if_root_discovery_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            wanted = Path(d, 'main.html')
+            wanted.write_text('<p>fixture</p>', encoding='utf-8')
+            result = subprocess.CompletedProcess([], 0, stdout='other.html\0', stderr='')
+            with mock.patch.object(lspec.subprocess, 'run', return_value=result), \
+                 mock.patch.object(lspec, 'repo_root', return_value=None):
+                self.assertEqual(lspec.html_files(d), [lspec.canon(str(wanted))])
+
+    def test_unknown_history_preserves_dirty_target(self):
+        d = self.fixture()
+        with self.in_repo(d):
+            col = lspec.Collection('main.html')
+            with mock.patch.object(lspec, 'review_baseline', side_effect=lspec.HistoryUnavailable('missing history')):
+                owed = lspec.owed_reviews(col, {lspec.canon('motor.html')})
+            self.assertEqual(len(owed), 1)
+            self.assertEqual(owed[0]['kind'], 'unknown')
+            self.assertTrue(owed[0]['dirty'])
+
+    def test_cli_help_without_docstrings(self):
+        result = subprocess.run([sys.executable, '-OO', lspec.__file__, '--help'],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Living Specification maintenance', result.stdout)
+
+    def test_digit_assertions_and_mixed_contradictions(self):
+        for assertion, expected in [('2 widgets.', False), ('Two widgets. 99 widgets.', True),
+                                    ('2 widgets. two widgets.', False), ('18 principles. nineteen principles.', True)]:
+            with self.subTest(assertion=assertion):
+                noun = 'principles' if 'principles' in assertion else 'widgets'
+                size = 19 if noun == 'principles' else 2
+                raw = f'<p>{assertion}</p><ul data-count="{noun}">' + '<li>x</li>' * size + '</ul>'
+                spec = lspec.Spec('main.html', raw)
+                failures = []
+                lspec.count_checksums(spec, lspec.derive(spec), failures, 'main.html')
+                self.assertEqual(bool(failures), expected, failures)
+
+    def test_each_decision_cell_boundary_and_unrelated_table(self):
+        d = self.fixture()
+        for index in range(3):
+            for size in (40, 41):
+                with self.subTest(index=index, size=size):
+                    cells = ['short'] * 3
+                    cells[index] = 'word ' * size
+                    extra = '<tr id="dl-test">' + ''.join(f'<td>{v}</td>' for v in cells) + '</tr>'
+                    Path(d, 'main.html').write_text(MAIN.format(extra=extra), encoding='utf-8')
+                    rc, out = cli(d, 'check')
+                    self.assertEqual(rc, int(size > 40), out)
+                    if size > 40:
+                        self.assertIn(('selection', 'rejected/replaced', 'reason')[index], out)
+        extra = '<tr id="data-test"><td>' + 'word ' * 50 + '</td><td>x</td><td>x</td></tr>'
+        Path(d, 'main.html').write_text(MAIN.format(extra=extra), encoding='utf-8')
+        self.assertEqual(cli(d, 'check')[0], 0)
+
+    def shallow_fixture(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        commit(d, 'fix: motor rating')
+        shallow = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, shallow, ignore_errors=True)
+        sh('git', 'clone', '-q', '--depth', '1', Path(d).as_uri(), shallow, cwd=d)
+        return d, shallow
+
+    def test_shallow_history_unknown_then_fetch_restores_obligation(self):
+        full, shallow = self.shallow_fixture()
+        self.assertIn('[content]', cli(full, 'impact', 'HEAD')[1])
+        rc, out = cli(shallow, 'impact', 'HEAD')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('[unknown]', out)
+        self.assertIn('CLEARANCE UNKNOWN', out)
+        self.assertNotIn('OWED: none', out)
+        self.assertIn('fetch --unshallow', out)
+        sh('git', 'fetch', '-q', '--unshallow', cwd=shallow)
+        out = cli(shallow, 'impact', 'HEAD')[1]
+        self.assertIn('[content]', out)
+        self.assertNotIn('[unknown]', out)
+
+    def test_explicit_review_can_establish_shallow_baseline(self):
+        _, shallow = self.shallow_fixture()
+        rc, out = cli(shallow, 'review', 'main.html#claim')
+        self.assertEqual(rc, 0, out)
+        out = cli(shallow, 'impact', 'HEAD')[1]
+        self.assertIn('OWED: none', out)
+        self.assertNotIn('[unknown]', out)
+        edit(shallow, 'motor.html', '105 kW', '100 kW')
+        commit(shallow, 'fix: motor rating')
+        self.assertIn('[content]', cli(shallow, 'impact', 'HEAD')[1])
+
+    def test_history_absence_and_unavailable_objects_are_distinct(self):
+        d = self.fixture()
+        with self.in_repo(d):
+            self.assertIsNone(lspec.file_at('HEAD', os.path.join(d, 'absent.html')))
+            with self.assertRaises(lspec.HistoryUnavailable):
+                lspec.file_at('not-a-commit', os.path.join(d, 'motor.html'))
+            real_git = lspec.git
+            def fail_blob(*args, **kwargs):
+                if args[:2] == ('cat-file', 'blob'):
+                    raise RuntimeError('object unavailable')
+                return real_git(*args, **kwargs)
+            with mock.patch.object(lspec, 'git', side_effect=fail_blob):
+                with self.assertRaises(lspec.HistoryUnavailable):
+                    lspec.file_at('HEAD', os.path.join(d, 'motor.html'))
+
+    def test_file_at_preserves_classified_not_file_error(self):
+        d = self.fixture()
+        Path(d, 'subsystem').mkdir()
+        Path(d, 'subsystem', 'note.txt').write_text('fixture', encoding='utf-8')
+        commit(d, 'docs: subsystem fixture')
+        with self.in_repo(d):
+            with self.assertRaises(lspec.HistoryUnavailable) as caught:
+                lspec.file_at('HEAD', os.path.join(d, 'subsystem'))
+            self.assertEqual(str(caught.exception), 'HEAD:subsystem is not a file')
+            self.assertIsNone(caught.exception.__cause__)
+
+    def test_review_baseline_preserves_classified_error(self):
+        d = self.fixture()
+        original = lspec.HistoryUnavailable('required tree unavailable')
+        with self.in_repo(d):
+            with mock.patch.object(lspec, 'file_at', side_effect=original):
+                with self.assertRaises(lspec.HistoryUnavailable) as caught:
+                    lspec.review_baseline(os.path.join(d, 'main.html'), 'claim', 'motor.html#power')
+            self.assertIs(caught.exception, original)
+            self.assertIsNone(caught.exception.__cause__)
+
+    def test_unreadable_baseline_is_unknown_not_removed(self):
+        d = self.fixture()
+        with self.in_repo(d):
+            col = lspec.Collection('main.html')
+            with mock.patch.object(lspec, 'file_at', side_effect=lspec.HistoryUnavailable('object unavailable')):
+                obligations = lspec.owed_reviews(col)
+            self.assertEqual([r['kind'] for r in obligations], ['unknown'])
+
+    def test_complete_claim_wrapper_detects_prose_change(self):
+        d = self.fixture()
+        Path(d, 'motor.html').write_text('<section id="power"><h4>Power</h4><p>120 kW</p></section>', encoding='utf-8')
+        commit(d, 'fix: complete claim target')
+        self.assertEqual(cli(d, 'review', 'main.html#claim')[0], 0)
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        commit(d, 'fix: motor rating')
+        self.assertIn('[content]', cli(d, 'impact', 'HEAD')[1])
+
+    def test_heading_alone_does_not_cover_following_prose(self):
+        d = self.fixture()
+        Path(d, 'motor.html').write_text('<h4 id="power">Power</h4><p>120 kW</p>', encoding='utf-8')
+        commit(d, 'fix: heading target')
+        self.assertEqual(cli(d, 'review', 'main.html#claim')[0], 0)
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        commit(d, 'fix: motor rating')
+        self.assertIn('OWED: none', cli(d, 'impact', 'HEAD')[1])
+
+    def seed(self):
+        raw = Path(lspec.__file__).with_name('live-spec.html').read_text(encoding='utf-8')
+        match = re.search(r'<pre data-specimen="seed">(.*?)</pre>', raw, re.DOTALL)
+        if match is None:
+            raise AssertionError('live-spec.html must contain the embedded seed specimen')
+        return html.unescape(match.group(1))
+
+    def test_actual_seed_and_populated_instance(self):
+        with tempfile.TemporaryDirectory() as d:
+            seed = self.seed()
+            Path(d, 'main.html').write_text(seed, encoding='utf-8')
+            self.assertEqual(cli(d, 'check')[0], 0)
+            seed = seed.replace('[PROJECT]', 'Motor trial').replace('[ADAPT: 40]', '40')
+            seed = seed.replace('</main>', '''<section id="rating"><h3>Rating</h3><p>120 kW</p></section>
+<p id="claim">Cooling assumes <a rel="depends-on" href="#rating">the rating</a>.</p>
+<table><tr id="dl-cooling"><td>Liquid cooling</td><td>Air cooling</td><td>Meets the thermal requirement.</td></tr></table></main>''')
+            Path(d, 'main.html').write_text(seed, encoding='utf-8')
+            sh('git', 'init', '-q', cwd=d)
+            commit(d, 'seed: motor trial')
+            self.assertEqual(cli(d, 'check')[0], 0)
+            edit(d, 'main.html', '120 kW', '105 kW')
+            commit(d, 'fix: rating')
+            self.assertIn('[content]', cli(d, 'impact', 'HEAD')[1])
+
+    def test_embedded_seed_defects_fail_check(self):
+        d = self.fixture()
+        specimen = '<p id="x">x</p><a href="#missing">bad</a>'
+        extra = '</table><pre data-specimen="seed">' + html.escape(specimen) + '</pre><table>'
+        Path(d, 'main.html').write_text(MAIN.format(extra=extra), encoding='utf-8')
+        rc, out = cli(d, 'check')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('[specimen seed]', out)
+
+    def test_specimen_rejects_local_file_links_even_when_the_file_exists(self):
+        d = self.fixture()
+        with self.in_repo(d):
+            for href, relation in [('motor.html#power', ''), ('motor.html#power', 'external'),
+                                   ('main.html#top', ''), ('missing.html#claim', '')]:
+                with self.subTest(href=href, relation=relation):
+                    fragment = f'<p id="claim"><a rel="{relation}" href="{href}">claim</a></p>'
+                    outer = lspec.Spec('main.html', '<pre data-specimen="seed">'
+                                       + html.escape(fragment) + '</pre>')
+                    col = argparse.Namespace(fails=[], specs={'main.html': outer})
+                    with mock.patch.object(lspec.os.path, 'exists', side_effect=AssertionError('specimen consulted filesystem')):
+                        failures = lspec.check_structure(col)
+                    self.assertTrue(any('single-file specimens require' in f for f in failures), failures)
+
+    def test_specimen_allows_internal_anchors_and_remote_urls(self):
+        fragment = '<p id="claim">Claim</p><a href="#claim">local</a><a href="https://example.org/evidence">source</a>'
+        outer = lspec.Spec('main.html', '<pre data-specimen="seed">' + html.escape(fragment) + '</pre>')
+        col = argparse.Namespace(fails=[], specs={'main.html': outer})
+        with mock.patch.object(lspec.os.path, 'exists', side_effect=AssertionError('specimen consulted filesystem')):
+            self.assertEqual(lspec.check_structure(col), [])
+
+    def test_principle_anchors_enclose_rules(self):
+        spec = lspec.Spec(str(Path(lspec.__file__).with_name('live-spec.html')))
+        for n in range(1, 20):
+            self.assertEqual(spec.tags[f'p{n}'], 'section')
+            text = spec.text(f'p{n}')
+            assert isinstance(text, str), f'p{n} must have text'
+            self.assertIn('Rule:', text)
+
+    def test_neighbors_file_requires_explicit_opt_in(self):
+        d = self.fixture()
+        rc, out = cli(d, 'neighbors', 'motor.html')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('--whole-file', out)
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        commit(d, 'fix: rating')
+        rc, out = cli(d, 'neighbors', 'motor.html', '--whole-file')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('[content]', out)
+
+    def test_impact_missing_base_is_actionable(self):
+        d = self.fixture()
+        rc, out = cli(d, 'impact', 'missing-base')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('available commit/ref', out)
+        self.assertIn('fetch missing history', out)
+
+    def test_diff_prints_one_semantic_checklist(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        edit(d, 'main.html', 'This design needs', 'This design still needs')
+        rc, out = cli(d, 'check', '--diff', 'HEAD')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('== main.html#claim', out)
+        self.assertIn('== motor.html#power', out)
+        self.assertEqual(out.count('SEMANTIC (by hand)'), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

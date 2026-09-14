@@ -1,0 +1,30 @@
+#!/bin/sh
+# lspec commit-msg hook: the review gate, run where the subject exists.
+# Blocks a commit whose candidate tree carries an obligation already
+# outstanding at HEAD, unless the subject is a recorded `review:` naming the
+# claim or a `seed:` boundary discarding the dependent file's lineage.
+# Unavailable history blocks (recover: fetch sufficient history, or record a
+# review with `lspec review`). A hook cannot read the subject before the
+# commit exists — hence this second hook beside pre-commit (dl-hook).
+# Structural checks ran in pre-commit. Install:
+#   ln -sf ../../hooks/commit-msg .git/hooks/commit-msg
+set -e
+root=$(git rev-parse --show-toplevel)
+main=${LSPEC_MAIN:-live-spec.html}
+# The message file is handed to the hook relative to the repo root; the check
+# runs from a staged-tree copy — pin the path absolute before cd.
+case "$1" in
+  /*) msg="$1" ;;
+  *)  msg="$root/$1" ;;
+esac
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+git checkout-index -a --prefix="$tmp/"
+cd "$tmp"
+export GIT_DIR="$root/.git" GIT_WORK_TREE="$tmp" GIT_INDEX_FILE="$root/.git/index"
+tool="$tmp/lspec.py"
+[ -f "$tool" ] || tool="$root/lspec.py"
+if ! python3 "$tool" check --staged --commit-msg "$msg" "$main"; then
+  echo "commit-msg: lspec review gate failed; red blocks the commit (dl-hook)" >&2
+  exit 1
+fi

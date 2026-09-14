@@ -751,22 +751,252 @@ class RevisionRegressions(unittest.TestCase):
             raise AssertionError('live-spec.html must contain the embedded seed specimen')
         return html.unescape(match.group(1))
 
-    def test_actual_seed_and_populated_instance(self):
-        with tempfile.TemporaryDirectory() as d:
-            seed = self.seed()
-            Path(d, 'main.html').write_text(seed, encoding='utf-8')
-            self.assertEqual(cli(d, 'check')[0], 0)
-            seed = seed.replace('[PROJECT]', 'Motor trial').replace('[ADAPT: 40]', '40')
-            seed = seed.replace('</main>', '''<section id="rating"><h3>Rating</h3><p>120 kW</p></section>
+    def resolve_markers(self, seed, project='Motor trial'):
+        """Resolve every [ADAPT]/[PROJECT] marker the way an instance would."""
+        seed = seed.replace('[PROJECT]', project)
+        for marker, fill in [
+                ('[ADAPT — the one stance governing every edit]', 'fix the cause, not the symptom'),
+                ('[ADAPT — confirmed(source) / provisional(source) / locked / open / WATCH]',
+                 'confirmed(source) / provisional(source) / locked / open / WATCH'),
+                ('[ADAPT: 40]', '40'),
+                ('[ADAPT: lspec]', 'lspec'),
+                ('[ADAPT: docs / fix / seed / audit / review]', 'docs / fix / seed / audit / review')]:
+            seed = seed.replace(marker, fill)
+        return seed
+
+    def instance(self):
+        seed = self.resolve_markers(self.seed())
+        return seed.replace('</main>', '''<section id="rating"><h3>Rating</h3><p>120 kW</p></section>
 <p id="claim">Cooling assumes <a rel="depends-on" href="#rating">the rating</a>.</p>
 <table><tr id="dl-cooling"><td>Liquid cooling</td><td>Air cooling</td><td>Meets the thermal requirement.</td></tr></table></main>''')
+
+    def gate(self, d, subject):
+        """Run the commit-msg gate the way the hook does."""
+        msg = os.path.join(d, 'msg')
+        Path(msg).write_text(subject + '\n', encoding='utf-8')
+        return cli(d, 'check', '--staged', '--commit-msg', msg)
+
+    def test_template_validation_is_explicit(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, 'main.html').write_text(self.seed(), encoding='utf-8')
+            rc, out = cli(d, 'check')
+            self.assertEqual(rc, 1, out)          # instance readiness is the default
+            self.assertIn('[adapt]', out)
+            rc, out = cli(d, 'check', '--template')
+            self.assertEqual(rc, 0, out)          # explicit template state passes
+
+    def test_instance_readiness_gates_the_first_commit(self):
+        with tempfile.TemporaryDirectory() as d:
+            seed = self.seed().replace('[PROJECT]', 'Motor trial').replace('[ADAPT: 40]', '40')
             Path(d, 'main.html').write_text(seed, encoding='utf-8')
+            sh('git', 'init', '-q', cwd=d)
+            rc, out = cli(d, 'check')
+            self.assertEqual(rc, 1, out)          # uncommitted is not evidence of template
+            self.assertIn('[adapt]', out)
+            Path(d, 'main.html').write_text(self.instance(), encoding='utf-8')
+            commit(d, 'seed: motor trial')        # the lineage starts readiness-green
+            rc, out = cli(d, 'check')
+            self.assertEqual(rc, 0, out)
+
+    def test_instance_review_lifecycle(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, 'main.html').write_text(self.instance(), encoding='utf-8')
             sh('git', 'init', '-q', cwd=d)
             commit(d, 'seed: motor trial')
             self.assertEqual(cli(d, 'check')[0], 0)
             edit(d, 'main.html', '120 kW', '105 kW')
             commit(d, 'fix: rating')
             self.assertIn('[content]', cli(d, 'impact', 'HEAD')[1])
+
+    def test_depends_on_link_element_is_red(self):
+        rc, out = run(main_extra='<link rel="depends-on" href="motor.html#power">')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('rel="depends-on" on <link>: only <a href> carries an obligation', out)
+
+    def test_depends_on_anchor_without_href_is_red(self):
+        rc, out = run(main_extra='</table><a rel="depends-on">loose</a><table>')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('only <a href> carries an obligation', out)
+
+    def test_gate_blocks_outstanding_review(self):
+        d = repo(); edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
+        rc, out = self.gate(d, 'docs: unrelated')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('[review-gate]', out)
+        self.assertIn('main.html#claim', out)
+        rc, out = self.gate(d, 'review: main.html#claim')
+        self.assertEqual(rc, 0, out)          # a recorded review naming the claim clears it
+
+    def test_gate_warns_on_created_obligation(self):
+        d = repo(); edit(d, 'motor.html', '120 kW', '105 kW')
+        sh('git', 'add', '-A', cwd=d)   # staged, uncommitted: the candidate creates it
+        rc, out = self.gate(d, 'docs: derate')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('this commit creates a review obligation', out)
+
+    def test_review_commit_passes_staged_gate(self):
+        d = repo(); edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
+        self.assertEqual(cli(d, 'review', 'main.html#claim', '-m', 'still fine')[0], 0)
+        self.assertEqual(sh('git', 'log', '-1', '--format=%s', cwd=d).strip(),
+                         'review: main.html#claim')
+
+    def test_gate_blocks_on_rename_carry_over(self):
+        d = repo(); edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
+        # renaming the dependent claim id must not reclassify the debt as new
+        edit(d, 'main.html', 'id="claim"', 'id="claim2"')
+        edit(d, 'motor.html', 'href="main.html#claim"', 'href="main.html#claim2"')
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = self.gate(d, 'docs: rename claim')
+        self.assertEqual(rc, 1, out)          # carried over from main.html#claim
+        self.assertIn('main.html#claim2', out)
+        rc, out = self.gate(d, 'review: main.html#claim2')
+        self.assertEqual(rc, 0, out)          # a review names the claim as it now stands
+
+    def test_disappearance_content_reverted_is_reported_not_blocked(self):
+        d = repo(); edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
+        edit(d, 'motor.html', '105 kW', '120 kW')   # staged revert to the baseline text
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = self.gate(d, 'docs: revert')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('content reverted to baseline', out)
+
+    def test_disappearance_claim_deleted_is_reported_not_blocked(self):
+        d = repo(); edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
+        edit(d, 'main.html', '<p id="claim">This design needs '
+             '<a rel="depends-on" href="motor.html#power">motor power</a>.</p>', '')
+        edit(d, 'motor.html', ', see <a href="main.html#claim">main</a>', '')
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = self.gate(d, 'docs: drop claim')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('claim deleted', out)
+
+    def test_disappearance_link_removed_is_reported_not_blocked(self):
+        d = repo(); edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
+        edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>',
+             'motor power')
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = self.gate(d, 'docs: drop dependency')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('dependency removed', out)
+
+    def test_disappearance_unverifiable_blocks(self):
+        s = lspec.Spec('main.html', MAIN.format(extra=''))
+        r = {"dependent": (lspec.canon('main.html'), 'claim'),
+             "target": (lspec.canon('motor.html'), 'power'),
+             "kind": "content", "baseline": "abc123"}
+        with mock.patch.object(lspec, 'file_at', side_effect=lspec.HistoryUnavailable('boom')):
+            cause, blocks = lspec.disappear_cause(r, argparse.Namespace(specs={lspec.canon('main.html'): s}))
+        self.assertTrue(blocks)
+        self.assertIn('boom', cause)
+        r["kind"] = "unknown"; r["note"] = "shallow"
+        cause, blocks = lspec.disappear_cause(r, argparse.Namespace(specs={}))
+        self.assertTrue(blocks)               # unknown stays unknown, and blocks
+
+    def test_unborn_head_only_warns(self):
+        d = tempfile.mkdtemp()
+        open(os.path.join(d, 'main.html'), 'w').write(MAIN.format(extra=''))
+        open(os.path.join(d, 'motor.html'), 'w').write(MOTOR.format(extra=''))
+        sh('git', 'init', '-q', cwd=d)
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = self.gate(d, 'seed: fixtures')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('first commit', out)
+        self.assertNotIn('[review-gate]', out)
+
+    def test_head_status_states(self):
+        scenarios = [
+            # (HEAD resolves, symref, branch exists, expected)
+            (True, None, None, 'ok'),
+            (False, 'refs/heads/main', False, 'unborn'),
+            (False, None, None, 'broken'),               # not a symref: never assumed unborn
+            (False, 'refs/heads/main', True, 'broken'),  # branch exists, HEAD still unresolved
+        ]
+        for head_ok, ref, branch, expected in scenarios:
+            with self.subTest(expected=expected):
+                def fake(*args, **k):
+                    cmd = args[0]
+                    if cmd == 'rev-parse':
+                        if head_ok:
+                            return 'abc123\n'
+                        raise lspec.HistoryUnavailable('unresolvable')
+                    if cmd == 'show-ref':
+                        if branch:
+                            return 'abc ' + ref + '\n'
+                        raise lspec.HistoryUnavailable('no branch')
+                    return ''
+                def fake_run(args, **k):     # the symref read returns its own rc
+                    assert args[:2] == ['git', 'symbolic-ref'], args
+                    if ref is None:
+                        return subprocess.CompletedProcess(args, 1, '', 'not a symref')
+                    return subprocess.CompletedProcess(args, 0, ref + '\n', '')
+                with mock.patch.object(lspec, 'git', side_effect=fake), \
+                     mock.patch.object(lspec.subprocess, 'run', side_effect=fake_run):
+                    self.assertEqual(lspec.head_status(), expected)
+
+    def test_subject_types_from_subject_line_only(self):
+        self.assertEqual(lspec.subject_type('seed: x', 'seed'), 'x')
+        self.assertIsNone(lspec.subject_type('docs: seed: x', 'seed'))
+        self.assertIsNone(lspec.subject_type('seeded: x', 'seed'))
+        self.assertEqual(lspec.subject_type('review: a, b', 'review'), 'a, b')
+
+    def test_seed_floor_discards_stale_lineage(self):
+        d = repo()
+        edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
+        self.assertEqual(cli(d, 'review', 'main.html#claim')[0], 0)
+        edit(d, 'motor.html', '105 kW', '90 kW'); commit(d, 'docs: derate again')
+        rc, out = cli(d, 'impact', 'HEAD')
+        self.assertIn('OWED (1)', out)   # the old lineage's review no longer covers 90 kW
+        # A `seed:`-typed subject on the dependent file is a deliberate lineage
+        # boundary: the stale review stops being a baseline.
+        edit(d, 'main.html', 'This design needs', 'The redesigned frame needs')
+        commit(d, 'seed: main v2')
+        rc, out = cli(d, 'impact', 'HEAD')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('OWED: none', out)   # baseline is the seed: commit itself
+
+    def test_body_line_cannot_type_a_seed_boundary(self):
+        d = repo()
+        edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
+        self.assertEqual(cli(d, 'review', 'main.html#claim')[0], 0)
+        edit(d, 'motor.html', '105 kW', '90 kW'); commit(d, 'docs: derate again')
+        edit(d, 'main.html', 'This design needs', 'The redesigned frame needs')
+        commit(d, 'docs: rewrite\n\nseed: fake')   # a body line types nothing
+        rc, out = cli(d, 'impact', 'HEAD')
+        self.assertIn('OWED (1)', out)   # the recorded review remains the baseline
+
+    def test_seed_on_target_does_not_reset_dependent_debt(self):
+        d = repo()
+        edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
+        self.assertEqual(cli(d, 'review', 'main.html#claim')[0], 0)
+        edit(d, 'motor.html', '105 kW', '90 kW'); commit(d, 'docs: derate again')
+        edit(d, 'motor.html', '90 kW', '90 kW rated'); commit(d, 'seed: motor v2')
+        rc, out = cli(d, 'impact', 'HEAD')
+        self.assertIn('OWED (1)', out)   # the boundary is scoped to motor.html's own lineage
+
+    def test_stamp_is_repo_wide_but_debt_paths_are_scoped(self):
+        d = repo()
+        Path(d, 'notes.txt').write_text('draft', encoding='utf-8')   # dirty, not a spec
+        rc, out = cli(d, 'impact', 'HEAD')
+        self.assertIn('basis', out)
+        self.assertIn('+ uncommitted changes', out)   # the stamp exposes repo-wide dirt
+        self.assertIn('OWED: none', out)              # and it manufactures no dependency debt
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            _, paths = lspec.uncommitted(['motor.html'])
+        finally:
+            os.chdir(cwd)
+        self.assertIn(lspec.canon(os.path.join(d, 'motor.html')), paths)
+
+    def test_marker_mentions_and_hiding(self):
+        rc, out = run(main_extra='</table><p>the slot <code data-literal>[ADAPT]</code> '
+                                 'is a mention</p><table>')
+        self.assertEqual(rc, 0, out)          # a declared mention passes
+        rc, out = run(main_extra='</table><p><code>[ADAPT: lspec] start MAIN</code></p><table>')
+        self.assertEqual(rc, 1, out)          # an operating instruction is not a mention
+        self.assertIn('[adapt]', out)
+        rc, out = run(main_extra='</table><pre>[ADAPT]</pre><table>')
+        self.assertEqual(rc, 1, out)          # ordinary markup hides nothing
 
     def test_embedded_seed_defects_fail_check(self):
         d = self.fixture()
@@ -833,6 +1063,159 @@ class RevisionRegressions(unittest.TestCase):
         self.assertIn('== main.html#claim', out)
         self.assertIn('== motor.html#power', out)
         self.assertEqual(out.count('SEMANTIC (by hand)'), 1)
+
+
+# ----------------------------------------------------- hook integration
+# Real hooks, real git commits. These cross the index, HEAD, the message
+# file, and historical baselines — the seams function-level tests cannot see.
+
+class HookIntegration(unittest.TestCase):
+    HOOKS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'hooks')
+
+    def setUp(self):
+        self._cleanup = []
+
+    def tearDown(self):
+        for d in self._cleanup:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def track(self, d):
+        self._cleanup.append(d)
+        return d
+
+    def install(self, d, *names):
+        for n in names:
+            dst = os.path.join(d, '.git', 'hooks', n)
+            shutil.copy(os.path.join(self.HOOKS, n), dst)
+            os.chmod(dst, 0o755)
+
+    def hrepo(self, committed=True):
+        """A temp repo with lspec.py committed and both hooks installed."""
+        d = self.track(tempfile.mkdtemp())
+        shutil.copy(os.path.join(self.HOOKS, '..', 'lspec.py'), os.path.join(d, 'lspec.py'))
+        open(os.path.join(d, 'main.html'), 'w').write(MAIN.format(extra=''))
+        open(os.path.join(d, 'motor.html'), 'w').write(MOTOR.format(extra=''))
+        sh('git', 'init', '-q', cwd=d)
+        self.install(d, 'pre-commit', 'commit-msg')
+        if committed:
+            sh('git', 'add', '-A', cwd=d)
+            r = self.gcommit(d, 'seed: fixtures')
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return d
+
+    def gcommit(self, d, msg, add=None):
+        """git commit with the hooks live; LSPEC_MAIN points at the fixture."""
+        if add is not None:
+            sh('git', 'add', '--', *add, cwd=d)
+        env = dict(os.environ, LSPEC_MAIN='main.html')
+        return subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t',
+                               'commit', '--allow-empty', '-m', msg],
+                              cwd=d, capture_output=True, text=True, env=env, check=False)
+
+    def test_acceptance_sequence(self):
+        d = self.hrepo()
+        # 1. a target change creates visible debt; the creating commit passes
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        r = self.gcommit(d, 'docs: derate', add=['motor.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('this commit creates a review obligation', r.stdout + r.stderr)
+        # 2. a subsequent unrelated commit is blocked — with an unstaged
+        #    worktree revert present, proving the gate reads the index
+        edit(d, 'main.html', 'Main', 'Main heading')
+        edit(d, 'motor.html', '105 kW', '120 kW')        # unstaged: worktree lies
+        r = self.gcommit(d, 'docs: tweak main', add=['main.html'])
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('[review-gate]', r.stdout + r.stderr)
+        # 3. editing the indebted target again does not evade the block
+        edit(d, 'motor.html', '120 kW', '95 kW')          # staged next
+        r = self.gcommit(d, 'docs: derate more', add=['motor.html'])
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('[review-gate]', r.stdout + r.stderr)
+        # 4. a correctly named review commit succeeds
+        r = self.gcommit(d, 'review: main.html#claim', add=['motor.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # 5. the resulting history reports clearance
+        rc, out = cli(d, 'impact', 'HEAD')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('OWED: none', out)
+
+    def test_first_commit_on_unborn_head(self):
+        d = self.hrepo(committed=False)
+        sh('git', 'add', '-A', cwd=d)
+        r = self.gcommit(d, 'seed: fixtures')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('first commit', r.stdout + r.stderr)   # warned, not blocked
+        self.assertNotIn('[review-gate]', r.stdout + r.stderr)
+
+    def test_first_commit_of_unresolved_template_is_blocked(self):
+        d = self.track(tempfile.mkdtemp())
+        shutil.copy(
+            os.path.join(self.HOOKS, '..', 'lspec.py'),
+            os.path.join(d, 'lspec.py'),
+        )
+        match = re.search(
+            r'<pre data-specimen="seed">(.*?)</pre>',
+            Path(lspec.__file__).with_name('live-spec.html').read_text(
+                encoding='utf-8'
+            ),
+            re.DOTALL,
+        )
+        if match is None:
+            self.fail('live-spec.html must contain the seed specimen')
+
+        Path(d, 'main.html').write_text(
+            html.unescape(match.group(1)),
+            encoding='utf-8',
+        )
+        sh('git', 'init', '-q', cwd=d)
+        self.install(d, 'pre-commit', 'commit-msg')
+        sh('git', 'add', '-A', cwd=d)
+        r = self.gcommit(d, 'seed: raw template')
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('[adapt]', r.stdout + r.stderr)
+
+    def test_shallow_clone_blocks_unknown_then_review_recovers(self):
+        d = self.hrepo()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        r = self.gcommit(d, 'docs: derate', add=['motor.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        c = self.track(tempfile.mkdtemp())
+        shutil.rmtree(c); sh('git', 'clone', '-q', '--depth', '1', f'file://{d}', c, cwd=os.path.dirname(c))
+        self.install(c, 'pre-commit', 'commit-msg')
+        # unknown history blocks, with the recovery named
+        r = self.gcommit(c, 'docs: unrelated')
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('clearance cannot be established', r.stdout + r.stderr)
+        # recovery path 2: record an explicit review against committed state
+        env = dict(os.environ, LSPEC_MAIN='main.html')
+        r = subprocess.run(['python3', 'lspec.py', '--main', 'main.html', 'review',
+                            'main.html#claim', '-m', 'confirmed against committed state'],
+                           cwd=c, capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # the resulting history reports clearance
+        rc, out = cli(c, 'impact', 'HEAD')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('OWED: none', out)
+
+    def test_shallow_clone_recovers_by_unshallowing(self):
+        d = self.hrepo()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        r = self.gcommit(d, 'docs: derate', add=['motor.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        c = self.track(tempfile.mkdtemp())
+        shutil.rmtree(c); sh('git', 'clone', '-q', '--depth', '1', f'file://{d}', c, cwd=os.path.dirname(c))
+        self.install(c, 'pre-commit', 'commit-msg')
+        r = self.gcommit(c, 'docs: unrelated')
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        # recovery path 1: fetch sufficient history — the debt becomes visible
+        # content owed against a real baseline, and blocks until reviewed
+        sh('git', 'fetch', '--unshallow', '-q', 'origin', cwd=c)
+        r = self.gcommit(c, 'docs: unrelated')
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('was already owed at HEAD', r.stdout + r.stderr)
+        self.assertNotIn('clearance cannot be established', r.stdout + r.stderr)
+        r = self.gcommit(c, 'review: main.html#claim')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 if __name__ == "__main__":

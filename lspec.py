@@ -3,9 +3,11 @@
 
   lspec start MAIN                 deliver MAIN whole, build the collection, run
                                    every check, list owed reviews and the verbs
-  lspec check [MAIN] [--diff BASE] [--neighborhood TARGET]
-                                   structural checks; optionally the neighborhood
-                                   of every element changed since BASE, or of TARGET
+  lspec check [MAIN] [--diff BASE] [--neighborhood TARGET] [--template]
+                                   structural checks (instance readiness by
+                                   default; --template validates a template);
+                                   optionally the neighborhood of every element
+                                   changed since BASE, or of TARGET
   lspec show TARGET [--text]       the exact element (or its normalized text);
                                    a bare FILE delivers it whole; --graph prints
                                    the collection graph (no target needed)
@@ -35,7 +37,11 @@ enumeration; each cell in a decision row (tr id="dl-…") is within the 40-word
 cap; a file is justified by exactly one split row;
 a depends-on target's rendered text differs from the text in the tree of the
 last review naming the dependent claim; a link's source id differs from the
-basis commit. Nothing here proves a claim true or a review adequate.
+basis commit; rel="depends-on" rides only on <a href> elements; unresolved
+[ADAPT]/[PROJECT] markers fail instance readiness — `check --template`
+validates a template instead, <code data-literal> declares a mention, and
+declared <pre data-specimen> content is exempt; quoting a marker in ordinary
+markup hides nothing. Nothing here proves a claim true or a review adequate.
 
 COLLECTION. MAIN is the root; a file is in the collection iff a split row
 (<tr id="dl-split-…"> whose selection cell links the file) reaches it from
@@ -52,7 +58,26 @@ text is unchanged) — a rename resets review. The introduction fallback is a
 per-href pickaxe: two claims sharing one href inherit the first link's
 introduction commit, and a plain link upgraded to depends-on inherits the old
 introduction — both err toward a spurious obligation, the safe direction; an
-explicit `review:` commit sets a precise baseline.
+explicit `review:` commit sets a precise baseline. The pickaxe is floored at
+the newest commit whose SUBJECT types `seed:` for the file, so a
+re-instantiation under a reused filename inherits neither a prior lineage's
+introductions nor its reviews. `seed:` types a deliberate initialization or
+replacement of an instance's lineage, scoped to the files the commit touches;
+a body line can never type a commit, and maintenance types never floor.
+
+HOOK (dl-hook). Two hooks run `lspec check --staged` on the staged tree:
+pre-commit for the structural checks, commit-msg for the review gate — the
+subject does not exist until commit-msg. The gate compares obligations
+computed against HEAD (over HEAD's own edges) with obligations against the
+candidate tree. Created by this commit: warning. Already outstanding at HEAD:
+blocks, unless the subject is a recorded `review:` naming the claim or a
+`seed:` boundary whose staged files' lineages it discards. A HEAD obligation
+with no candidate counterpart is reported with its cause — claim deleted,
+dependency removed, content reverted, seed boundary; only an unverifiable
+comparison blocks. Unknown history blocks, with both recovery paths: fetch
+sufficient history, or record an explicit review against committed state. A
+verified unborn HEAD (first commit) owes nothing and only warns. `lspec
+review` needs no side channel: the hook reads the same subject history does.
 
 SPECIMENS. A pre block marked data-specimen="NAME" is decoded once and checked
 as a single-file specimen: local hyperlinks must use #fragment, never a file
@@ -81,8 +106,9 @@ the spec binds protocol steps to them. The collection graph is rebuilt from
 files and split rows, never maintained as a separate manifest.
 
 STAMP (dl-concurrency). Every run reports the commit it was computed against
-and whether the working tree differs. Stamps expose a basis, not a lock; git
-does not prevent concurrent writes in a shared worktree.
+and whether the repository has uncommitted changes (repo-wide). The stamp
+exposes a basis, not a lock; git does not prevent concurrent writes in a
+shared worktree.
 """
 
 import argparse
@@ -128,6 +154,7 @@ class Spec(HTMLParser):
         self.body = re.sub(r"<pre[^>]*>.*?</pre>", "", self.raw, flags=re.S)
         self.ids, self.links, self.elems, self.tags = [], [], {}, {}
         self.count_decls = []    # (data-count value, start offset, tag)
+        self.bad_deps = []       # (start offset, tag): rel="depends-on" off <a href>
         self._stack, self._pre = [], 0
         self._spans = {}         # start offset -> end offset, every element
         self._lines = [0]
@@ -147,6 +174,8 @@ class Spec(HTMLParser):
         if self._pre:
             return
         a = dict(attrs)
+        if a.get("rel") == "depends-on" and (tag != "a" or not a.get("href")):
+            self.bad_deps.append((self._off(), tag))
         eid = a.get("id")
         if eid:
             self.ids.append(eid)
@@ -281,6 +310,13 @@ def repo_rel(path):
                                  os.path.realpath(os.path.abspath(root))))
 
 
+def subject_type(subject, type_):
+    """The typed payload iff the SUBJECT line itself carries `type:`; a body
+    line can never type a commit (assessment bodies are free-form)."""
+    prefix = type_ + ":"
+    return subject[len(prefix):].strip() if subject.startswith(prefix) else None
+
+
 class HistoryUnavailable(RuntimeError):
     """Required git evidence could not be read; never equivalent to absence."""
 
@@ -306,17 +342,47 @@ def file_at(commit, path):
         raise HistoryUnavailable(f"cannot read {commit}:{repo_rel(path)}: {e}") from e
 
 
-def stamp(paths):
+def file_staged(path):
+    """Spec as staged in the index (stage 0), None if absent from it."""
+    root = repo_root()
+    if root is None:
+        raise HistoryUnavailable("not a git checkout")
+    entry = git("ls-files", "-s", "-z", "--", repo_rel(path), cwd=root)
+    meta = entry.split("\0")[0]
+    if not meta:
+        return None
+    try:
+        return Spec(path, git("cat-file", "blob", meta.split()[1], cwd=root))
+    except (RuntimeError, OSError) as e:
+        raise HistoryUnavailable(f"cannot read staged {repo_rel(path)}: {e}") from e
+
+
+def spec_at_basis(path, basis):
+    """Spec at BASIS: a commit ref, or 'staged' for the index (hook basis)."""
+    if basis == "staged":
+        return file_staged(path)
+    return file_at(basis, path)
+
+
+def stamp(staged=False):
+    if repo_root() is None:
+        return "basis: not a git checkout", False
     try:
         head = git("rev-parse", "--short", "HEAD").strip()
-        if os.environ.get("LSPEC_BASIS") == "staged":
-            # The hook checks the staged tree itself; "differs from HEAD" is the
-            # commit's whole point, so the uncommitted flag would cry wolf.
+    except (RuntimeError, OSError):
+        return "basis: no commits yet", False
+    try:
+        if staged:
+            # The hook checks the staged tree itself; "differs from HEAD" is
+            # the commit's whole point, so the uncommitted flag would cry wolf.
             return f"basis {head} (staged tree)", False
-        dirty = git("status", "--porcelain", "--", *paths).strip()
+        # Repo-wide: unfinished implementation work anywhere is part of the
+        # basis story. Dependency-dirty tracking stays collection-scoped
+        # (uncommitted()); an unrelated dirty file never manufactures debt.
+        dirty = git("status", "--porcelain").strip()
         return f"basis {head}" + (" + uncommitted changes" if dirty else ""), bool(dirty)
     except (RuntimeError, OSError):
-        return "basis: not a git checkout", False
+        return f"basis {head}", False
 
 
 def require_commit(base):
@@ -331,9 +397,11 @@ def require_commit(base):
 
 def uncommitted(rels):
     """-> (stamp line, set of canonical paths with uncommitted changes).
-    Porcelain paths are repo-root-relative; resolve them against the root so
-    running from a subdirectory flags the same paths."""
-    line, dirty = stamp(rels)
+    The stamp is repo-wide; the path set is scoped to RELS (collection files)
+    so only a dirty collection file can flag dependency debt. Porcelain paths
+    are repo-root-relative; resolve them against the root so running from a
+    subdirectory flags the same paths."""
+    line, dirty = stamp()
     paths = set()
     if dirty:
         root = repo_root() or os.getcwd()
@@ -357,24 +425,52 @@ def review_baseline(a_path, src, href):
                 shallow_path = os.path.join(root, shallow_path)
             with open(shallow_path, encoding="ascii") as fh:
                 boundaries = set(fh.read().split())
-        out = git("log", "--format=%H%x00%s", "--grep=^review:", cwd=root)
+        # Floor the whole lineage at the newest commit whose SUBJECT types
+        # `seed:` for this file — a deliberate lineage boundary — so a
+        # re-instantiation under a reused filename inherits neither a prior
+        # lineage's introductions nor its reviews. A body line can never type
+        # a commit.
+        floor = None
+        for line in git("log", "--format=%H%x00%s", "--",
+                        repo_rel(a_path), cwd=root).splitlines():
+            sha, _, subject = line.partition("\x00")
+            if subject_type(subject, "seed") is not None:
+                floor = sha
+                break
+        out = git("log", "--format=%H%x00%s", cwd=root)
         for line in out.splitlines():
             sha, _, subject = line.partition("\x00")
-            named = [n.strip() for n in subject.removeprefix("review:").split(",")]
-            if name in named:
-                # Missing ancestry after this review could hide a newer review.
-                after = set(git("rev-list", "HEAD", "^" + sha, cwd=root).split())
-                if boundaries & after:
-                    raise HistoryUnavailable("history after candidate review is incomplete")
-                return sha, "review"
+            claims = subject_type(subject, "review")
+            if claims is None:
+                continue
+            named = [n.strip() for n in claims.split(",")]
+            if name not in named:
+                continue
+            if floor and sha != floor:
+                prior = subprocess.run(["git", "merge-base", "--is-ancestor", sha, floor],
+                                       cwd=root, check=False).returncode == 0
+                if prior:
+                    continue          # a prior lineage's review: not a baseline
+            # Missing ancestry after this review could hide a newer review.
+            after = set(git("rev-list", "HEAD", "^" + sha, cwd=root).split())
+            if boundaries & after:
+                raise HistoryUnavailable("history after candidate review is incomplete")
+            return sha, "review"
         current = file_at("HEAD", a_path)
         if current is None or not any(l["href"] == href for l in current.links):
             return None, "uncommitted"
         if shallow:
             raise HistoryUnavailable("shallow history cannot establish link introduction")
-        out = git("log", "--format=%H", "--reverse", "-S", f'href="{href}"', "--",
-                  repo_rel(a_path), cwd=root)
+        args = ["log", "--format=%H", "--reverse", "-S", f'href="{href}"']
+        if floor:
+            args.append(f"{floor}..HEAD")
+        args += ["--", repo_rel(a_path)]
+        out = git(*args, cwd=root)
         first = out.split()[0] if out.split() else None
+        if floor and first is None:
+            seeded = file_at(floor, a_path)
+            if seeded is not None and any(l["href"] == href for l in seeded.links):
+                first = floor
         if first is None:
             raise HistoryUnavailable("committed link has no established introduction baseline")
         return first, "introduced"
@@ -587,7 +683,16 @@ def volatile_ordinals(spec, collection_paths=()):
     return len(re.findall(r"(?:&sect;|&#167;|§)\s*\d", body))
 
 
-def check_structure(col, specimens=True):
+def marker_visible(raw):
+    """Text the [ADAPT] gate scans: everything except declared template
+    content — <pre data-specimen> blocks and <code data-literal> mentions.
+    An ordinary <pre> or <code> hides nothing: quoting a marker in markup
+    does not turn an unresolved slot into a mention."""
+    visible = re.sub(r'<pre\b[^>]*data-specimen="[^"]*"[^>]*>.*?</pre>', " ", raw, flags=re.S)
+    return re.sub(r'<code\b[^>]*\bdata-literal\b[^>]*>.*?</code>', " ", visible, flags=re.S)
+
+
+def check_structure(col, specimens=True, markers=True):
     fails = list(col.fails)
     for p, s in col.specs.items():
         r = rel(p)
@@ -611,6 +716,16 @@ def check_structure(col, specimens=True):
             if l["rel"] == "depends-on" and l["src"] is None:
                 fails.append(f"[depends-on] {r}: link to {l['href']} has no id'd ancestor "
                              f"— the dependent claim cannot be named")
+        for off, tag in getattr(s, "bad_deps", []):
+            fails.append(f"[depends-on] {r}: rel=\"depends-on\" on <{tag}>: "
+                         f"only <a href> carries an obligation")
+        if markers:
+            found = re.findall(r"\[(?:ADAPT|PROJECT)", marker_visible(s.raw))
+            if found:
+                fails.append(f"[adapt] {r}: {len(found)} unresolved [ADAPT]/[PROJECT] "
+                             f"marker(s) — an instance commits only readiness-green; "
+                             f"validate a template with lspec check --template, and "
+                             f"declare a mention <code data-literal>")
         count_checksums(s, derive(s), fails, r)
         for rid, row in s.rows():
             tds = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S)
@@ -635,7 +750,7 @@ def check_structure(col, specimens=True):
                 # Never resolve a forbidden local link against the enclosing tree.
                 specimen.links = [link for link in specimen.links if link not in local_links]
                 embedded = SimpleNamespace(fails=[], specs={p: specimen})
-                for failure in check_structure(embedded, specimens=False):
+                for failure in check_structure(embedded, specimens=False, markers=False):
                     fails.append(f"[specimen {match[1]}] {failure}")
     return fails
 
@@ -676,9 +791,14 @@ def shorten(s, n=70):
 
 # =============================================================== reviews
 
-def owed_reviews(col, dirty_paths=None):
+def owed_reviews(col, dirty_paths=None, basis="HEAD", pending_seeds=()):
     """-> list of dicts: dependent (path,src), target (path,frag), kind,
-    baseline, note. Unknown history is reported separately from new links."""
+    baseline, note. Unknown history is reported separately from new links.
+    basis is the tree the target text is read from: a commit ref (default
+    HEAD) or 'staged' for the index (the commit-msg gate's candidate).
+    pending_seeds are canonical dependent-file paths whose lineage a pending
+    `seed:` commit re-instantiates: its boundary discards their prior
+    obligations, so edges from those files are not computed at all."""
     owed = []
     if repo_root() is None:
         return [{"dependent": (fp, l["src"]), "target": (tp, fr), "kind": "unknown",
@@ -687,6 +807,8 @@ def owed_reviews(col, dirty_paths=None):
     cache, seen = {}, {}
     for fp, l, tp, fr in col.depends_on_edges():
         if l["src"] is None:
+            continue
+        if fp in pending_seeds:
             continue
         pair = (fp, l["src"], tp, fr)
         try:
@@ -699,12 +821,12 @@ def owed_reviews(col, dirty_paths=None):
                 key = (base, tp)
                 if key not in cache:
                     cache[key] = file_at(base, tp)
-                head_key = ("HEAD", tp)
-                if head_key not in cache:
-                    cache[head_key] = file_at("HEAD", tp)
-                bspec, hspec = cache[key], cache[head_key]
+                bkey = (basis, tp)
+                if bkey not in cache:
+                    cache[bkey] = spec_at_basis(tp, basis)
+                bspec, hspec = cache[key], cache[bkey]
                 if hspec is None or fr not in hspec.elems:
-                    rec.update(kind="removed", note=f"{addr(tp, fr)} not at HEAD")
+                    rec.update(kind="removed", note=f"{addr(tp, fr)} not at {basis}")
                     owed.append(rec); seen[pair] = rec
                     continue
                 btext = bspec.text(fr) if bspec else None
@@ -809,14 +931,200 @@ def load(args):
     return Collection(main)
 
 
+def head_status():
+    """HEAD state: "ok", "unborn" (HEAD is a symref to a branch with no
+    commits — the first-commit state), or "broken" (HEAD unresolvable any
+    other way: unavailable or damaged evidence, never assumed unborn)."""
+    try:
+        git("rev-parse", "--verify", "--quiet", "HEAD")
+        return "ok"
+    except (RuntimeError, OSError):
+        pass
+    try:
+        # Read the symref with its own return code: a failed read is broken
+        # evidence, not an unborn branch. Only a resolvable symref naming a
+        # branch that has no commits is unborn.
+        r = subprocess.run(["git", "symbolic-ref", "-q", "HEAD"],
+                           capture_output=True, text=True, check=False)
+        ref = r.stdout.strip()
+        if r.returncode != 0 or not ref:
+            return "broken"
+        try:
+            git("show-ref", "--verify", "--quiet", ref)
+            return "broken"     # the branch exists but HEAD did not resolve
+        except (RuntimeError, OSError):
+            return "unborn"
+    except (RuntimeError, OSError):
+        return "broken"
+
+
+def head_edges(col, root):
+    """Depends-on edges as of HEAD: (fp, link, tp, fr). Files identical in
+    HEAD and the index contribute the collection's own edges; changed or
+    deleted files are read from their HEAD trees, so an obligation a staged
+    deletion would remove is still visible to the gate."""
+    files = set(col.specs)
+    for n in git("diff", "--cached", "--name-only", "HEAD", cwd=root).split():
+        if n.endswith(".html"):
+            files.add(canon(os.path.join(root, n)))
+    edges = []
+    for p in sorted(files):
+        s = file_at("HEAD", p)          # None: the file is new in this commit
+        if s is None:
+            continue
+        for l in s.links:
+            if l["rel"] != "depends-on" or l["src"] is None:
+                continue
+            tgt, fr = resolve(p, l["href"])
+            if tgt is None and fr is None:
+                continue
+            edges.append((p, l, tgt or p, fr))
+    return edges
+
+
+def gate_claims(msg_path):
+    """-> (named claims, is_seed) from the candidate commit's subject — the
+    first non-comment line of the message file. Body lines never type a
+    commit; the parse matches review_baseline's exactly."""
+    subject = ""
+    with open(msg_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n").strip()
+            if line and not line.startswith("#"):
+                subject = line
+                break
+    review = subject_type(subject, "review")
+    named = {c.strip() for c in review.split(",")} if review is not None else set()
+    return named, subject_type(subject, "seed") is not None
+
+
+def disappear_cause(r, col):
+    """Why a HEAD obligation has no candidate counterpart. -> (cause, blocks).
+    A disappearance clears only when the comparison establishes the fact —
+    claim deleted, dependency removed, content reverted, or this commit's
+    seed boundary; unavailable evidence stays unknown and blocks."""
+    fp, src = r["dependent"]
+    tp, fr = r["target"]
+    if r["kind"] == "unknown":
+        return f"clearance cannot be established ({r['note']})", True
+    try:
+        s = col.specs.get(fp)
+        if s is None:
+            return "dependent file removed", False
+        if src not in s.elems:
+            return "claim deleted", False
+        links = [l for l in s.links_in(src) if l["rel"] == "depends-on"]
+        if not any((resolve(fp, l["href"])[0] or fp, resolve(fp, l["href"])[1]) == (tp, fr)
+                   for l in links):
+            return "dependency removed", False
+        # The link stands, so the obligation left only if the target's staged
+        # text equals the baseline text; anything less established blocks.
+        base = r.get("baseline")
+        if base is None:
+            return "clearance cannot be established (no baseline tree)", True
+        bspec = file_at(base, tp)
+        staged = spec_at_basis(tp, "staged")
+        if bspec is None or fr not in bspec.elems or staged is None or fr not in staged.elems:
+            return "clearance cannot be established (target id absent at a tree)", True
+        if bspec.text(fr) == staged.text(fr):
+            return "content reverted to baseline", False
+        return "clearance cannot be established (text differs without a baseline)", True
+    except HistoryUnavailable as e:
+        return f"clearance cannot be established ({e})", True
+
+
+def review_gate(col, rc, msg_path):
+    """The commit-msg gate. Compares obligations computed against HEAD (over
+    HEAD's own edges) with obligations against the candidate tree:
+    - created by this commit: warning;
+    - already outstanding at HEAD: blocks, unless the subject is a recorded
+      `review:` naming the claim or a `seed:` boundary whose staged files'
+      lineages it discards — the same boundary the baselines will apply;
+    - a HEAD obligation with no counterpart is reported with its cause;
+      only unverifiable comparisons block;
+    - unknown history blocks, with both recovery paths;
+    - a verified unborn HEAD (first commit) owes nothing and only warns."""
+    root = repo_root()
+    if root is None:
+        return rc
+    named, is_seed = gate_claims(msg_path)
+    edges = [(fp, l, tp, fr) for fp, l, tp, fr in col.depends_on_edges()
+             if l["src"] is not None]
+    if head_status() == "unborn":
+        for fp, l, tp, fr in sorted(edges, key=lambda e: (addr(e[0], e[1]["src"]), addr(e[2], e[3]))):
+            print(f"  warn: first commit: {addr(fp, l['src'])} depends-on "
+                  f"{addr(tp, fr)} is new (no committed state to owe against)")
+        return rc
+    pending = set()
+    if is_seed:
+        for n in git("diff", "--cached", "--name-only", "HEAD", cwd=root).split():
+            p = canon(os.path.join(root, n))
+            if p in col.specs:
+                pending.add(p)     # scoped to files the seed commit touches
+    cand = owed_reviews(col, basis="staged", pending_seeds=pending)
+    try:
+        head_owed = owed_reviews(SimpleNamespace(
+            depends_on_edges=lambda: iter(head_edges(col, root))))
+    except HistoryUnavailable as e:
+        head_owed = [{"dependent": (fp, l["src"]), "target": (tp, fr), "kind": "unknown",
+                      "baseline": None, "note": str(e)} for fp, l, tp, fr in edges]
+
+    def key(r):
+        return (r["dependent"][0], r["target"][0], r["target"][1])
+    head_by_key = {}
+    for r in head_owed:
+        head_by_key.setdefault(key(r), []).append(r)
+    cand_keys = {key(r) for r in cand}
+
+    def dep_name(r):
+        return f"{repo_rel(r['dependent'][0])}#{r['dependent'][1]}"
+    for r in sorted(cand, key=lambda r: (dep_name(r), addr(*r["target"]))):
+        priors = head_by_key.get(key(r), [])
+        unknown = r["kind"] == "unknown" or any(p["kind"] == "unknown" for p in priors)
+        if unknown:
+            if dep_name(r) not in named:
+                why = r["note"] if r["kind"] == "unknown" else priors[0]["note"]
+                print(f"  [review-gate] {dep_name(r)} depends-on {addr(*r['target'])}: "
+                      f"clearance cannot be established (unknown history: {why})")
+                print("      recover: fetch sufficient history (git fetch --unshallow for a "
+                      "shallow clone), or record a review:")
+                print(f"        python3 lspec.py review {dep_name(r)}")
+                rc = 1
+        elif priors:
+            if dep_name(r) not in named:
+                print(f"  [review-gate] {dep_name(r)} depends-on {addr(*r['target'])} "
+                      f"was already owed at HEAD; clear it with: "
+                      f"python3 lspec.py review {dep_name(r)}")
+                rc = 1
+        else:
+            print(f"  warn: this commit creates a review obligation {dep_name(r)} "
+                  f"depends-on {addr(*r['target'])} [{r['kind']}]")
+    for r in sorted(head_owed, key=lambda r: (dep_name(r), addr(*r["target"]))):
+        if key(r) in cand_keys:
+            continue
+        d, t = r["dependent"], r["target"]
+        if d[0] in pending:
+            print(f"  note: {dep_name(r)} depends-on {addr(*t)} is discarded by this "
+                  f"commit's seed boundary")
+            continue
+        cause, blocks = disappear_cause(r, col)
+        if blocks:
+            print(f"  [review-gate] {dep_name(r)} depends-on {addr(*t)}: {cause}")
+            rc = 1
+        else:
+            print(f"  note: {dep_name(r)} depends-on {addr(*t)} left at HEAD: {cause}")
+    return rc
+
+
 def cmd_check(args):
     col = load(args)
     rels = [rel(p) for p in col.specs]
-    line, dirty = stamp(rels)
+    staged = bool(getattr(args, "staged", False) or getattr(args, "commit_msg", None))
+    line, dirty = stamp(staged=staged)
     print(line)
     for d in col.disconnected:
         print(f"  note: {rel(d)} is not linked from the collection (disconnected)")
-    fails = check_structure(col)
+    fails = check_structure(col, markers=not getattr(args, "template", False))
     for p, s in col.specs.items():
         if not s.count_decls:
             print(f"  note: {rel(p)} declares no count checksums (data-count)")
@@ -832,6 +1140,8 @@ def cmd_check(args):
         counts = ", ".join(f"{n} {g[0]}" for g, n in s.count_groups) or "no counts declared"
         print(f"PASS — {len(col.specs)} file(s); {rel(col.main)}: {counts}; "
               f"all structural checks green")
+    if getattr(args, "commit_msg", None) and repo_root() is not None:
+        rc = review_gate(col, rc, args.commit_msg)
     if args.neighborhood:
         print()
         neighborhood(col, *col.parse_target(args.neighborhood), semantic=False)
@@ -861,7 +1171,7 @@ def changed_targets(col, base):
 
 def cmd_show(args):
     col = load(args)
-    print(stamp([rel(x) for x in col.specs])[0])
+    print(stamp()[0])
     if args.graph:
         print_graph(col)
         return 0
@@ -964,7 +1274,7 @@ def cmd_neighbors(args):
     if not frag and not args.whole_file:
         print("lspec neighbors: use FILE#id, or add --whole-file for file-wide output", file=sys.stderr)
         return 2
-    print(stamp([rel(x) for x in col.specs])[0])
+    print(stamp()[0])
     neighborhood(col, p, frag)
     return 0
 
@@ -1204,7 +1514,12 @@ def cmd_review(args):
     git("add", "--", *sorted(files), cwd=repo_root())
     subject = "review: " + ", ".join(names)
     msg = subject + (f"\n\n{args.message}" if args.message else "")
-    git("commit", "--allow-empty", "-q", "-m", msg)
+    # No side channel: the commit-msg hook reads this very subject, the same
+    # text history will read — exemption and clearance are one artifact.
+    r = subprocess.run(["git", "commit", "--allow-empty", "-q", "-m", msg],
+                       cwd=repo_root(), check=False)
+    if r.returncode:
+        raise RuntimeError("git commit failed (hook red?)")
     sha = git("rev-parse", "--short", "HEAD").strip()
     print(f"{sha} {subject}")
     return 0
@@ -1220,6 +1535,14 @@ def main(argv):
     s.add_argument("--with", dest="with_", nargs="+", metavar="FILE", help="also deliver these supporting specs whole")
     c = sub.add_parser("check"); c.add_argument("main_pos", nargs="?")
     c.add_argument("--diff", metavar="BASE"); c.add_argument("--neighborhood", metavar="TARGET")
+    c.add_argument("--template", action="store_true",
+                   help="validate a template: skip the unresolved-marker gate "
+                        "(instance readiness is the default)")
+    c.add_argument("--staged", action="store_true",
+                   help="evaluate the candidate commit (the index), not the working tree")
+    c.add_argument("--commit-msg", dest="commit_msg", metavar="FILE",
+                   help="run the review gate with the candidate commit's subject "
+                        "read from FILE (the commit-msg hook)")
     sh = sub.add_parser("show"); sh.add_argument("target", nargs="?", help="path#id for an element; a bare path delivers the file whole; omit with --graph")
     sh.add_argument("--text", action="store_true"); sh.add_argument("--graph", action="store_true")
     n = sub.add_parser("neighbors"); n.add_argument("target")
@@ -1232,6 +1555,7 @@ def main(argv):
     args = ap.parse_args(argv[1:])
     if args.verb is None:
         args.verb = "check"; args.main_pos = None; args.diff = None; args.neighborhood = None
+        args.template = False; args.staged = False; args.commit_msg = None
     if getattr(args, "main_pos", None):
         args.main = args.main_pos
     try:

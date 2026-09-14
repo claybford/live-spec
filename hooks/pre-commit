@@ -1,6 +1,9 @@
 #!/bin/sh
 # lspec pre-commit hook: run `lspec check` against the *staged* tree.
-# Red blocks the commit (dl-hook). Install:  ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
+# Structural red blocks the commit (dl-hook). The review gate runs in
+# commit-msg, where the subject exists. Install BOTH hooks:
+#   ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
+#   ln -sf ../../hooks/commit-msg .git/hooks/commit-msg
 # Hooks do not clone; run the same check in CI.
 set -e
 root=$(git rev-parse --show-toplevel)
@@ -11,13 +14,15 @@ git checkout-index -a --prefix="$tmp/"
 cd "$tmp"
 # Stamps and diffs speak about the staged tree, not the working tree. Git may
 # hand hooks a *relative* GIT_DIR/GIT_INDEX_FILE — pin both absolute before cd.
-export GIT_DIR="$root/.git" GIT_WORK_TREE="$tmp" GIT_INDEX_FILE="$root/.git/index" \
-       LSPEC_BASIS=staged
+export GIT_DIR="$root/.git" GIT_WORK_TREE="$tmp" GIT_INDEX_FILE="$root/.git/index"
 # Gate with the checker being committed, falling back to the working-tree one
 # (e.g. the commit that first adds lspec.py to a repo that already has specs).
 tool="$tmp/lspec.py"
 [ -f "$tool" ] || tool="$root/lspec.py"
-if ! python3 "$tool" check "$main"; then
+# An unborn HEAD has no diff base; the first commit is checked without one.
+diff=""
+git rev-parse --verify --quiet HEAD >/dev/null 2>&1 && diff="--diff HEAD"
+if ! python3 "$tool" check --staged $diff "$main"; then
   echo "pre-commit: lspec check failed; red blocks the commit (dl-hook)" >&2
   exit 1
 fi

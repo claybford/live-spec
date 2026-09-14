@@ -37,12 +37,12 @@ entry point, and a supporting spec is loaded only when work crosses into it (P19
 
 `lspec.py` is optional maintenance automation (stdlib only), not part of the state:
 the spec reads without it, and the session protocol says what to do by hand. It feeds
-a session the spec whole (`lspec start`), runs the conventions the spec makes
+a session the spec whole (`python3 lspec.py start`), runs the conventions the spec makes
 mechanical as a commit-time gate (`check`), computes owed reviews from git history
 (`neighbors`, `impact`), and makes renames and recorded reviews operations (`mv`,
 `review`). Green means the implemented structural checks passed; semantic
 correctness and review adequacy require judgment. The semantics live in the spec
-and the tool's docstring; `lspec start` lists the verbs.
+and the tool's docstring; `python3 lspec.py start` lists the verbs.
 
 ## Working on this repo
 
@@ -55,6 +55,16 @@ clean sweep may update bookkeeping; use `git commit --allow-empty` only when no
 files change; a recorded review is a `review:` commit naming the
 dependent claims it clears. History lives in git, never in the document body.
 
-The pre-commit hook runs the staged copy of `check`; red blocks the commit:
-`ln -sf ../../hooks/pre-commit .git/hooks/pre-commit`. Hooks don't clone, so run
+Two hooks run the staged copy of `check` and red blocks the commit: pre-commit
+runs the structural checks (`check --staged --diff HEAD`); commit-msg runs the
+review gate (`check --staged --commit-msg`), where the subject exists. The gate
+blocks a commit while a review obligation was already outstanding at HEAD,
+unless the subject is a recorded `review:` naming the claim or a `seed:`
+boundary for the dependent file — `python3 lspec.py review` handles the former
+(obligations the commit newly creates are reported as warnings). Unavailable
+history blocks: recover with `git fetch --unshallow`, or record an explicit
+review against committed state. Template validation is explicit:
+`python3 lspec.py check --template`.
+Install both: `ln -sf ../../hooks/pre-commit .git/hooks/pre-commit` and
+`ln -sf ../../hooks/commit-msg .git/hooks/commit-msg`. Hooks don't clone, so run
 `python3 lspec.py check` in CI. Tests: `python3 -m unittest tests.test_lspec`.

@@ -56,12 +56,23 @@ files change; a recorded review is a `review:` commit naming the
 dependent claims it clears. History lives in git, never in the document body.
 
 Two hooks run the staged copy of `check` and red blocks the commit: pre-commit
-runs the structural checks (`check --staged --diff HEAD`); commit-msg runs the
-review gate (`check --staged --commit-msg`), where the subject exists. The gate
+runs the structural checks and the seal gate (`check --staged
+--diff HEAD`); commit-msg runs the review gate and the commit-vocabulary gate
+(`check --staged --commit-msg`), where the subject exists. `--staged` reads
+the index itself, so an unstaged repair cannot launder a broken candidate.
+The review gate
 blocks a commit while a review obligation was already outstanding at HEAD,
 unless the subject is a recorded `review:` naming the claim or a `seed:`
 boundary for the dependent file — `python3 lspec.py review` handles the former
-(obligations the commit newly creates are reported as warnings). Unavailable
+(obligations the commit newly creates are reported as warnings). The
+vocabulary gate rejects a subject typed outside main's declared
+`data-commit-types` set; a document without the declaration is reported as
+unenforced, never defaulted. The seal gate blocks any change to a
+`data-sealed` claim — text, id, path, marker, or collection membership —
+without a same-commit decision row naming the old `path#id` in
+`data-changes`. After committing, `python3 lspec.py check --clean` is the
+completion check: it reports staged, unstaged, and untracked files repo-wide
+and fails while any remain. Unavailable
 history blocks: recover with `git fetch --unshallow`, or record an explicit
 review against committed state. Template validation is explicit:
 `python3 lspec.py check --template`.

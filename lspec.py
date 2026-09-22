@@ -34,7 +34,9 @@ they exit 0). 2 = unreadable input, bad target, or refused operation.
 WHAT IS CHECKED. Structural PASS does not establish semantic consistency or
 review clearance. A link resolves; an id is unique; a stated count matches its
 enumeration; each cell in a decision row (tr id="dl-…") is within the 40-word
-cap; a file is justified by exactly one split row;
+cap; a file is justified by exactly one split row; main's single
+<code data-commit-types> declaration is well-formed and reserves the types
+the tool operates (seed, audit, review);
 a depends-on target's rendered text differs from the text in the tree of the
 last review naming the dependent claim; a link's source id differs from the
 basis commit; rel="depends-on" rides only on <a href> elements; unresolved
@@ -65,9 +67,11 @@ introductions nor its reviews. `seed:` types a deliberate initialization or
 replacement of an instance's lineage, scoped to the files the commit touches;
 a body line can never type a commit, and maintenance types never floor.
 
-HOOK (dl-hook). Two hooks run `lspec check --staged` on the staged tree:
-pre-commit for the structural checks, commit-msg for the review gate — the
-subject does not exist until commit-msg. The gate compares obligations
+HOOK (dl-hook). Two hooks run `lspec check --staged`, which reads the index
+itself — an unstaged edit never makes a broken staged tree pass. pre-commit
+runs structure and the seal gate; commit-msg runs the review gate and
+the commit-vocabulary gate — the subject does not exist until commit-msg.
+The review gate compares obligations
 computed against HEAD (over HEAD's own edges) with obligations against the
 candidate tree. Created by this commit: warning. Already outstanding at HEAD:
 blocks, unless the subject is a recorded `review:` naming the claim or a
@@ -78,6 +82,27 @@ comparison blocks. Unknown history blocks, with both recovery paths: fetch
 sufficient history, or record an explicit review against committed state. A
 verified unborn HEAD (first commit) owes nothing and only warns. `lspec
 review` needs no side channel: the hook reads the same subject history does.
+The vocabulary gate rejects a subject whose type prefix is absent from main's
+staged data-commit-types declaration; a legacy document without one is
+reported ("commit vocabulary not enforced"), never defaulted.
+
+SEALED CLAIMS (dl-seal). An element with a stable id and the data-sealed
+attribute is protected: once committed, its normalized text, id, path,
+marker, and collection membership may not change unless the same commit adds
+or substantively updates a dl- row whose data-changes attribute names the
+old repo-relative path#id (whitespace-separated when several). data-changes
+addresses are historical identifiers resolved against the comparison
+baseline, not hyperlinks — a deleted claim need not leave a broken anchor.
+An unchanged or whitespace-only row authorizes nothing. Protection covers
+explicitly marked claims only; the gate requires a recorded decision, not
+proof of its correctness. With no HEAD, declarations are validated and no
+prior-lock obligation applies; unavailable required history fails.
+
+COMPLETION (check --clean). Reports staged, unstaged, and untracked
+non-ignored files repo-wide and exits nonzero while any remain. Read-only and
+standalone (not a staged-tree check, not a pre-commit requirement): it
+detects outstanding changes when invoked; it neither forces invocation nor
+proves that a clean audit was recorded.
 
 SPECIMENS. A pre block marked data-specimen="NAME" is decoded once and checked
 as a single-file specimen: local hyperlinks must use #fragment, never a file
@@ -155,6 +180,8 @@ class Spec(HTMLParser):
         self.ids, self.links, self.elems, self.tags = [], [], {}, {}
         self.count_decls = []    # (data-count value, start offset, tag)
         self.bad_deps = []       # (start offset, tag): rel="depends-on" off <a href>
+        self.sealed = []         # ids of elements carrying data-sealed
+        self.bad_sealed = []     # start offsets: data-sealed on an element with no id
         self._stack, self._pre = [], 0
         self._spans = {}         # start offset -> end offset, every element
         self._lines = [0]
@@ -182,6 +209,11 @@ class Spec(HTMLParser):
             self.tags[eid] = tag
         if a.get("data-count"):
             self.count_decls.append((a["data-count"], self._off(), tag))
+        if "data-sealed" in a:
+            if eid:
+                self.sealed.append(eid)
+            else:
+                self.bad_sealed.append(self._off())
         if tag in VOID:
             if eid and eid not in self.elems:
                 start = self._off()
@@ -483,10 +515,29 @@ def review_baseline(a_path, src, href):
 # ============================================================ collection
 
 class Collection:
-    def __init__(self, main):
+    def __init__(self, main, basis="worktree"):
         self.main = canon(main)
+        self.basis = basis     # 'worktree', 'staged', or a commit ref
         self.specs, self.parents, self.fails, self.orphans, self.disconnected = {}, {}, [], set(), []
         self._build()
+
+    def _read(self, p):
+        """-> (Spec|None, error|None). None spec = absent at this basis."""
+        if self.basis == "worktree":
+            try:
+                return Spec(p), None
+            except OSError as e:
+                return None, f"[collection] cannot read {rel(p)}: {e}"
+        try:
+            return spec_at_basis(p, self.basis), None
+        except HistoryUnavailable as e:
+            return None, f"[collection] cannot read {rel(p)} at {self.basis}: {e}"
+
+    def _exists(self, p):
+        if self.basis == "worktree":
+            return os.path.exists(p)
+        s, _ = self._read(p)
+        return s is not None
 
     def _build(self):
         queue = [self.main]
@@ -495,12 +546,14 @@ class Collection:
             p = queue.pop(0)
             if p in self.specs:
                 continue
-            try:
-                self.specs[p] = Spec(p)
-            except OSError as e:
-                self.fails.append(f"[collection] cannot read {rel(p)}: {e}")
+            s, err = self._read(p)
+            if err:
+                self.fails.append(err)
                 continue
-            for rid, row in self.specs[p].rows("dl-split-"):
+            if s is None:
+                continue             # main/file absent at this basis: empty collection
+            self.specs[p] = s
+            for rid, row in s.rows("dl-split-"):
                 tds = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S)
                 files = re.findall(r'href="([^"#]+\.html)(?:#[^"]*)?"', tds[0]) if tds else []
                 if len(files) != 1:
@@ -512,7 +565,7 @@ class Collection:
                     self.fails.append(f"[split] {rel(child)} justified twice "
                                       f"({self.parents[child][1]}, {rid}) — one parent per file")
                     continue
-                if not os.path.exists(child):
+                if not self._exists(child):
                     self.fails.append(f"[split] {rid} in {rel(p)} links "
                                       f"{files[0]}, which does not exist (ghost row)")
                     continue
@@ -523,13 +576,13 @@ class Collection:
                 if l["rel"] == "external":       # declared outside this collection
                     continue
                 tgt, _ = resolve(p, l["href"])
-                if tgt and tgt not in self.specs and os.path.exists(tgt) and tgt.endswith(".html"):
+                if tgt and tgt not in self.specs and self._exists(tgt) and tgt.endswith(".html"):
                     self.orphans.add(tgt)
         for o in sorted(self.orphans):
             self.fails.append(f"[split] {rel(o)} is linked from the collection "
                               f"but has no split row (orphan)")
         root = os.path.dirname(self.main)
-        for fp in html_files(root):
+        for fp in html_files(root, self.basis):
             if fp not in self.specs and fp not in self.orphans:
                 self.disconnected.append(fp)
 
@@ -564,10 +617,33 @@ class Collection:
                 yield fp, l, tp, fr
 
 
-def html_files(root):
-    """All .html under root. In a git checkout: tracked plus untracked files
-    that .gitignore does not exclude (nested repos are skipped by git itself).
-    Otherwise a plain walk skipping dot-directories."""
+def html_files(root, basis="worktree"):
+    """All .html under root, at BASIS ('worktree', 'staged', or a commit ref).
+    Worktree: tracked plus untracked files that .gitignore does not exclude
+    (nested repos are skipped by git itself); outside git, a plain walk
+    skipping dot-directories. Staged/commit: the index / that tree."""
+    if basis == "staged":
+        top = repo_root()
+        if top is None:
+            return []
+        r = subprocess.run(["git", "ls-files", "--cached", "--full-name", "-z", "--",
+                            repo_rel(root)], capture_output=True, text=True,
+                           cwd=top, check=False)
+        if r.returncode == 0:
+            return sorted(canon(os.path.join(top, y)) for y in r.stdout.split("\0")
+                          if y and y.endswith(".html"))
+        return []
+    if basis != "worktree":
+        top = repo_root()
+        if top is None:
+            return []
+        r = subprocess.run(["git", "ls-tree", "-r", "--full-name", "-z", "--name-only",
+                            basis, "--", repo_rel(root)],
+                           capture_output=True, text=True, cwd=top, check=False)
+        if r.returncode == 0:
+            return sorted(canon(os.path.join(top, y)) for y in r.stdout.split("\0")
+                          if y and y.endswith(".html"))
+        return []
     r = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard",
                         "--full-name", "-z", "--", root], capture_output=True, text=True, check=False)
     if r.returncode == 0:
@@ -683,6 +759,51 @@ def volatile_ordinals(spec, collection_paths=()):
     return len(re.findall(r"(?:&sect;|&#167;|§)\s*\d", body))
 
 
+COMMIT_TYPES_RE = re.compile(r"<code\b(?=[^>]*\bdata-commit-types(?:[\s=>]))[^>]*>(.*?)</code>", re.S)
+RESERVED_TYPES = ("seed", "audit", "review")   # the tool assigns these operational meanings
+
+
+def commit_type_decls(spec):
+    """Texts of a file's data-commit-types declarations (element content is
+    the whitespace-separated vocabulary; the attribute carries no list)."""
+    return [norm(m.group(1)) for m in COMMIT_TYPES_RE.finditer(spec.body)]
+
+
+def commit_types(col, fails):
+    """Validate the collection's commit-vocabulary declarations and return
+    main's vocabulary (list of types) or None when undeclared. Main's single
+    declaration governs; malformed, empty, duplicate, misplaced, or
+    conflicting declarations fail."""
+    main_path = getattr(col, "main", None) or next(iter(col.specs), None)
+    decls = {}
+    for p, s in col.specs.items():
+        ds = commit_type_decls(s)
+        if len(ds) > 1:
+            fails.append(f"[commit-types] {rel(p)}: multiple data-commit-types declarations")
+        if ds:
+            decls[p] = ds[0]
+    types = None
+    for p, text in decls.items():
+        if p != main_path:
+            fails.append(f"[commit-types] {rel(p)}: the declaration belongs in main "
+                         f"({rel(main_path)}), which governs the collection")
+            continue
+        types = text.split()
+        if not types:
+            fails.append(f"[commit-types] {rel(p)}: empty declaration")
+        bad = [t for t in types if not re.fullmatch(r"[a-z][a-z0-9-]*", t)]
+        if bad:
+            fails.append(f"[commit-types] {rel(p)}: malformed type(s): {', '.join(bad)}")
+        dup = sorted({t for t in types if types.count(t) > 1})
+        if dup:
+            fails.append(f"[commit-types] {rel(p)}: duplicate type(s): {', '.join(dup)}")
+        missing = [t for t in RESERVED_TYPES if t not in types]
+        if missing:
+            fails.append(f"[commit-types] {rel(p)}: reserved type(s) {', '.join(missing)} "
+                         f"are required (the tool assigns them operational meanings)")
+    return types
+
+
 def marker_visible(raw):
     """Text the [ADAPT] gate scans: everything except declared template
     content — <pre data-specimen> blocks and <code data-literal> mentions.
@@ -694,6 +815,7 @@ def marker_visible(raw):
 
 def check_structure(col, specimens=True, markers=True):
     fails = list(col.fails)
+    commit_types(col, fails)
     for p, s in col.specs.items():
         r = rel(p)
         idset = set(s.ids)
@@ -719,6 +841,9 @@ def check_structure(col, specimens=True, markers=True):
         for off, tag in getattr(s, "bad_deps", []):
             fails.append(f"[depends-on] {r}: rel=\"depends-on\" on <{tag}>: "
                          f"only <a href> carries an obligation")
+        for off in s.bad_sealed:
+            fails.append(f"[sealed] {r}: data-sealed on an element with no id — "
+                         f"protection needs a stable anchor on the complete claim")
         if markers:
             found = re.findall(r"\[(?:ADAPT|PROJECT)", marker_visible(s.raw))
             if found:
@@ -923,12 +1048,21 @@ def load_hint(col, *paths):
     return "".join(f"  (load whole: lspec show {rel(p)})" for p in seen)
 
 
-def load(args):
+def load(args, basis="worktree"):
     main = args.main or ("live-spec.html" if os.path.exists("live-spec.html") else None)
-    if main is None or not os.path.exists(main):
-        print("lspec: no MAIN (pass --main PATH)", file=sys.stderr)
-        sys.exit(2)
-    return Collection(main)
+    if basis == "worktree":
+        if main is None or not os.path.exists(main):
+            print("lspec: no MAIN (pass --main PATH)", file=sys.stderr)
+            sys.exit(2)
+    else:
+        if main is None or repo_root() is None:
+            print("lspec: --staged requires a git checkout and MAIN", file=sys.stderr)
+            sys.exit(2)
+        if spec_at_basis(main, "staged") is None:
+            print(f"lspec: {main} is not in the index (nothing staged to check)",
+                  file=sys.stderr)
+            sys.exit(2)
+    return Collection(main, basis=basis)
 
 
 def head_status():
@@ -982,17 +1116,21 @@ def head_edges(col, root):
     return edges
 
 
-def gate_claims(msg_path):
-    """-> (named claims, is_seed) from the candidate commit's subject — the
-    first non-comment line of the message file. Body lines never type a
-    commit; the parse matches review_baseline's exactly."""
-    subject = ""
+def gate_subject(msg_path):
+    """The candidate commit's subject: first non-comment line of the message
+    file. Body lines never type a commit."""
     with open(msg_path, encoding="utf-8") as fh:
         for line in fh:
             line = line.rstrip("\n").strip()
             if line and not line.startswith("#"):
-                subject = line
-                break
+                return line
+    return ""
+
+
+def gate_claims(msg_path):
+    """-> (named claims, is_seed) from the candidate commit's subject.
+    The parse matches review_baseline's exactly."""
+    subject = gate_subject(msg_path)
     review = subject_type(subject, "review")
     named = {c.strip() for c in review.split(",")} if review is not None else set()
     return named, subject_type(subject, "seed") is not None
@@ -1031,6 +1169,134 @@ def disappear_cause(r, col):
         return "clearance cannot be established (text differs without a baseline)", True
     except HistoryUnavailable as e:
         return f"clearance cannot be established ({e})", True
+
+
+def vocab_gate(col, rc, msg_path):
+    """The commit-vocabulary gate (commit-msg): the subject's type prefix must
+    come from main's staged data-commit-types declaration. A legacy document
+    without a declaration is reported, not defaulted."""
+    main = col.specs.get(col.main)
+    decls = commit_type_decls(main) if main else []
+    if len(decls) != 1:
+        print("  note: commit vocabulary not enforced "
+              "(no single data-commit-types declaration in main)")
+        return rc
+    allowed = decls[0].split()
+    subject = gate_subject(msg_path)
+    prefix, sep, _ = subject.partition(":")
+    if not sep or not prefix.strip():
+        print(f"  [commit-types] the subject {subject!r} has no `type:` prefix; "
+              f"declared types: {' '.join(allowed)}")
+        return 1
+    if prefix.strip() not in allowed:
+        print(f"  [commit-types] type {prefix.strip()!r} is not in main's declared "
+              f"vocabulary: {' '.join(allowed)}")
+        return 1
+    return rc
+
+
+def _row_key(row):
+    """Whitespace-insensitive row markup: attribute edits count; pure
+    whitespace edits do not — including whitespace added between tags."""
+    return re.sub(r">\s+<", "><", re.sub(r"\s+", " ", row)).strip()
+
+
+def seal_gate(col, rc):
+    """The seal gate (staged checking): a claim marked data-sealed at
+    HEAD may not change — normalized text, deletion, id/path change, marker
+    removal, or leaving the collection — unless the same commit adds or
+    substantively updates a dl- row whose data-changes names the old
+    repo-relative path#id. Protection is read from HEAD; authorization from
+    the staged tree. The gate requires a recorded decision, not proof the
+    decision is sound."""
+    root = repo_root()
+    if root is None:
+        return rc
+    state = head_status()
+    if state == "unborn":
+        return rc            # declarations are validated structurally; no prior lock
+    if state != "ok":
+        print("  [sealed] HEAD is unresolvable; locked-claim protection cannot "
+              "be evaluated (fetch or repair history)")
+        return 1
+    hcol = Collection(rel(col.main), basis="HEAD")
+    if col.main in hcol.specs:
+        hspecs = dict(hcol.specs)
+    else:
+        # Main is new or renamed in this commit: no collection is addressable
+        # at the baseline. Fail safe — scan every html file at HEAD under
+        # main's directory so a deletion cannot strand a protected claim.
+        hspecs = {}
+        for p in html_files(os.path.dirname(col.main), "HEAD"):
+            try:
+                s = file_at("HEAD", p)
+            except HistoryUnavailable as e:
+                print(f"  [sealed] baseline unavailable: {e}")
+                return 1
+            if s is not None:
+                hspecs[p] = s
+    violations = []
+    for p, s in hspecs.items():
+        for i in getattr(s, "sealed", []):
+            name = f"{repo_rel(p)}#{i}"
+            staged = file_staged(p)
+            if staged is None:
+                violations.append(((p, i), name, "file deleted"))
+            elif p not in col.specs:
+                violations.append(((p, i), name,
+                                   "file leaves the collection (its split row is gone)"))
+            elif i not in staged.elems:
+                violations.append(((p, i), name, "claim deleted or id changed"))
+            elif i not in staged.sealed:
+                violations.append(((p, i), name, "data-sealed marker removed"))
+            elif staged.text(i) != s.text(i):
+                violations.append(((p, i), name, "content changed"))
+    if not violations:
+        return rc
+    covered, problems = set(), []
+    for p, s in col.specs.items():
+        try:
+            base = file_at("HEAD", p)
+        except HistoryUnavailable as e:
+            print(f"  [sealed] baseline unavailable for {rel(p)}: {e}")
+            rc = 1
+            continue
+        old_rows = dict(base.rows()) if base else {}
+        for rid, row in s.rows():
+            if rid in old_rows and _row_key(old_rows[rid]) == _row_key(row):
+                continue         # an unchanged row authorizes nothing
+            m = re.search(r'\bdata-changes="([^"]*)"', row)
+            if not m:
+                continue
+            for a in m.group(1).split():
+                apath, sep, frag = a.partition("#")
+                if (not sep or not apath or not frag or apath.startswith("/")
+                        or re.match(r"[A-Za-z]:", apath)
+                        or ".." in apath.split("/")):
+                    problems.append(f"[sealed] {rel(p)} {rid}: bad data-changes address "
+                                    f"{a!r} (want repo-relative path#id)")
+                    continue
+                bp = canon(os.path.join(root, apath))
+                try:
+                    bspec = file_at("HEAD", bp)
+                except HistoryUnavailable as e:
+                    problems.append(f"[sealed] {rel(p)} {rid}: cannot resolve {a!r} "
+                                    f"at HEAD ({e})")
+                    continue
+                if bspec is None or frag not in bspec.elems:
+                    problems.append(f"[sealed] {rel(p)} {rid}: data-changes address "
+                                    f"{a!r} does not resolve at HEAD")
+                    continue
+                covered.add((bp, frag))
+    for prob in problems:
+        print("  " + prob)
+        rc = 1
+    for (p, i), name, cause in violations:
+        if (p, i) not in covered:
+            print(f"  [sealed] {name}: {cause} — a sealed claim changes only with a new "
+                  f"or updated dl- row carrying data-changes=\"{name}\" in the same commit")
+            rc = 1
+    return rc
 
 
 def review_gate(col, rc, msg_path):
@@ -1116,10 +1382,62 @@ def review_gate(col, rc, msg_path):
     return rc
 
 
+def cmd_clean():
+    """check --clean: the session-completion check. Report staged, unstaged,
+    and untracked (non-ignored) files repo-wide; nonzero while any remain.
+    Read-only: it neither stages, commits, discards, nor repairs, and a clean
+    result proves only that nothing was outstanding when invoked."""
+    root = repo_root()
+    if root is None:
+        print("lspec check --clean: not a git checkout", file=sys.stderr)
+        return 2
+    r = git("status", "--porcelain=v1", "-z", cwd=root)
+    staged, unstaged, untracked = [], [], []
+    entries = r.split("\0")
+    i = 0
+    while i < len(entries):
+        e = entries[i]
+        i += 1
+        if not e:
+            continue
+        x, y, path = e[0], e[1], e[3:]
+        if x in "RC" or y in "RC":
+            i += 1                     # rename/copy: the original path follows
+        if x == "?":
+            untracked.append(path)
+            continue
+        if x != " ":
+            staged.append(path)
+        if y != " ":
+            unstaged.append(path)
+    try:
+        head = git("rev-parse", "--short", "HEAD", cwd=root).strip()
+    except (RuntimeError, OSError):
+        head = "no commits yet"
+    print(f"basis {head}")
+    n = len(staged) + len(unstaged) + len(untracked)
+    if not n:
+        print("CLEAN — no staged, unstaged, or untracked changes")
+        return 0
+    print(f"UNCLEAN — {n} file(s) outstanding:")
+    for label, paths in (("staged", staged), ("unstaged", unstaged),
+                         ("untracked", untracked)):
+        for pth in paths:
+            print(f"  {label}: {pth}")
+    print("  record or discard the changes; --clean never does either itself")
+    return 1
+
+
 def cmd_check(args):
-    col = load(args)
-    rels = [rel(p) for p in col.specs]
+    if getattr(args, "clean", False):
+        if getattr(args, "staged", False) or getattr(args, "commit_msg", None):
+            print("lspec check: --clean stands alone — it reports the working tree and "
+                  "index; it is not a staged-tree check", file=sys.stderr)
+            return 2
+        return cmd_clean()
     staged = bool(getattr(args, "staged", False) or getattr(args, "commit_msg", None))
+    col = load(args, basis="staged" if staged else "worktree")
+    rels = [rel(p) for p in col.specs]
     line, dirty = stamp(staged=staged)
     print(line)
     for d in col.disconnected:
@@ -1140,7 +1458,10 @@ def cmd_check(args):
         counts = ", ".join(f"{n} {g[0]}" for g, n in s.count_groups) or "no counts declared"
         print(f"PASS — {len(col.specs)} file(s); {rel(col.main)}: {counts}; "
               f"all structural checks green")
+    if staged:
+        rc = seal_gate(col, rc)
     if getattr(args, "commit_msg", None) and repo_root() is not None:
+        rc = vocab_gate(col, rc, args.commit_msg)
         rc = review_gate(col, rc, args.commit_msg)
     if args.neighborhood:
         print()
@@ -1540,6 +1861,9 @@ def main(argv):
                         "(instance readiness is the default)")
     c.add_argument("--staged", action="store_true",
                    help="evaluate the candidate commit (the index), not the working tree")
+    c.add_argument("--clean", action="store_true",
+                   help="completion check: report staged/unstaged/untracked files "
+                        "repo-wide; nonzero while any remain (stands alone)")
     c.add_argument("--commit-msg", dest="commit_msg", metavar="FILE",
                    help="run the review gate with the candidate commit's subject "
                         "read from FILE (the commit-msg hook)")
@@ -1555,7 +1879,7 @@ def main(argv):
     args = ap.parse_args(argv[1:])
     if args.verb is None:
         args.verb = "check"; args.main_pos = None; args.diff = None; args.neighborhood = None
-        args.template = False; args.staged = False; args.commit_msg = None
+        args.template = False; args.staged = False; args.commit_msg = None; args.clean = False
     if getattr(args, "main_pos", None):
         args.main = args.main_pos
     try:

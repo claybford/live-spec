@@ -759,8 +759,7 @@ class RevisionRegressions(unittest.TestCase):
                 ('[ADAPT — confirmed(source) / provisional(source) / locked / open / WATCH]',
                  'confirmed(source) / provisional(source) / locked / open / WATCH'),
                 ('[ADAPT: 40]', '40'),
-                ('[ADAPT: lspec]', 'lspec'),
-                ('[ADAPT: docs / fix / seed / audit / review]', 'docs / fix / seed / audit / review')]:
+                ('[ADAPT: lspec]', 'lspec')]:
             seed = seed.replace(marker, fill)
         return seed
 
@@ -1197,6 +1196,58 @@ class HookIntegration(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn('OWED: none', out)
 
+    def test_hook_blocks_broken_staged_tree_despite_worktree_repair(self):
+        d = self.hrepo()
+        edit(d, 'motor.html', 'id="power"', 'id="torque"')       # breaks main's link
+        sh('git', 'add', '-A', cwd=d)                            # staged: broken
+        edit(d, 'motor.html', 'id="torque"', 'id="power"')       # worktree: repaired
+        r = self.gcommit(d, 'docs: broken candidate')
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('anchor', r.stdout + r.stderr)
+
+    def test_hook_passes_valid_staged_tree_despite_worktree_breakage(self):
+        d = self.hrepo()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        sh('git', 'add', '-A', cwd=d)                            # staged: valid
+        edit(d, 'motor.html', 'id="power"', 'id="torque"')       # worktree: broken
+        r = self.gcommit(d, 'docs: derate')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_hook_enforces_declared_vocabulary(self):
+        d = self.hrepo()
+        edit(d, 'main.html', '<table>',
+             '<p>Types: <code data-commit-types>docs fix seed audit review</code></p><table>')
+        r = self.gcommit(d, 'docs: declare the vocabulary', add=['main.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        r = self.gcommit(d, 'chore: derate', add=['motor.html'])
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("'chore'", r.stdout + r.stderr)
+        r = self.gcommit(d, 'docs: derate', add=['motor.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_hook_reports_legacy_absence_without_enforcing(self):
+        d = self.hrepo()   # fixture declares no vocabulary
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        r = self.gcommit(d, 'untyped-ish: derate', add=['motor.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('commit vocabulary not enforced', r.stdout + r.stderr)
+
+    def test_hook_seal_gate_blocks_unauthorized_sealed_edit(self):
+        d = self.hrepo()
+        edit(d, 'main.html', '<table>', '<p id="req" data-sealed>The pair rule holds.</p><table>')
+        r = self.gcommit(d, 'docs: lock the pair rule', add=['main.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
+        r = self.gcommit(d, 'docs: bend the rule', add=['main.html'])
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('[sealed] main.html#req', r.stdout + r.stderr)
+        edit(d, 'main.html', '</table>\n</main></body></html>',
+             '<tr id="dl-req" data-changes="main.html#req"><td>Bend it</td>'
+             '<td>Keep rigid</td><td>New evidence.</td></tr></table>\n</main></body></html>')
+        r = self.gcommit(d, 'docs: bend the rule', add=['main.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_shallow_clone_recovers_by_unshallowing(self):
         d = self.hrepo()
         edit(d, 'motor.html', '120 kW', '105 kW')
@@ -1216,6 +1267,300 @@ class HookIntegration(unittest.TestCase):
         self.assertNotIn('clearance cannot be established', r.stdout + r.stderr)
         r = self.gcommit(c, 'review: main.html#claim')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+# ------------------------------------------------- staged-tree fidelity
+
+class StagedTree(unittest.TestCase):
+    """check --staged must read the index itself, not the working tree —
+    directly and through the real hooks."""
+
+    def add_lock_free_break(self, d):
+        edit(d, 'motor.html', 'id="power"', 'id="torque"')   # breaks main's link
+
+    def test_staged_broken_despite_valid_worktree_repair(self):
+        d = repo()
+        self.add_lock_free_break(d)
+        sh('git', 'add', '-A', cwd=d)                 # staged: broken
+        edit(d, 'motor.html', 'id="torque"', 'id="power"')   # worktree: repaired
+        rc, out = cli(d, 'check', '--staged')
+        self.assertEqual(rc, 1, out)                  # the candidate commit is red
+        self.assertIn('anchor', out)
+        rc, out = cli(d, 'check')
+        self.assertEqual(rc, 0, out)                  # the working tree is green
+
+    def test_staged_valid_despite_worktree_breakage(self):
+        d = repo()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        sh('git', 'add', '-A', cwd=d)                 # staged: valid
+        self.add_lock_free_break(d)                   # worktree: broken
+        rc, out = cli(d, 'check', '--staged')
+        self.assertEqual(rc, 0, out)
+        rc, out = cli(d, 'check')
+        self.assertEqual(rc, 1, out)
+
+
+# ------------------------------------------------- commit vocabulary
+
+DECL = '<code data-commit-types>{}</code>'
+
+class CommitTypes(unittest.TestCase):
+    def drepo(self, decl=DECL.format('docs fix seed audit review')):
+        d = repo()
+        edit(d, 'main.html', '<table>', '<p>Types: ' + decl + '</p><table>')
+        commit(d, 'docs: declare the vocabulary')
+        return d
+
+    def gate(self, d, subject):
+        msg = os.path.join(d, 'msg')
+        Path(msg).write_text(subject + '\n', encoding='utf-8')
+        return cli(d, 'check', '--staged', '--commit-msg', msg)
+
+    def test_declaration_validation(self):
+        ok = '</table><p>' + DECL.format('docs fix seed audit review') + '</p><table>'
+        rc, out = run(main_extra=ok); self.assertEqual(rc, 0, out)
+        rc, out = run(main_extra='</table><p>' + DECL.format('') + '</p><table>')
+        self.assertEqual(rc, 1); self.assertIn('empty declaration', out)
+        rc, out = run(main_extra='</table><p>' + DECL.format('docs Fix! seed audit review') + '</p><table>')
+        self.assertEqual(rc, 1); self.assertIn('malformed', out)
+        rc, out = run(main_extra='</table><p>' + DECL.format('docs docs fix seed audit review') + '</p><table>')
+        self.assertEqual(rc, 1); self.assertIn('duplicate', out)
+        rc, out = run(main_extra='</table><p>' + DECL.format('docs fix') + '</p><table>')
+        self.assertEqual(rc, 1); self.assertIn('reserved', out)
+        two = DECL.format('docs fix seed audit review') + DECL.format('docs fix seed audit review')
+        rc, out = run(main_extra='</table><p>' + two + '</p><table>')
+        self.assertEqual(rc, 1); self.assertIn('multiple', out)
+
+    def test_declaration_belongs_in_main(self):
+        rc, out = run(main_extra='</table><p>' + DECL.format('docs fix seed audit review') + '</p><table>',
+                      motor_extra='<p>' + DECL.format('docs fix seed audit review') + '</p>')
+        self.assertEqual(rc, 1); self.assertIn('belongs in main', out)
+
+    def test_gate_accepts_declared_type(self):
+        d = self.drepo()
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        rc, out = self.gate(d, 'docs: derate')
+        self.assertEqual(rc, 0, out)
+
+    def test_gate_rejects_undeclared_and_missing_types(self):
+        d = self.drepo()
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        rc, out = self.gate(d, 'chore: derate')
+        self.assertEqual(rc, 1); self.assertIn("'chore'", out)
+        rc, out = self.gate(d, 'no prefix here')
+        self.assertEqual(rc, 1); self.assertIn('no `type:` prefix', out)
+
+    def test_gate_honors_custom_vocabulary(self):
+        d = self.drepo(DECL.format('docs fix seed audit review wip'))
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        rc, out = self.gate(d, 'wip: derate')
+        self.assertEqual(rc, 0, out)
+
+    def test_legacy_absence_is_reported_not_defaulted(self):
+        d = repo()   # no declaration anywhere
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        rc, out = self.gate(d, 'anything: goes')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('commit vocabulary not enforced', out)
+
+    def test_review_and_seed_subjects_still_pass_with_declaration(self):
+        d = self.drepo()
+        edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
+        rc, out = self.gate(d, 'review: main.html#claim')
+        self.assertEqual(rc, 0, out)
+
+
+# ------------------------------------------------- seal gate
+
+LOCKED = '</table><p id="req" data-sealed>The pair rule holds.</p><table>'
+
+def lrepo():
+    d = tempfile.mkdtemp()
+    open(os.path.join(d, 'main.html'), 'w').write(MAIN.format(extra=LOCKED))
+    open(os.path.join(d, 'motor.html'), 'w').write(MOTOR.format(extra=''))
+    sh('git', 'init', '-q', cwd=d)
+    sh('git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '-A', cwd=d)
+    sh('git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'docs: seed', cwd=d)
+    return d
+
+def authorize(d, row_id, changes, where='main.html'):
+    """Add a dl- row carrying data-changes to WHERE's table."""
+    edit(d, where, '</table>\n</main></body></html>',
+         f'<tr id="{row_id}" data-changes="{changes}"><td>s</td><td>r</td><td>w</td></tr>'
+         '</table>\n</main></body></html>')
+
+class SealGate(unittest.TestCase):
+    def staged(self, d):
+        sh('git', 'add', '-A', cwd=d)
+        return cli(d, 'check', '--staged')
+
+    def test_protected_edit_blocked_then_authorized(self):
+        d = lrepo()
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('[sealed] main.html#req: content changed', out)
+        authorize(d, 'dl-req', 'main.html#req')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 0, out)
+
+    def test_marker_removal_blocked(self):
+        d = lrepo()
+        edit(d, 'main.html', ' data-sealed', '')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('marker removed', out)
+
+    def test_claim_deletion_blocked(self):
+        d = lrepo()
+        edit(d, 'main.html', '<p id="req" data-sealed>The pair rule holds.</p>', '')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('claim deleted or id changed', out)
+
+    def test_id_rename_is_authorized_by_old_address(self):
+        d = lrepo()
+        edit(d, 'main.html', 'id="req"', 'id="rule"')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)
+        authorize(d, 'dl-req', 'main.html#req')   # historical id, resolved at HEAD
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 0, out)
+
+    def test_file_deletion_blocked(self):
+        d = lrepo()
+        edit(d, 'motor.html', '<h1 id="top">Motor</h1>',
+             '<h1 id="top">Motor</h1><p id="mreq" data-sealed>Motor mount is locked.</p>')
+        edit(d, 'main.html', 'motor power</a>.', 'motor power</a> and <a href="motor.html#mreq">mount</a>.')
+        commit(d, 'docs: lock the mount')
+        sh('git', 'rm', '-q', 'motor.html', cwd=d)
+        edit(d, 'main.html', '<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
+        edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>', 'motor power')
+        edit(d, 'main.html', ' and <a href="motor.html#mreq">mount</a>', '')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('[sealed] motor.html#mreq: file deleted', out)
+
+    def test_split_row_removal_blocked(self):
+        d = lrepo()
+        edit(d, 'motor.html', '<h1 id="top">Motor</h1>',
+             '<h1 id="top">Motor</h1><p id="mreq" data-sealed>Motor mount is locked.</p>')
+        commit(d, 'docs: lock the mount')
+        edit(d, 'main.html', '<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('leaves the collection', out)
+
+    def test_unrelated_or_unchanged_rows_authorize_nothing(self):
+        d = lrepo()
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
+        authorize(d, 'dl-other', 'main.html#top')   # names a different (unlocked) claim
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('[sealed] main.html#req', out)
+
+    def test_stale_authorization_row_authorizes_nothing(self):
+        d = lrepo()
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
+        authorize(d, 'dl-req', 'main.html#req')
+        commit(d, 'docs: bend the rule')         # the authorized change landed
+        edit(d, 'main.html', 'The pair rule bends.', 'The pair rule breaks.')
+        # a new change with only the old, unchanged row present must still block
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('[sealed] main.html#req', out)
+
+    def test_whitespace_only_row_edit_authorizes_nothing(self):
+        d = lrepo()
+        authorize(d, 'dl-req', 'main.html#req')
+        commit(d, 'docs: authorize once')
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
+        edit(d, 'main.html', '<td>s</td><td>r</td><td>w</td></tr>',
+             '<td>s</td> <td>r</td><td>w</td></tr>')   # whitespace only
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('[sealed] main.html#req', out)
+
+    def test_bad_data_changes_address_is_red(self):
+        d = lrepo()
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
+        authorize(d, 'dl-req', 'main.html#nosuchid')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('does not resolve at HEAD', out)
+
+    def test_unborn_head_validates_without_obligation(self):
+        d = tempfile.mkdtemp()
+        open(os.path.join(d, 'main.html'), 'w').write(MAIN.format(extra=LOCKED))
+        open(os.path.join(d, 'motor.html'), 'w').write(MOTOR.format(extra=''))
+        sh('git', 'init', '-q', cwd=d)
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'check', '--staged')
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('[sealed]', out)
+
+    def test_unavailable_baseline_fails_never_clears(self):
+        d = lrepo()
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
+        sh('git', 'add', '-A', cwd=d)
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            col = lspec.Collection('main.html', basis='staged')
+            with mock.patch.object(lspec, 'file_at',
+                                   side_effect=lspec.HistoryUnavailable('object unavailable')):
+                rc = lspec.seal_gate(col, 0)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 1)
+
+    def test_data_sealed_without_id_is_structural_red(self):
+        rc, out = run(main_extra='</table><p data-sealed>x</p><table>')
+        self.assertEqual(rc, 1)
+        self.assertIn('data-sealed on an element with no id', out)
+
+
+# ------------------------------------------------- completion check
+
+class CleanCheck(unittest.TestCase):
+    def test_clean_dirty_states(self):
+        d = repo()
+        rc, out = cli(d, 'check', '--clean')
+        self.assertEqual(rc, 0, out); self.assertIn('CLEAN', out)
+        edit(d, 'motor.html', '120 kW', '105 kW')     # unstaged
+        rc, out = cli(d, 'check', '--clean')
+        self.assertEqual(rc, 1); self.assertIn('unstaged: motor.html', out)
+        sh('git', 'add', '-A', cwd=d)                 # staged
+        rc, out = cli(d, 'check', '--clean')
+        self.assertEqual(rc, 1); self.assertIn('staged: motor.html', out)
+        self.assertNotIn('unstaged: motor.html', out)
+        commit(d, 'docs: derate')
+        rc, out = cli(d, 'check', '--clean')
+        self.assertEqual(rc, 0, out)
+
+    def test_untracked_and_non_spec_files_reported(self):
+        d = repo()
+        Path(d, 'notes.txt').write_text('draft', encoding='utf-8')
+        rc, out = cli(d, 'check', '--clean')
+        self.assertEqual(rc, 1); self.assertIn('untracked: notes.txt', out)
+
+    def test_works_from_a_subdirectory(self):
+        d = repo()
+        Path(d, 'sub').mkdir()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        cwd = os.getcwd(); os.chdir(os.path.join(d, 'sub'))
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                rc = lspec.main(['lspec', 'check', '--clean'])
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 1)
+        self.assertIn('unstaged: motor.html', out.getvalue())
+
+    def test_clean_stands_alone(self):
+        d = repo()
+        rc, out = cli(d, 'check', '--clean', '--staged')
+        self.assertEqual(rc, 2); self.assertIn('stands alone', out)
 
 
 if __name__ == "__main__":

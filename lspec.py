@@ -396,6 +396,22 @@ def spec_at_basis(path, basis):
     return file_at(basis, path)
 
 
+def exists_at(path, basis):
+    """Existence of PATH at BASIS ('staged' or a commit ref) from index/tree
+    metadata alone — no blob read, so a binary link target cannot crash the
+    check. Contents are parsed only when they are actually needed."""
+    root = repo_root()
+    if root is None:
+        raise HistoryUnavailable("not a git checkout")
+    rr = repo_rel(path)
+    if basis == "staged":
+        return bool(git("ls-files", "-s", "-z", "--", rr, cwd=root).strip())
+    entry = git("ls-tree", "-z", basis, "--", rr, cwd=root)
+    if not entry:
+        return False
+    return entry.partition("\t")[0].split()[1] == "blob"
+
+
 def stamp(staged=False):
     if repo_root() is None:
         return "basis: not a git checkout", False
@@ -536,8 +552,7 @@ class Collection:
     def _exists(self, p):
         if self.basis == "worktree":
             return os.path.exists(p)
-        s, _ = self._read(p)
-        return s is not None
+        return exists_at(p, self.basis)
 
     def _build(self):
         queue = [self.main]

@@ -1604,6 +1604,42 @@ class StagedLinkTargets(unittest.TestCase):
         rc, out = cli(d, 'check')
         self.assertEqual(rc, 1, out)
 
+    PNG = b'\x89PNG\r\n\x1a\n\xff\xd8\xff binary \x00\x01'
+
+    def test_committed_binary_link_target_passes_staged(self):
+        d = repo()
+        Path(d, 'diagram.png').write_bytes(self.PNG)
+        sh('git', 'add', 'diagram.png', cwd=d); commit(d, 'docs: diagram')
+        edit(d, 'motor.html', '</main>', '<a href="diagram.png">Diagram</a></main>')
+        sh('git', 'add', 'motor.html', cwd=d)
+        rc, out = cli(d, 'check', '--staged')
+        self.assertEqual(rc, 0, out)          # metadata existence, no blob decode
+        rc, out = cli(d, 'check')
+        self.assertEqual(rc, 0, out)
+
+    def test_untracked_binary_link_target_fails_staged_only(self):
+        d = repo()
+        Path(d, 'diagram.png').write_bytes(self.PNG)                    # untracked
+        edit(d, 'motor.html', '</main>', '<a href="diagram.png">Diagram</a></main>')
+        sh('git', 'add', 'motor.html', cwd=d)
+        rc, out = cli(d, 'check', '--staged')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('file not in collection', out)
+        rc, out = cli(d, 'check')
+        self.assertEqual(rc, 0, out)
+
+    def test_unstaged_deleted_binary_keeps_staged_green(self):
+        d = repo()
+        Path(d, 'diagram.png').write_bytes(self.PNG)
+        sh('git', 'add', 'diagram.png', cwd=d); commit(d, 'docs: diagram')
+        edit(d, 'motor.html', '</main>', '<a href="diagram.png">Diagram</a></main>')
+        sh('git', 'add', 'motor.html', cwd=d)
+        os.remove(os.path.join(d, 'diagram.png'))                       # worktree: deleted
+        rc, out = cli(d, 'check', '--staged')
+        self.assertEqual(rc, 0, out)
+        rc, out = cli(d, 'check')
+        self.assertEqual(rc, 1, out)
+
 
 # ------------------------------------------------- completion check
 

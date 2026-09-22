@@ -64,10 +64,10 @@
   <li><strong>A status vocabulary with provisional values</strong> (<a href="#p5">P5</a>/<a href="#p6">P6</a>) &mdash; trust is legible and work is not blocked.</li>
   <li><strong>A decision log with rejected alternatives</strong> (<a href="#p11">P11</a>) &mdash; settled choices stay settled.</li>
 </ol>
-<p>Add the scope fence (<a href="#p12">P12</a>) the first time a session derails into a non-goal, the sweep (<a href="#p8">P8</a>) the first time a conclusion blocks on one unknown, and the de-drift pass (<a href="#p2">P2</a>) once restatement creeps in. In the live-system regime, promote the <a href="#p17">ruled-out register</a> the first time a session re-proposes an eliminated cause, and the <a href="#v-diagnostic">diagnostic register</a> the second time the same failure is diagnosed; the seed carries the <a href="#p18">directive</a> slot from day one &mdash; fill it with a real stance the first time a session routes around a problem instead of fixing it. Split into a second file only when a session can write the <a href="#v-splitrow">split row</a> (<a href="#p19">P19</a>); until then the spec is one file.</p>
+<p>Add the scope fence (<a href="#p12">P12</a>) the first time a session derails into a non-goal, the sweep (<a href="#p8">P8</a>) the first time a conclusion blocks on one unknown, and the de-drift pass (<a href="#p2">P2</a>) once restatement creeps in. In the live-system regime, promote the <a href="#p17">ruled-out register</a> the first time a session re-proposes an eliminated cause, and the <a href="#v-diagnostic">diagnostic register</a> the second time a confirmed failure is diagnosed; the seed carries the <a href="#p18">directive</a> slot from day one &mdash; fill it with a real stance the first time a session routes around a problem instead of fixing it. Split into a second file only when a session can write the <a href="#v-splitrow">split row</a> (<a href="#p19">P19</a>); until then the spec is one file.</p>
 
 <h4 id="seed">The seed &mdash; kicking off a new spec</h4>
-<p>Copy the <a href="#dl-seed">seed</a> verbatim into a new file. Fill its slots using this methodology; resolve every <code data-literal>[ADAPT]</code> choice (validate the template with <code>lspec check --template</code>), then put it under version control &mdash; the first commit is typed <code>seed:</code> and starts the lineage. Carry the operating rules needed by the features you use. Do not copy this methodology's explanatory body or decision history. Add optional registers when their triggers arise (<a href="#regimes">regimes</a>).</p>
+<p>Copy the <a href="#dl-seed">seed</a> verbatim into a new file. Fill its slots using this methodology; resolve every <code data-literal>[ADAPT]</code> choice (validate the template with <code>lspec check --template</code>), then put it under version control &mdash; the first commit is typed <code>seed:</code> and starts the lineage. Carry the operating rules needed by the features you use. Before the seed commit, identify claims whose validity depends on another claim remaining true and wire those dependencies with <code>rel="depends-on"</code>; navigation alone earns no edge. Record the assessment in the seed commit body, including the reason if no dependencies qualify. Do not copy this methodology's explanatory body or decision history. Add optional registers when their triggers arise (<a href="#regimes">regimes</a>).</p>
 <pre data-specimen="seed">&lt;!DOCTYPE html&gt;&lt;html lang="en"&gt;&lt;head&gt;&lt;meta charset="UTF-8"&gt;
 &lt;title&gt;[PROJECT] &mdash; Living Specification&lt;/title&gt;
 &lt;link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css"&gt;
@@ -75,9 +75,11 @@
 
 &lt;h1&gt;[PROJECT]&lt;/h1&gt;
 &lt;p id="status"&gt;Status: [forward design | live-system]. Locked: [&hellip;].
-  Open: [&hellip;]. Top risk: [&hellip;]. This status line is a derived view: on
-  every change re-derive it whole from the locked list, open table, and top-risk
-  source; a clause with no source is deleted.&lt;/p&gt;
+  Open: [&hellip;]. Top risk: [&hellip;]. This status line is a derived view.
+  When reporting recorded state, attribute it to the spec; when changing state,
+  re-derive the line whole from the locked list, open table, and top-risk
+  source. Delete a clause with no source, and surface any contradiction with
+  its sources.&lt;/p&gt;
 &lt;p id="directive"&gt;Ethos: [ADAPT &mdash; the one stance governing every edit].&lt;/p&gt;
 &lt;p id="conventions"&gt;Conventions: the whole file is the load unit &mdash; keep the document short; read it whole.
   A second file exists only by a split row at its parent. Main is read first
@@ -99,8 +101,8 @@
   session would plausibly re-propose the rejected alternative; a lock resting on
   an assumption names it and the condition that reopens the decision. Commit messages
   are concise typed transition lines pointing to rationale
-  [ADAPT: docs / fix / seed / audit / review]; a recorded review's subject stays
-  one typed line and its body may carry the assessment.
+  [ADAPT: docs / fix / seed / audit / review]; a recorded review's or seed
+  commit's subject stays one typed line and its body may carry the assessment.
   Session protocol: load the whole
   file &rarr; make one move (close an unknown &middot; decide &middot; recompute &middot;
   extend + fence &middot; de-drift &middot; split &middot; review &middot; flag an event &middot; sweep)
@@ -116,6 +118,9 @@
    &lt;code&gt;depends-on&lt;/code&gt; link, find the newest &lt;code&gt;review:&lt;/code&gt;
    commit naming the dependent claim (else the commit introducing the link); if
    the target's text at HEAD differs from that tree, the review is owed.
+   A missing instruction referent is reported, not silently reconstructed;
+   state the interpretation before acting, and clarify when alternatives would
+   materially change the edit.
    A dependency is &lt;code&gt;&amp;lt;a rel="depends-on" href="#target"&amp;gt;&lt;/code&gt;
    inside the dependent claim; the dependent claim is the link's nearest ancestor
    with an id; source and target ids each enclose a complete claim (wrap prose in
@@ -135,9 +140,11 @@
 
 &lt;h2 id="open"&gt;Open Items&lt;/h2&gt;
 &lt;p&gt;A watch entry is an open-items row: claim, triggering event, date,
-  re-verifies-when. A failure diagnosed a second time earns a diagnostic-register
-  row (symptom &middot; tell &middot; fix); a ruled-out register is kept when an
-  eliminated cause is re-proposed.&lt;/p&gt;
+  re-verifies-when. When handling a failure, check for an established diagnosis:
+  a confirmed failure diagnosed a second time earns a diagnostic-register row
+  (symptom &middot; tell &middot; fix). Any unresolved work remains in the open
+  list and links to that row. Repeated symptoms alone do not confirm a diagnosis.
+  Keep a ruled-out register when an eliminated cause is re-proposed.&lt;/p&gt;
 &lt;table&gt;&lt;tr&gt;&lt;th&gt;Item&lt;/th&gt;&lt;th&gt;Gates&lt;/th&gt;&lt;th&gt;Resolves when&lt;/th&gt;&lt;/tr&gt;&lt;/table&gt;
 
 &lt;h2 id="log"&gt;Decision Log&lt;/h2&gt;
@@ -227,7 +234,7 @@
   <li><strong>"Confirmed" is not monotonic.</strong> The environment moves underneath the design. Demotion is event-triggered: the fact gains a minimal <code>[WATCH]</code> marker; the event, date, and re-verification condition live in a <a href="#v-watch">watch entry</a> in the open list (<a href="#p5">P5</a>, <a href="#dl-watchreg">dl-watchreg</a>).</li>
   <li><strong>Unknowns are often not yours to close.</strong> Externally-owned blockers pair a locked workaround with a watch and a <a href="#v-tombstone">tombstone</a> flagged for deletion when the external trigger fires (<a href="#p9">P9</a>).</li>
   <li><strong>Settled <em>diagnoses</em> need protecting, not just settled choices.</strong> Maintenance is mostly debugging; disproven causes get their own register (<a href="#p17">P17</a>).</li>
-  <li><strong>Maintenance gains a <a href="#v-diagnostic">diagnostic register</a>.</strong> Recurring failures earn a symptom &middot; tell &middot; fix row beside the ruled-out register.</li>
+  <li><strong>Maintenance gains a <a href="#v-diagnostic">diagnostic register</a>.</strong> Confirmed recurring failures earn a symptom &middot; tell &middot; fix row beside the ruled-out register.</li>
 </ul>
 <p>The regime is orthogonal to the domain: any column of <a href="#generalize">the type mapping</a> can be either, and a design crosses from the first regime into the second the day it ships. These regimes organize the work; they do not forbid a forward-design session from demoting an invalidated assumption or recording a recurring prototype failure. Use those operations when their triggering conditions arise.</p>
 
@@ -325,7 +332,7 @@
 
 <section id="p14">
 <h4>P14 &middot; A bootloader line</h4>
-<p><strong>Rule:</strong> open with a few sentences giving lifecycle stage, what is locked, what remains, and the top risk &mdash; present-tense state only. Change notes and derivation narrative live in git and the decision log, never up top (<a href="#dl-nohist">dl-nohist</a>); the tense tell decides placement: state is present-tense, history is past-tense. The bootloader is a <em>derived view</em> &mdash; the one sanctioned restatement &mdash; so regenerate it <em>whole</em> from its named canonical sources on each pass; a clause with no source is promoted or deleted (<a href="#dl-bootloader">dl-bootloader</a>). <strong>Why:</strong> a cold session orients in one paragraph instead of re-deriving "where are we."</p>
+<p><strong>Rule:</strong> open with a few sentences giving lifecycle stage, what is locked, what remains, and the top risk &mdash; present-tense state only. Change notes and derivation narrative live in git and the decision log, never up top (<a href="#dl-nohist">dl-nohist</a>); the tense tell decides placement: state is present-tense, history is past-tense. The bootloader is a <em>derived view</em> &mdash; the one sanctioned restatement: when reporting recorded state, attribute it to the spec; regenerate it <em>whole</em> from its named canonical sources on each pass; a clause with no source is promoted or deleted, and a contradiction with its sources is surfaced (<a href="#dl-bootloader">dl-bootloader</a>). <strong>Why:</strong> a cold session orients in one paragraph instead of re-deriving "where are we."</p>
 </section>
 
 <section id="p15">
@@ -335,7 +342,7 @@
 
 <section id="p16">
 <h4>P16 &middot; Typed, disciplined commit messages</h4>
-<p><strong>Rule:</strong> every session-event is a git commit &mdash; the boundary rule, stated once, is <em>every session-event is a commit; a clean sweep may update bookkeeping; its commit is empty when no files change</em>. Gate on the objective binary &mdash; did something happen this session (is there a commit, empty or not) &mdash; and type each message from a small closed set: a content change is a normal commit typed from that set; a defect-fixing sweep is a normal commit typed <code>audit:</code>; a clean full sweep takes an <code>audit:</code> commit, empty only when no files change (<code>git commit --allow-empty</code>); a recorded review is a commit typed <code>review:</code> naming the dependent claims it clears, empty when the claim needed no edit (<a href="#dl-reviewgit">dl-reviewgit</a>); the subject stays one typed line, and its body may carry the assessment &mdash; evidence lives in git (<a href="#dl-recordgit">dl-recordgit</a>). Each message is one typed line recording the transition and pointing to rationale, never restating it (<a href="#dl-snapshots">dl-snapshots</a>). <strong>Why:</strong> the trail stays complete under rotating editors, and rationale duplicated into a commit is a stale copy.</p>
+<p><strong>Rule:</strong> every session-event is a git commit &mdash; the boundary rule, stated once, is <em>every session-event is a commit; a clean sweep may update bookkeeping; its commit is empty when no files change</em>. Gate on the objective binary &mdash; did something happen this session (is there a commit, empty or not) &mdash; and type each message from a small closed set: a content change is a normal commit typed from that set; a defect-fixing sweep is a normal commit typed <code>audit:</code>; a clean full sweep takes an <code>audit:</code> commit, empty only when no files change (<code>git commit --allow-empty</code>); a recorded review is a commit typed <code>review:</code> naming the dependent claims it clears, empty when the claim needed no edit (<a href="#dl-reviewgit">dl-reviewgit</a>); a review's or seed commit's subject stays one typed line, and its body may carry the assessment &mdash; evidence lives in git (<a href="#dl-recordgit">dl-recordgit</a>). Each message is one typed line recording the transition and pointing to rationale, never restating it (<a href="#dl-snapshots">dl-snapshots</a>). <strong>Why:</strong> the trail stays complete under rotating editors, and rationale duplicated into a commit is a stale copy.</p>
 </section>
 
 <hr>
@@ -344,7 +351,7 @@
 <p>The cornerstones describe the static artifact; this loop operates it. A fresh session can be told simply: "follow the session protocol."</p>
 
 <ol>
-  <li><strong>Load.</strong> Read the whole document &mdash; it is the load unit (<a href="#dl-wholeload">dl-wholeload</a>). Orientation priority: the <a href="#v-bootloader">bootloader</a>, the <a href="#v-canonical">canonical store</a>, the open list, the <a href="#v-decisionlog">decision log</a>, the <a href="#v-scopefence">scope fence</a>; in the live-system regime also the <a href="#v-directive">prime directive</a> and the bootloader's last-sweep line; before proposing causes in debugging work, the <a href="#v-deadend">ruled-out</a> and <a href="#v-diagnostic">diagnostic</a> registers. In a collection, main first and whole; a supporting spec is loaded whole when a move or check crosses into it, one file-hop at a time (<a href="#p19">P19</a>). Whole means every line of every file loaded, end to end: no ranged views, no search in place of reading, no summary standing in for the text. A session that has not done this has not loaded the spec and may not edit it (<a href="#dl-wholeload">dl-wholeload</a>).</li>
+  <li><strong>Load.</strong> Read the whole document &mdash; it is the load unit (<a href="#dl-wholeload">dl-wholeload</a>). Orientation priority: the <a href="#v-bootloader">bootloader</a>, the <a href="#v-canonical">canonical store</a>, the open list, the <a href="#v-decisionlog">decision log</a>, the <a href="#v-scopefence">scope fence</a>; in the live-system regime also the <a href="#v-directive">prime directive</a> and the bootloader's last-sweep line; before proposing causes in debugging work, the <a href="#v-deadend">ruled-out</a> and <a href="#v-diagnostic">diagnostic</a> registers. In a collection, main first and whole; a supporting spec is loaded whole when a move or check crosses into it, one file-hop at a time (<a href="#p19">P19</a>). Whole means every line of every file loaded, end to end: no ranged views, no search in place of reading, no summary standing in for the text. A session that has not done this has not loaded the spec and may not edit it (<a href="#dl-wholeload">dl-wholeload</a>). If an instruction refers to a prior proposal, decision, or wording you cannot locate in the available conversation, document, or git history, report it as not found. State any interpretation before acting; ask for clarification when competing interpretations would materially change the edit.</li>
   <li><strong>Advance &mdash; one legal move:</strong>
     <ul>
       <li><em>Close an unknown:</em> replace a provisional value with a measured one, re-bucket its status, collapse any sweep it gated (<a href="#p6">P6</a>, <a href="#p5">P5</a>, <a href="#p8">P8</a>).</li>
@@ -354,7 +361,7 @@
       <li><em>De-drift / audit:</em> collapse restatements to pointers (<a href="#p2">P2</a>); re-derive the bootloader and every roll-up whole (<a href="#p14">P14</a>); run the grep-shaped checks &mdash; the structural subset (e.g. anchor resolution, duplicate ids, count checksums, over-cap cells) is executed by <code>lspec check</code>, run by the pre-commit hook, a red result blocking the commit; semantic obligations (same-fact judgments, retention, evidence support, suspicion scope, and narrative placement) require review with a confirmed, corrected, or explicitly unresolved disposition (<a href="#dl-twohomes">dl-twohomes</a>, <a href="#dl-validator">dl-validator</a>). An audit pass removes or relocates in the core; it never elaborates.</li>
       <li><em>Split:</em> create a supporting spec, write the split row at the parent, move the content, reconcile both files. A decision, never a tool action; a file that no longer earns its row is merged back (<a href="#p19">P19</a>).</li>
       <li><em>Review:</em> re-read a dependent claim against its changed target; fix it or confirm it, then commit typed <code>review:</code> naming the dependent claims, empty when nothing changed (<a href="#dl-reviewgit">dl-reviewgit</a>).</li>
-      <li><em>Flag an event:</em> when the world under the document moves and you witnessed it, place minimal <code>[WATCH]</code> markers on what the event puts in question and file the <a href="#v-watch">watch entries</a> (event, date, re-verifies-when) in the open list. When fallout can be listed, use flags; otherwise record unenumerable suspicion and follow the sweep rule (<a href="#dl-sweeptrigger">dl-sweeptrigger</a>).</li>
+      <li><em>Flag an event:</em> when the world under the document moves and you witnessed it, place minimal <code>[WATCH]</code> markers on what the event puts in question and file the <a href="#v-watch">watch entries</a> (event, date, re-verifies-when) in the open list. Confirmed recurring diagnoses go to the diagnostic register; any unresolved work remains in the open list and links to the relevant diagnostic row. When fallout can be listed, use flags; otherwise record unenumerable suspicion and follow the sweep rule (<a href="#dl-sweeptrigger">dl-sweeptrigger</a>).</li>
       <li><em>Full sweep:</em> reconcile the whole document against itself and any indexed ground truth; commit it &mdash; an <code>audit:</code> commit, empty only when no files change. It is <em>owed</em> only on <strong>unenumerable suspicion</strong> &mdash; when what-might-be-wrong cannot be listed, the only honest scope is everything: (a) a defect of a <a href="#v-neighborhood">neighborhood-check</a> edge type found where no recent edit touched &mdash; evidence a past session's check silently failed; (b) an edit that landed out-of-band of the protocol; (c) live-system, advisory at Load: an unwitnessed period past the horizon, if the instance sets one. <span id="v-sweepowed"></span>If the sweep cannot run in the session that incurred it, post a <em>sweep-owed entry</em> to the open list (what was found, what it gates, resolves when a sweep lands as an <code>audit:</code> commit). Enumerable suspicion never obliges a sweep; the triggers say when one is owed, not when one is permitted &mdash; an elective sweep is always legal and takes an <code>audit:</code> commit (<a href="#dl-sweeptrigger">dl-sweeptrigger</a>).</li>
     </ul>
   The verification-flavored moves:

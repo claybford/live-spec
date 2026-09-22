@@ -830,7 +830,11 @@ def check_structure(col, specimens=True, markers=True):
                 if frag and frag not in idset:
                     fails.append(f"[anchor] {r}: href=#{frag} has no matching id")
             elif tgt not in col.specs:
-                if not os.path.exists(tgt):
+                # Existence is checked against the selected basis (the index
+                # under --staged), never the working tree: a staged link to
+                # an untracked file fails, an unstaged deletion cannot.
+                exists = col._exists(tgt) if hasattr(col, "_exists") else os.path.exists(tgt)
+                if not exists:
                     fails.append(f"[anchor] {r}: href={l['href']} — file not in collection")
             elif frag and frag not in col.specs[tgt].elems:
                 fails.append(f"[anchor] {r}: href={l['href']} — no id {frag!r} in "
@@ -1196,9 +1200,37 @@ def vocab_gate(col, rc, msg_path):
 
 
 def _row_key(row):
-    """Whitespace-insensitive row markup: attribute edits count; pure
-    whitespace edits do not — including whitespace added between tags."""
-    return re.sub(r">\s+<", "><", re.sub(r"\s+", " ", row)).strip()
+    """Meaningful decision content: the row's normalized text plus its
+    data-changes declaration. Presentation-only attribute edits (class and
+    kin) and whitespace edits authorize nothing; a text or data-changes
+    change does."""
+    text = re.sub(r"\s+", " ", norm(row)).strip()
+    m = re.search(r'\bdata-changes="([^"]*)"', row)
+    changes = " ".join(sorted(m.group(1).split())) if m else ""
+    return text + "\x00" + changes
+
+
+def renamed_from(root, new_abs):
+    """The repo-relative OLD path if the staged diff renames something onto
+    new_abs, else None. Lets the seal gate recover the baseline collection
+    across a main rename instead of treating the old tree as absent."""
+    out = git("diff", "--cached", "--find-renames", "--name-status", "-z", "HEAD",
+              cwd=root, check=False)
+    parts = out.split("\0")
+    i = 0
+    while i < len(parts):
+        e = parts[i]
+        i += 1
+        if not e:
+            continue
+        if e[0] in "RC":
+            if i + 1 > len(parts):
+                break
+            old, new = parts[i], parts[i + 1]
+            i += 2
+            if canon(os.path.join(root, new)) == new_abs:
+                return old
+    return None
 
 
 def seal_gate(col, rc):
@@ -1208,38 +1240,50 @@ def seal_gate(col, rc):
     substantively updates a dl- row whose data-changes names the old
     repo-relative path#id. Protection is read from HEAD; authorization from
     the staged tree. The gate requires a recorded decision, not proof the
-    decision is sound."""
+    decision is sound. An incomplete baseline fails; it never clears."""
     root = repo_root()
     if root is None:
         return rc
     state = head_status()
     if state == "unborn":
-        return rc            # declarations are validated structurally; no prior lock
+        return rc            # declarations are validated structurally; no prior seal
     if state != "ok":
-        print("  [sealed] HEAD is unresolvable; locked-claim protection cannot "
+        print("  [sealed] HEAD is unresolvable; sealed-claim protection cannot "
               "be evaluated (fetch or repair history)")
         return 1
     hcol = Collection(rel(col.main), basis="HEAD")
-    if col.main in hcol.specs:
-        hspecs = dict(hcol.specs)
-    else:
-        # Main is new or renamed in this commit: no collection is addressable
-        # at the baseline. Fail safe — scan every html file at HEAD under
-        # main's directory so a deletion cannot strand a protected claim.
-        hspecs = {}
-        for p in html_files(os.path.dirname(col.main), "HEAD"):
-            try:
-                s = file_at("HEAD", p)
-            except HistoryUnavailable as e:
-                print(f"  [sealed] baseline unavailable: {e}")
-                return 1
-            if s is not None:
-                hspecs[p] = s
+    if col.main not in hcol.specs:
+        # Main is new or renamed in this commit. Recover the baseline
+        # collection through a staged rename if there is one; otherwise fail
+        # safe — scan every html file at HEAD repo-wide so a deletion cannot
+        # strand a protected claim.
+        old = renamed_from(root, col.main)
+        if old:
+            hcol = Collection(old, basis="HEAD")
+        else:
+            hcol.specs = {}
+            for p in html_files(root, "HEAD"):
+                try:
+                    s = file_at("HEAD", p)
+                except HistoryUnavailable as e:
+                    print(f"  [sealed] baseline unavailable: {e}")
+                    return 1
+                if s is not None:
+                    hcol.specs[p] = s
+    if hcol.fails:
+        # Baseline discovery must be complete before any claim is evaluated.
+        for f in hcol.fails:
+            print(f"  [sealed] baseline incomplete: {f}")
+        return 1
     violations = []
-    for p, s in hspecs.items():
+    for p, s in hcol.specs.items():
         for i in getattr(s, "sealed", []):
             name = f"{repo_rel(p)}#{i}"
-            staged = file_staged(p)
+            try:
+                staged = file_staged(p)
+            except HistoryUnavailable as e:
+                print(f"  [sealed] staged tree unreadable for {name}: {e}")
+                return 1
             if staged is None:
                 violations.append(((p, i), name, "file deleted"))
             elif p not in col.specs:

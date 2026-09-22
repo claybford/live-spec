@@ -1518,6 +1518,92 @@ class SealGate(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn('data-sealed on an element with no id', out)
 
+    def run_main(self, d, main, *argv):
+        cwd = os.getcwd(); os.chdir(d)
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = lspec.main(['lspec', '--main', main, *argv])
+        finally:
+            os.chdir(cwd)
+        return rc, out.getvalue() + err.getvalue()
+
+    def test_main_rename_recovers_baseline_collection(self):
+        d = lrepo()
+        Path(d, 'sub').mkdir()
+        sh('git', 'mv', 'main.html', 'sub/main.html', cwd=d)   # staged rename
+        edit(d, 'sub/main.html', 'The pair rule holds.', 'The pair rule bends.')
+        edit(d, 'sub/main.html', ' data-sealed', '')           # seal removed too
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = self.run_main(d, 'sub/main.html', 'check', '--staged')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('[sealed] main.html#req', out)           # old address named
+
+    def test_incomplete_baseline_fails_never_clears(self):
+        d = lrepo()
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
+        sh('git', 'add', '-A', cwd=d)
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            col = lspec.Collection('main.html', basis='staged')
+            fake = lambda *a, **k: argparse.Namespace(
+                main=col.main, specs={col.main: lspec.file_at('HEAD', col.main)},
+                fails=['[collection] cannot read motor.html at HEAD: object unavailable'])
+            with mock.patch.object(lspec, 'Collection', side_effect=fake):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = lspec.seal_gate(col, 0)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 1)
+        self.assertIn('baseline incomplete', out.getvalue())
+
+    def test_cosmetic_row_edit_revives_no_authorization(self):
+        d = lrepo()
+        authorize(d, 'dl-req', 'main.html#req')
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
+        commit(d, 'docs: bend the rule')                       # authorized, landed
+        edit(d, 'main.html', 'The pair rule bends.', 'The pair rule breaks.')
+        edit(d, 'main.html', '<tr id="dl-req" data-changes="main.html#req">',
+             '<tr id="dl-req" class="pretty" data-changes="main.html#req">')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)          # class= is not a substantive update
+        self.assertIn('[sealed] main.html#req', out)
+        # ...but editing the row's data-changes declaration IS substantive
+        edit(d, 'main.html', 'class="pretty" data-changes="main.html#req"',
+             'data-changes="main.html#req main.html#top"')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 0, out)
+
+
+# ------------------------------------------- staged link-target isolation
+
+class StagedLinkTargets(unittest.TestCase):
+    """Link-target existence follows the selected basis, never the worktree."""
+
+    def test_staged_link_to_untracked_file_fails(self):
+        d = repo()
+        Path(d, 'evidence.txt').write_text('bench', encoding='utf-8')   # untracked
+        edit(d, 'motor.html', '</main>', '<a href="evidence.txt">ev</a></main>')
+        sh('git', 'add', 'motor.html', cwd=d)                           # only the link staged
+        rc, out = cli(d, 'check', '--staged')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('file not in collection', out)
+        rc, out = cli(d, 'check')
+        self.assertEqual(rc, 0, out)                                    # worktree has it
+
+    def test_unstaged_deletion_cannot_break_the_staged_tree(self):
+        d = repo()
+        Path(d, 'evidence.txt').write_text('bench', encoding='utf-8')
+        sh('git', 'add', 'evidence.txt', cwd=d); commit(d, 'docs: evidence')
+        edit(d, 'motor.html', '</main>', '<a href="evidence.txt">ev</a></main>')
+        sh('git', 'add', 'motor.html', cwd=d)                           # staged: link valid
+        os.remove(os.path.join(d, 'evidence.txt'))                      # worktree: deleted
+        rc, out = cli(d, 'check', '--staged')
+        self.assertEqual(rc, 0, out)
+        rc, out = cli(d, 'check')
+        self.assertEqual(rc, 1, out)
+
 
 # ------------------------------------------------- completion check
 

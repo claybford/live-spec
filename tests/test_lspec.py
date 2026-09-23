@@ -577,6 +577,30 @@ class N(unittest.TestCase):
         rc, out = cli(d, "impact", "HEAD")
         self.assertIn("OWED: none", out)
 
+    def test_rename_traces_back_to_a_seed_baseline(self):
+        """A rename after a real seed: initialization traces to the seed tree,
+        not to unknown history — the floor..HEAD walk excludes the seed, so
+        the rewind must recheck the seed tree against the expanded addresses."""
+        d = tempfile.mkdtemp()
+        open(os.path.join(d, "main.html"), "w").write(MAIN.format(extra=""))
+        open(os.path.join(d, "motor.html"), "w").write(MOTOR.format(extra=""))
+        sh("git", "init", "-q", cwd=d)
+        sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A", cwd=d)
+        sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+           "-m", "seed: fixtures", cwd=d)
+        seed = sh("git", "rev-parse", "HEAD", cwd=d).strip()[:7]
+        edit(d, "motor.html", "120 kW", "105 kW")
+        commit(d, "docs: derate")                       # obligation outstanding
+        edit(d, "motor.html", 'id="power"', 'id="rated"')
+        edit(d, "main.html", 'href="motor.html#power"', 'href="motor.html#rated"')
+        commit(d, "docs: rename power to rated")
+        rc, out = cli(d, "impact", "HEAD")
+        self.assertIn(f"baseline {seed} (introduced)", out)
+        self.assertNotIn("[unknown]", out)
+        outstanding = out.split("OUTSTANDING")[1]
+        self.assertIn("depends-on motor.html#rated", outstanding)
+        self.assertNotIn("OWED: none", outstanding)
+
     def test_review_refuses_when_nothing_owed(self):
         d = repo(); rc, out = cli(d, "review", "main.html#claim")
         self.assertEqual(rc, 2); self.assertIn("nothing is owed", out)

@@ -533,7 +533,8 @@ def review_baseline(a_path, src, href):
         if shallow:
             raise HistoryUnavailable("shallow history cannot establish link introduction")
         # Seed boundary first: an edge already present at the floor starts there.
-        if floor and _has_edge(file_at(floor, a_path), {href}):
+        floor_spec = file_at(floor, a_path) if floor else None
+        if floor_spec is not None and _has_edge(floor_spec, {href}):
             return floor, "introduced"
         # Introduction is keyed to the edge itself — the dependent claim's id
         # plus its typed target — so an unrelated link sharing the href cannot
@@ -591,6 +592,10 @@ def review_baseline(a_path, src, href):
                             "an unambiguous move (rename vs re-point)")
                 if rewired:
                     live.update(rewired)     # rename repair: trace the old address
+                    # the old address may predate the walk: it reaches back to
+                    # the seed boundary, which the floor..HEAD walk excludes
+                    if floor_spec is not None and _has_edge(floor_spec, live):
+                        return floor, "introduced"
                     rewound = True
                     break
                 return sha, "introduced"

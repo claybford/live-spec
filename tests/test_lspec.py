@@ -507,6 +507,76 @@ class N(unittest.TestCase):
         rc, out = cli(d, "check", "--staged", "--neighborhood", "motor.html#power")
         self.assertIn("[content]", out)
 
+    def test_rename_does_not_erase_outstanding_review(self):
+        """A rename repaired in one commit (same source, same target text, new
+        address) is not a birth: the edge traces through the old address and
+        the outstanding review survives."""
+        d = repo()
+        first = sh("git", "log", "--format=%H", "--reverse", cwd=d).split()[0][:7]
+        edit(d, "motor.html", "120 kW", "105 kW")
+        commit(d, "docs: derate")                       # obligation outstanding
+        edit(d, "motor.html", 'id="power"', 'id="rated"')
+        edit(d, "main.html", 'href="motor.html#power"', 'href="motor.html#rated"')
+        commit(d, "docs: rename power to rated")        # no review recorded
+        rc, out = cli(d, "impact", "HEAD")
+        self.assertIn(f"baseline {first} (introduced)", out)
+        outstanding = out.split("OUTSTANDING")[1]
+        self.assertIn("main.html#claim", outstanding)
+        self.assertIn("depends-on motor.html#rated", outstanding)
+        self.assertNotIn("OWED: none", outstanding)
+        rc, out = cli(d, "review", "main.html#claim", "-m", "rename carries the debt")
+        self.assertEqual(rc, 0, out)
+        rc, out = cli(d, "impact", "HEAD")
+        self.assertIn("OWED: none", out)
+
+    def test_unavailable_parent_read_is_not_a_root_commit(self):
+        """A failed parent read is unavailable evidence, never a root commit:
+        the baseline must come back unknown, not established."""
+        d = tempfile.mkdtemp()
+        plain = MAIN.replace('rel="depends-on" href="motor.html#power"', 'href="motor.html#power"')
+        open(os.path.join(d, "main.html"), "w").write(plain.format(extra=""))
+        open(os.path.join(d, "motor.html"), "w").write(MOTOR.format(extra=""))
+        sh("git", "init", "-q", cwd=d)
+        sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A", cwd=d)
+        sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "docs: seed", cwd=d)
+        edit(d, "main.html", '<a href="motor.html#power">', '<a rel="depends-on" href="motor.html#power">')
+        commit(d, "docs: upgrade to a dependency")      # edge born at commit 2
+        first = sh("git", "log", "--format=%H", "--reverse", cwd=d).split()[0]
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            real = lspec.file_at
+            def fail_parent(commit, path):
+                if commit == first:                    # the parent read of the birth candidate
+                    raise RuntimeError("object unavailable")
+                return real(commit, path)
+            with mock.patch.object(lspec, "file_at", side_effect=fail_parent):
+                with self.assertRaises(lspec.HistoryUnavailable):
+                    lspec.review_baseline(os.path.join(d, "main.html"), "claim", "motor.html#power")
+        finally:
+            os.chdir(cwd)
+
+    def test_identical_text_switch_is_uncertainty_not_rename(self):
+        """Two targets with identical text: switching the dependency between
+        them while both exist is not an unambiguous move — report unknown
+        history rather than silently following or silently re-birthing."""
+        d = repo()
+        edit(d, "motor.html", '<p id="power">120 kW, see <a href="main.html#claim">main</a>.</p>',
+             '<p id="power">120 kW, see <a href="main.html#claim">main</a>.</p>\n'
+             '<p id="alt">120 kW, see <a href="main.html#claim">main</a>.</p>')
+        commit(d, "docs: add a second, identical rating claim")
+        edit(d, "main.html", 'href="motor.html#power"', 'href="motor.html#alt"')
+        commit(d, "docs: switch the dependency to the alt rating")
+        rc, out = cli(d, "impact", "HEAD")
+        self.assertIn("[unknown]", out)
+        self.assertIn("CLEARANCE UNKNOWN", out)
+        self.assertIn("rename vs re-point", out)
+        self.assertNotIn("OWED: none", out)
+        # an explicit review against committed state establishes the baseline
+        rc, out = cli(d, "review", "main.html#claim", "-m", "switched deliberately")
+        self.assertEqual(rc, 0, out)
+        rc, out = cli(d, "impact", "HEAD")
+        self.assertIn("OWED: none", out)
+
     def test_review_refuses_when_nothing_owed(self):
         d = repo(); rc, out = cli(d, "review", "main.html#claim")
         self.assertEqual(rc, 2); self.assertIn("nothing is owed", out)
@@ -1223,6 +1293,34 @@ class HookIntegration(unittest.TestCase):
         # 5. the resulting history reports clearance
         rc, out = cli(d, 'impact', 'HEAD')
         self.assertEqual(rc, 0, out)
+        self.assertIn('OWED: none', out)
+
+    def test_rename_repair_preserves_the_outstanding_review(self):
+        """Hook-level: rename the target and repair the link without reviewing.
+        The debt must survive: visible after the rename commit, blocking the
+        next non-review commit, cleared by review."""
+        d = self.hrepo()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        r = self.gcommit(d, 'docs: derate', add=['motor.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        edit(d, 'motor.html', 'id="power"', 'id="rated"')
+        edit(d, 'main.html', 'href="motor.html#power"', 'href="motor.html#rated"')
+        r = self.gcommit(d, 'docs: rename power to rated', add=['motor.html', 'main.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('this commit creates a review obligation', r.stdout + r.stderr)
+        # the obligation is still owed after the rename — never OWED: none
+        rc, out = cli(d, 'impact', 'HEAD')
+        self.assertIn('depends-on motor.html#rated', out.split('OUTSTANDING')[1])
+        # and it blocks the next unrelated commit
+        edit(d, 'main.html', 'Main', 'Main heading')
+        r = self.gcommit(d, 'docs: unrelated tweak', add=['main.html'])
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('[review-gate]', r.stdout + r.stderr)
+        sh('git', 'checkout', '--', 'main.html', cwd=d)
+        # a correctly named review commit succeeds and clears
+        r = self.gcommit(d, 'review: main.html#claim')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rc, out = cli(d, 'impact', 'HEAD')
         self.assertIn('OWED: none', out)
 
     def test_first_commit_on_unborn_head(self):

@@ -61,7 +61,14 @@ edge itself — the dependent claim's id plus its typed target: a commit that
 merely touches the href string elsewhere in the file (an unrelated plain
 link, a second claim's own edge) moves no other claim's baseline, and a plain
 link upgraded to depends-on starts at the upgrade commit, when the typed edge
-is born. The seed floor is checked before walking later commits: an edge
+is born. A rename repaired in one commit does not re-birth the edge: its
+history is traced through the old address, so an outstanding review survives
+the rename; a reviewed edge stays reviewed, owing only the cheap address-only
+confirmation. The trace is followed only for an unambiguous move — the old
+address gone in the same commit, the text unique at the new one; identical
+text alone proves nothing (two claims can say the same thing), and an
+ambiguous move is unknown history, never an established baseline. The
+seed floor is checked before walking later commits: an edge
 already present in the floor's tree starts there. The floor is the newest
 commit whose SUBJECT types `seed:` for the file, so a re-instantiation under
 a reused filename inherits neither a prior lineage's introductions nor its
@@ -506,35 +513,86 @@ def review_baseline(a_path, src, href):
             if boundaries & after:
                 raise HistoryUnavailable("history after candidate review is incomplete")
             return sha, "review"
-        def _has_edge(spec):
-            """The edge itself: element SRC carrying a depends-on link with HREF."""
+        def _has_edge(spec, hrefs):
+            """The edge itself: element SRC carrying a depends-on link to one of HREFS."""
             return spec is not None and any(
-                l["rel"] == "depends-on" and l["src"] == src and l["href"] == href
+                l["rel"] == "depends-on" and l["src"] == src and l["href"] in hrefs
                 for l in spec.links)
 
+        def _target_text(commit, link_href):
+            """Normalized target text at COMMIT, None when the target is absent."""
+            tp, fr = resolve(a_path, link_href)
+            if fr is None:
+                return None
+            tspec = file_at(commit, tp or a_path)
+            return tspec.text(fr) if tspec is not None and fr in tspec.elems else None
+
         current = file_at("HEAD", a_path)
-        if not _has_edge(current):
+        if not _has_edge(current, {href}):
             return None, "uncommitted"
         if shallow:
             raise HistoryUnavailable("shallow history cannot establish link introduction")
         # Seed boundary first: an edge already present at the floor starts there.
-        if floor and _has_edge(file_at(floor, a_path)):
+        if floor and _has_edge(file_at(floor, a_path), {href}):
             return floor, "introduced"
         # Introduction is keyed to the edge itself — the dependent claim's id
         # plus its typed target — so an unrelated link sharing the href cannot
-        # move another claim's baseline.
+        # move another claim's baseline. A rename repaired in one commit is not
+        # a birth: the edge's history continues through the old address, so an
+        # outstanding review survives the rename. But identical text alone does
+        # not establish a rename — the move is followed only when the old
+        # address disappears in the same commit and the text is unique at its
+        # new address; anything less is reported as unknown history.
+        live = {href}
         args = ["log", "--format=%H", "--reverse"]
         if floor:
             args.append(f"{floor}..HEAD")
         args += ["--", repo_rel(a_path)]
-        for sha in git(*args, cwd=root).split():
-            if not _has_edge(file_at(sha, a_path)):
-                continue
-            try:
-                parent = file_at(f"{sha}~1", a_path)
-            except RuntimeError:
-                parent = None          # root commit: no parent tree
-            if not _has_edge(parent):
+        commits = git(*args, cwd=root).split()
+        rewound = True
+        while rewound:                       # a discovered rename restarts the
+            rewound = False                  # walk with the old address live
+            for sha in commits:
+                spec = file_at(sha, a_path)
+                cur = next((l["href"] for l in (spec.links if spec else [])
+                            if l["rel"] == "depends-on" and l["src"] == src
+                            and l["href"] in live), None)
+                if cur is None:
+                    continue
+                # Root is parent metadata: zero parents. A declared but
+                # unreadable parent raises — unavailable evidence, never a root.
+                parents = git("rev-list", "--parents", "-n", "1", sha,
+                              cwd=root).split()[1:]
+                parent = file_at(parents[0], a_path) if parents else None
+                pedges = [l for l in (parent.links if parent else [])
+                          if l["rel"] == "depends-on" and l["src"] == src]
+                if any(l["href"] in live for l in pedges):
+                    continue                 # the edge already existed
+                ntp, nfr = resolve(a_path, cur)
+                new_text = _target_text(sha, cur)
+                rewired = []
+                for l in pedges:
+                    if l["href"] in live:
+                        continue
+                    old_text = _target_text(parents[0], l["href"])
+                    if old_text is None or old_text != new_text:
+                        continue             # a different target: a re-point birth
+                    otp, ofr = resolve(a_path, l["href"])
+                    o_now = file_at(sha, otp or a_path)
+                    old_gone = o_now is None or ofr not in o_now.elems
+                    n_now = file_at(sha, ntp or a_path)
+                    dupes = [i for i in (n_now.elems if n_now else [])
+                             if n_now.text(i) == new_text]
+                    if old_gone and len(dupes) == 1:
+                        rewired.append(l["href"])
+                    else:
+                        raise HistoryUnavailable(
+                            f"{l['href']} -> {cur}: identical target text without "
+                            "an unambiguous move (rename vs re-point)")
+                if rewired:
+                    live.update(rewired)     # rename repair: trace the old address
+                    rewound = True
+                    break
                 return sha, "introduced"
         raise HistoryUnavailable("committed link has no established introduction baseline")
     except HistoryUnavailable:

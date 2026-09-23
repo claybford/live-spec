@@ -412,13 +412,100 @@ class N(unittest.TestCase):
         self.assertIn("main.html#claim ", outstanding)   # trailing space: not claim2
         self.assertNotIn("claim2", outstanding)
 
-    def test_shared_href_inherits_first_introduction(self):
-        """Pinned approximation: per-href pickaxe gives both claims the first
-        link's introduction commit (safe direction: spurious-owed, never cleared)."""
+    def test_shared_target_baselines_are_per_edge(self):
+        """Two claims sharing one target get independent baselines, each keyed
+        to its own edge's introduction (claim2's typed edge is born with
+        claim2, not with claim's)."""
         d = self._two_claims()
         rc, out = cli(d, "impact", "HEAD")
-        first = sh("git", "log", "--format=%h", "--reverse", cwd=d).split()[0]
-        self.assertEqual(out.count(f"baseline {first} (introduced)"), 2)
+        log = sh("git", "log", "--format=%H", "--reverse", cwd=d).split()
+        first, second = log[0][:7], log[1][:7]
+        self.assertIn(f"baseline {first} (introduced)", out)
+        self.assertIn(f"baseline {second} (introduced)", out)
+
+    def test_review_clears_only_the_reviewed_claim(self):
+        d = self._two_claims()
+        rc, out = cli(d, "review", "main.html#claim", "-m", "checked")
+        self.assertEqual(rc, 0, out)
+        out = cli(d, "impact", "HEAD")[1]
+        outstanding = out.split("OUTSTANDING")[1]
+        self.assertIn("main.html#claim2", outstanding)
+        self.assertNotIn("main.html#claim ", outstanding)
+
+    def test_unrelated_plain_link_cannot_erase_obligation(self):
+        """N1: the target-changing commit also adds a plain link carrying the
+        same href elsewhere in the dependent file. The baseline must stay at
+        the edge's introduction, so the obligation survives the commit,
+        blocks the next non-review commit, and clears on review."""
+        d = repo()
+        edit(d, "motor.html", "120 kW", "105 kW")
+        edit(d, "main.html", "<table>",
+             '<p id="elsewhere">See <a href="motor.html#power">the rating</a>.</p>\n<table>')
+        commit(d, "docs: derate")
+        rc, out = cli(d, "impact", "HEAD~1")
+        self.assertIn("REVIEW main.html#claim  depends-on motor.html#power  [content]", out)
+        # blocking assertion runs before the review is recorded
+        edit(d, "main.html", "<h1 id=\"top\">Main</h1>", "<h1 id=\"top\">Main spec</h1>")
+        sh("git", "add", "main.html", cwd=d)
+        msg = os.path.join(d, "msg")
+        open(msg, "w").write("docs: unrelated edit\n")
+        rc, out = cli(d, "check", "--staged", "--commit-msg", msg)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("[review-gate] main.html#claim", out)
+        sh("git", "reset", "-q", cwd=d)
+        sh("git", "checkout", "--", "main.html", cwd=d)
+        rc, out = cli(d, "review", "main.html#claim", "-m", "still fine")
+        self.assertEqual(rc, 0, out)
+        rc, out = cli(d, "impact", "HEAD")
+        self.assertIn("OWED: none", out)
+
+    def test_plain_link_upgrade_starts_at_the_typed_edge(self):
+        """A plain link upgraded to depends-on baselines at the upgrade commit,
+        when the typed edge is born — pre-upgrade target history owes nothing."""
+        d = tempfile.mkdtemp()
+        plain = MAIN.replace('rel="depends-on" href="motor.html#power"', 'href="motor.html#power"')
+        open(os.path.join(d, "main.html"), "w").write(plain.format(extra=""))
+        open(os.path.join(d, "motor.html"), "w").write(MOTOR.format(extra=""))
+        sh("git", "init", "-q", cwd=d)
+        sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A", cwd=d)
+        sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "docs: seed", cwd=d)
+        edit(d, "motor.html", "120 kW", "105 kW")
+        commit(d, "docs: derate while the link is plain")
+        edit(d, "main.html", '<a href="motor.html#power">', '<a rel="depends-on" href="motor.html#power">')
+        commit(d, "docs: upgrade to a dependency")
+        rc, out = cli(d, "impact", "HEAD")
+        self.assertIn("OWED: none", out)
+        edit(d, "motor.html", "105 kW", "110 kW")
+        commit(d, "docs: rerate")
+        rc, out = cli(d, "impact", "HEAD~1")
+        self.assertIn("REVIEW main.html#claim  depends-on motor.html#power  [content]", out)
+
+    def test_worktree_neighborhood_flags_uncommitted_target(self):
+        """N2: a working-tree report flags uncommitted target changes (they
+        clear nothing) instead of printing OWED: none like the staged basis."""
+        d = repo()
+        edit(d, "motor.html", "120 kW", "105 kW")
+        rc, out = cli(d, "check", "--diff", "HEAD")
+        self.assertIn("uncommitted", out)
+
+    def test_staged_neighborhood_ignores_unstaged_dirt(self):
+        """A staged report reads the index: a sound index with an unstaged
+        target edit owes nothing on the staged basis."""
+        d = repo()
+        edit(d, "main.html", "<h1 id=\"top\">Main</h1>", "<h1 id=\"top\">Main spec</h1>")
+        sh("git", "add", "main.html", cwd=d)
+        edit(d, "motor.html", "120 kW", "105 kW")   # worktree-only damage
+        rc, out = cli(d, "check", "--staged", "--neighborhood", "motor.html#power")
+        self.assertIn("REVIEW OWED: none", out)
+        rc, out = cli(d, "check", "--neighborhood", "motor.html#power")
+        self.assertIn("uncommitted", out)
+
+    def test_staged_neighborhood_flags_staged_target_change(self):
+        d = repo()
+        edit(d, "motor.html", "120 kW", "105 kW")
+        sh("git", "add", "motor.html", cwd=d)
+        rc, out = cli(d, "check", "--staged", "--neighborhood", "motor.html#power")
+        self.assertIn("[content]", out)
 
     def test_review_refuses_when_nothing_owed(self):
         d = repo(); rc, out = cli(d, "review", "main.html#claim")
@@ -1683,6 +1770,22 @@ class CleanCheck(unittest.TestCase):
         d = repo()
         rc, out = cli(d, 'check', '--clean', '--staged')
         self.assertEqual(rc, 2); self.assertIn('stands alone', out)
+
+
+class CliArgs(unittest.TestCase):
+    def test_main_flag_after_subcommand(self):
+        d = repo()
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            for argv in (["lspec", "check", "--main", "main.html"],
+                         ["lspec", "show", "--graph", "--main", "main.html"],
+                         ["lspec", "neighbors", "main.html#claim", "--main", "main.html"]):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = lspec.main(argv)
+                self.assertEqual(rc, 0, f"{argv}: {out.getvalue()}{err.getvalue()}")
+        finally:
+            os.chdir(cwd)
 
 
 if __name__ == "__main__":

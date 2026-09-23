@@ -52,20 +52,22 @@ unlinked .html beside the collection is disconnected (noted).
 
 CLEARANCE (dl-reviewgit). For a dependent claim A#S with rel="depends-on" to
 B#T, the baseline is the newest commit whose subject is `review: …` naming
-A#S; if none, the commit that introduced the link. Review is owed iff B#T's
+A#S; if none, the commit that introduced the edge. Review is owed iff B#T's
 normalized text at HEAD differs from its text in the baseline tree (or B#T is
 gone). Uncommitted changes never clear anything and are flagged. A renamed
 target has no history under its new id, so it is owed (address-only when its
-text is unchanged) — a rename resets review. The introduction fallback is a
-per-href pickaxe: two claims sharing one href inherit the first link's
-introduction commit, and a plain link upgraded to depends-on inherits the old
-introduction — both err toward a spurious obligation, the safe direction; an
-explicit `review:` commit sets a precise baseline. The pickaxe is floored at
-the newest commit whose SUBJECT types `seed:` for the file, so a
-re-instantiation under a reused filename inherits neither a prior lineage's
-introductions nor its reviews. `seed:` types a deliberate initialization or
-replacement of an instance's lineage, scoped to the files the commit touches;
-a body line can never type a commit, and maintenance types never floor.
+text is unchanged) — a rename resets review. Introduction is keyed to the
+edge itself — the dependent claim's id plus its typed target: a commit that
+merely touches the href string elsewhere in the file (an unrelated plain
+link, a second claim's own edge) moves no other claim's baseline, and a plain
+link upgraded to depends-on starts at the upgrade commit, when the typed edge
+is born. The seed floor is checked before walking later commits: an edge
+already present in the floor's tree starts there. The floor is the newest
+commit whose SUBJECT types `seed:` for the file, so a re-instantiation under
+a reused filename inherits neither a prior lineage's introductions nor its
+reviews. `seed:` types a deliberate initialization or replacement of an
+instance's lineage, scoped to the files the commit touches; a body line can
+never type a commit, and maintenance types never floor.
 
 HOOK (dl-hook). Two hooks run `lspec check --staged`, which reads the index
 itself — an unstaged edit never makes a broken staged tree pass. pre-commit
@@ -504,24 +506,37 @@ def review_baseline(a_path, src, href):
             if boundaries & after:
                 raise HistoryUnavailable("history after candidate review is incomplete")
             return sha, "review"
+        def _has_edge(spec):
+            """The edge itself: element SRC carrying a depends-on link with HREF."""
+            return spec is not None and any(
+                l["rel"] == "depends-on" and l["src"] == src and l["href"] == href
+                for l in spec.links)
+
         current = file_at("HEAD", a_path)
-        if current is None or not any(l["href"] == href for l in current.links):
+        if not _has_edge(current):
             return None, "uncommitted"
         if shallow:
             raise HistoryUnavailable("shallow history cannot establish link introduction")
-        args = ["log", "--format=%H", "--reverse", "-S", f'href="{href}"']
+        # Seed boundary first: an edge already present at the floor starts there.
+        if floor and _has_edge(file_at(floor, a_path)):
+            return floor, "introduced"
+        # Introduction is keyed to the edge itself — the dependent claim's id
+        # plus its typed target — so an unrelated link sharing the href cannot
+        # move another claim's baseline.
+        args = ["log", "--format=%H", "--reverse"]
         if floor:
             args.append(f"{floor}..HEAD")
         args += ["--", repo_rel(a_path)]
-        out = git(*args, cwd=root)
-        first = out.split()[0] if out.split() else None
-        if floor and first is None:
-            seeded = file_at(floor, a_path)
-            if seeded is not None and any(l["href"] == href for l in seeded.links):
-                first = floor
-        if first is None:
-            raise HistoryUnavailable("committed link has no established introduction baseline")
-        return first, "introduced"
+        for sha in git(*args, cwd=root).split():
+            if not _has_edge(file_at(sha, a_path)):
+                continue
+            try:
+                parent = file_at(f"{sha}~1", a_path)
+            except RuntimeError:
+                parent = None          # root commit: no parent tree
+            if not _has_edge(parent):
+                return sha, "introduced"
+        raise HistoryUnavailable("committed link has no established introduction baseline")
     except HistoryUnavailable:
         raise
     except (RuntimeError, OSError) as e:
@@ -1524,7 +1539,7 @@ def cmd_check(args):
         rc = review_gate(col, rc, args.commit_msg)
     if args.neighborhood:
         print()
-        neighborhood(col, *col.parse_target(args.neighborhood), semantic=False)
+        neighborhood(col, *col.parse_target(args.neighborhood), semantic=False, staged=staged)
     if args.diff:
         if not require_commit(args.diff):
             print(f"lspec check: cannot resolve --diff base {args.diff!r} to a commit",
@@ -1534,7 +1549,7 @@ def cmd_check(args):
         print(f"\nneighborhoods of {len(changed)} element(s) changed since {args.diff}:")
         for p, frag in changed:
             print(load_hint(col, p).strip() or "")
-            neighborhood(col, p, frag, semantic=False)
+            neighborhood(col, p, frag, semantic=False, staged=staged)
     if args.neighborhood or args.diff:
         print_semantic()
     return rc
@@ -1583,7 +1598,7 @@ def print_graph(col):
         print(f"    {addr(fp, l['src'])} -> {addr(tp, fr)}")
 
 
-def neighborhood(col, p, frag, semantic=True):
+def neighborhood(col, p, frag, semantic=True, staged=False):
     s = col.specs[p]
     print(f"== {addr(p, frag)}")
     inbound = col.inbound(p, frag)
@@ -1633,8 +1648,16 @@ def neighborhood(col, p, frag, semantic=True):
     print(f"  counterparts ({len(counter)}): " + ", ".join(counter))
     deps = col.dependents(p, frag)
     print(f"  dependents ({len(deps)}): " + ", ".join(addr(fp, l['src']) + load_hint(col, fp) for fp, l in deps))
-    owed = [r for r in owed_reviews(col) if r["target"][0] == p
-            and (not frag or r["target"][1] == frag)]
+    # Owed reviews against this surface's basis: a staged report reads the
+    # index (the candidate commit), never working-tree dirt; a working-tree
+    # report flags uncommitted target changes, which clear nothing.
+    if staged:
+        owed = [r for r in owed_reviews(col, basis="staged") if r["target"][0] == p
+                and (not frag or r["target"][1] == frag)]
+    else:
+        _, dirty_paths = uncommitted([rel(x) for x in col.specs])
+        owed = [r for r in owed_reviews(col, dirty_paths) if r["target"][0] == p
+                and (not frag or r["target"][1] == frag)]
     print_owed(owed, col=col)
     if semantic:
         print_semantic()
@@ -1909,11 +1932,16 @@ def cmd_review(args):
 
 def main(argv):
     ap = argparse.ArgumentParser(prog="lspec", description=(__doc__ or "lspec — Living Specification maintenance").split("\n")[0])
-    ap.add_argument("--main", help="main spec (default live-spec.html)")
+    ap.add_argument("--main", help="main spec (default live-spec.html); accepted before or after the subcommand")
     sub = ap.add_subparsers(dest="verb")
-    s = sub.add_parser("start"); s.add_argument("main_pos", nargs="?")
+    # --main on each subparser too (default=SUPPRESS so an absent one never
+    # clobbers the global value); positional MAIN still wins over both.
+    def add_main(sp):
+        sp.add_argument("--main", default=argparse.SUPPRESS,
+                        help="main spec (same as the global --main)")
+    s = sub.add_parser("start"); s.add_argument("main_pos", nargs="?"); add_main(s)
     s.add_argument("--with", dest="with_", nargs="+", metavar="FILE", help="also deliver these supporting specs whole")
-    c = sub.add_parser("check"); c.add_argument("main_pos", nargs="?")
+    c = sub.add_parser("check"); c.add_argument("main_pos", nargs="?"); add_main(c)
     c.add_argument("--diff", metavar="BASE"); c.add_argument("--neighborhood", metavar="TARGET")
     c.add_argument("--template", action="store_true",
                    help="validate a template: skip the unresolved-marker gate "
@@ -1926,14 +1954,14 @@ def main(argv):
     c.add_argument("--commit-msg", dest="commit_msg", metavar="FILE",
                    help="run the review gate with the candidate commit's subject "
                         "read from FILE (the commit-msg hook)")
-    sh = sub.add_parser("show"); sh.add_argument("target", nargs="?", help="path#id for an element; a bare path delivers the file whole; omit with --graph")
+    sh = sub.add_parser("show"); sh.add_argument("target", nargs="?", help="path#id for an element; a bare path delivers the file whole; omit with --graph"); add_main(sh)
     sh.add_argument("--text", action="store_true"); sh.add_argument("--graph", action="store_true")
-    n = sub.add_parser("neighbors"); n.add_argument("target")
+    n = sub.add_parser("neighbors"); n.add_argument("target"); add_main(n)
     n.add_argument("--whole-file", action="store_true", help="allow file-wide neighborhood output")
-    i = sub.add_parser("impact"); i.add_argument("base", nargs="?", default="HEAD")
-    m = sub.add_parser("mv"); m.add_argument("old"); m.add_argument("new")
+    i = sub.add_parser("impact"); i.add_argument("base", nargs="?", default="HEAD"); add_main(i)
+    m = sub.add_parser("mv"); m.add_argument("old"); m.add_argument("new"); add_main(m)
     r = sub.add_parser("review"); r.add_argument("claims", nargs="+", metavar="CLAIM",
-                                                 help="the dependent claim(s) reviewed, path#id")
+                                                 help="the dependent claim(s) reviewed, path#id"); add_main(r)
     r.add_argument("-m", "--message")
     args = ap.parse_args(argv[1:])
     if args.verb is None:

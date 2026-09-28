@@ -81,67 +81,56 @@
   source. Delete a clause with no source, and surface any contradiction with
   its sources.&lt;/p&gt;
 &lt;p id="directive"&gt;Ethos: [ADAPT &mdash; the one stance governing every edit].&lt;/p&gt;
-&lt;p id="conventions"&gt;Conventions: the whole file is the load unit &mdash; keep the document short; read it whole.
-  A second file exists only by a split row at its parent. Main is read first
-  and whole. A supporting spec is read only when a move crosses into it, and
-  then it is read whole too: if you read from a file at all, you read all of
-  it, every line, end to end &mdash; no ranged views, no search instead of
-  reading.
-  The file lives in git; its history is canonical for this document's past.
-  Every value lives once in Key Parameters or is indexed from its authority.
-  Observed behavior is established by the artifact; required behavior by approved
-  requirements or decisions; conformance by verification evidence. Status tokens:
-  [ADAPT &mdash; confirmed(source) / provisional(source) / locked / open / WATCH].
-  History lives in git; the Decision Log holds current rationale; body text is
-  present-tense and links, never narrates. The fence is binding: change the
-  fence and log the decision before reintroducing anything it excludes. Each decision-log cell &le; [ADAPT: 40]
-  words; decision rows use ids prefixed dl-. Keep decisions current: replace
-  superseded rows, retain the displaced choice in the successor's rejected/replaced
-  cell, and record the transition in git. A decision row stays only if a fresh
-  session would plausibly re-propose the rejected alternative; a lock resting on
-  an assumption names it and the condition that reopens the decision. Commit messages
-  are concise typed transition lines pointing to rationale, typed from the set
-  declared in &lt;code data-commit-types&gt;docs fix seed audit review&lt;/code&gt;
-  (edit the set there, keeping seed/audit/review; commit-msg rejects any other
-  type). A claim marked data-sealed on its id'd element changes only when the
-  same commit adds or updates a dl- row whose data-changes names the old
-  repo-relative path#id; a recorded review's or seed
-  commit's subject stays one typed line and its body may carry the assessment.
-  Session protocol: load the whole
-  file &rarr; make one move (close an unknown &middot; decide &middot; recompute &middot;
-  extend + fence &middot; de-drift &middot; split &middot; review &middot; flag an event &middot; sweep)
-  &rarr; write back to the one canonical place &rarr; reconcile the touched node's
-   one-hop neighbors (referrers, cited rows, copies, counts, status, counterparts,
-   dependents [, indexed artifact]) &rarr; make one commit &rarr; confirm with
-   &lt;code&gt;python3 lspec.py check --clean&lt;/code&gt; that nothing remains
-   staged, unstaged, or untracked (it reports only; it never stages, commits,
-   or discards). Tooling [ADAPT: lspec]:
-   load = &lt;code&gt;python3 lspec.py start MAIN&lt;/code&gt;; reconcile =
-   &lt;code&gt;python3 lspec.py check --diff HEAD&lt;/code&gt;; rename =
-   &lt;code&gt;python3 lspec.py mv&lt;/code&gt;; record a review =
-   &lt;code&gt;python3 lspec.py review&lt;/code&gt;; the hooks run
-   &lt;code&gt;check --staged&lt;/code&gt; (pre-commit structure + seal gate,
-   commit-msg review + vocabulary gates); verify
-   the load command runs before the seed commit. Absent the tool, do each step by hand: for each
-   &lt;code&gt;depends-on&lt;/code&gt; link, find the newest &lt;code&gt;review:&lt;/code&gt;
-   commit naming the dependent claim (else the commit introducing the link); if
-   the target's text at HEAD differs from that tree, the review is owed.
-   A missing instruction referent is reported, not silently reconstructed;
-   state the interpretation before acting, and clarify when alternatives would
-   materially change the edit.
-   A dependency is &lt;code&gt;&amp;lt;a rel="depends-on" href="#target"&amp;gt;&lt;/code&gt;
-   inside the dependent claim; the dependent claim is the link's nearest ancestor
-   with an id; source and target ids each enclose a complete claim (wrap prose in
-   &lt;code&gt;&amp;lt;section id&amp;gt;&lt;/code&gt; or &lt;code&gt;&amp;lt;p id&amp;gt;&lt;/code&gt;,
-   a tabular claim in &lt;code&gt;&amp;lt;tr id&amp;gt;&lt;/code&gt;; a heading id covers only
-   its title); plain links carry no obligation &mdash; e.g.
-   &lt;code&gt;&amp;lt;p id="claim"&amp;gt;Cooling assumes &amp;lt;a rel="depends-on"
-   href="#rating"&amp;gt;the rating&amp;lt;/a&amp;gt;.&amp;lt;/p&amp;gt;&lt;/code&gt;.
-   Changed targets require review against
-   committed state. Record clearance in a &lt;code&gt;review:&lt;/code&gt; commit naming
-   comma-separated dependent path#id claims. If review history is unavailable,
-   fetch it or re-review the claim against committed state and record the review
-   in git. No review ledger or history narrative in the spec.&lt;/p&gt;
+&lt;p id="conventions"&gt;Conventions: read main whole before acting. Read a supporting
+  spec whole when work crosses into it; every supporting file needs a split row
+  at its parent. No partial loads. Keep each file short.
+  Every value lives once in Key Parameters or is indexed from its authority:
+  artifacts establish actual behavior, approved requirements and decisions
+  establish required behavior, verification evidence establishes conformance.
+  Status tokens: [ADAPT &mdash; confirmed(source) / provisional(source) / locked / open / WATCH].
+  Git holds history; body text states current conditions and links to rationale.&lt;/p&gt;
+
+&lt;p&gt;Decisions: use dl- row ids and keep each cell &le; [ADAPT: 40] words.
+  Replace superseded rows, keeping the displaced choice in the successor's
+  rejected/replaced cell. Retain a row only if a fresh session might re-propose
+  its rejected alternative. For an assumption-dependent lock, name the assumption
+  and reopening condition.
+  Change the fence and log the decision before reintroducing an excluded option.
+  A data-sealed claim changes only with a new or updated decision row whose
+  data-changes names its old repository-relative path#id.&lt;/p&gt;
+
+&lt;p&gt;Session: load &rarr; make one move &rarr; update the canonical state
+  &rarr; reconcile touched claims and their one-hop neighbors &rarr; commit
+  &rarr; confirm a clean working tree. Check referrers, cited evidence, copies,
+  counts, status, declared counterparts, dependents, and indexed artifacts;
+  follow up only into neighbors changed by the fixes.
+  Report missing instruction referents; state your interpretation and clarify
+  if alternatives would materially change the edit.
+  Commit types: &lt;code data-commit-types&gt;docs fix seed audit review&lt;/code&gt;
+  (adapt this set, retaining seed/audit/review). Each subject is one typed
+  transition line pointing to rationale; seed and review bodies may hold assessments.&lt;/p&gt;
+
+&lt;p&gt;Dependencies: put &lt;code&gt;&amp;lt;a rel="depends-on" href="#target"&amp;gt;&lt;/code&gt;
+  inside the dependent claim. Its nearest id'd ancestor names that claim.
+  Both anchors enclose complete claims: use a paragraph, section, or table row;
+  a heading covers only its title. Plain links are navigation. Example:
+  &lt;code&gt;&amp;lt;p id="claim"&amp;gt;Cooling assumes &amp;lt;a rel="depends-on"
+  href="#rating"&amp;gt;the rating&amp;lt;/a&amp;gt;.&amp;lt;/p&amp;gt;&lt;/code&gt;
+  Compare the target's committed text with the latest review naming the dependent
+  claim, or the edge's introduction if unreviewed. A changed or missing target
+  owes review. Confirm or fix the dependent, then record a review: commit naming
+  comma-separated dependent path#id claims, empty if no edit was needed.
+  Uncommitted edits do not clear debt. If history is unavailable, fetch it or
+  explicitly re-review against committed state. Keep review history in git.&lt;/p&gt;
+
+&lt;p&gt;Tooling [ADAPT: lspec]: load with &lt;code&gt;python3 lspec.py start MAIN&lt;/code&gt;;
+  reconcile with &lt;code&gt;python3 lspec.py check --main MAIN --diff HEAD&lt;/code&gt;;
+  finish with &lt;code&gt;python3 lspec.py check --clean&lt;/code&gt;.
+  Pass &lt;code&gt;--main MAIN&lt;/code&gt; for a nondefault filename on other commands.
+  Use &lt;code&gt;mv&lt;/code&gt; for renames and &lt;code&gt;review&lt;/code&gt; to record reviews.
+  Install both hooks; red blocks a commit. Green checks structure, not truth
+  or review adequacy. Verify the load command before the seed commit.
+  Without the tool, perform these checks by hand.&lt;/p&gt;
 
 &lt;h2 id="params"&gt;Key Parameters &mdash; single source of truth&lt;/h2&gt;
 &lt;table&gt;&lt;tr&gt;&lt;th&gt;Parameter&lt;/th&gt;&lt;th&gt;Value&lt;/th&gt;&lt;th&gt;Status &middot; provenance&lt;/th&gt;&lt;/tr&gt;&lt;/table&gt;
@@ -396,7 +385,7 @@
     </ul>
   A neighbor changed by the fixes owes the same check; a neighbor verified unchanged ends the follow-up. Finish with one commit &mdash; a sweep takes an <code>audit:</code> commit, empty only when no files change (<a href="#p16">P16</a>) &mdash; then run the completion check: <code>lspec check --clean</code> reports anything staged, unstaged, or untracked repo-wide and fails while any remain; it detects outstanding changes when invoked and neither forces its own invocation nor proves a clean audit was recorded (<a href="#dl-clean">dl-clean</a>). The artifact is the new state; discard the conversation.</li>
 </ol>
-<p>With <code>lspec</code> installed (<a href="#dl-cli">dl-cli</a>): <code>start MAIN</code> at Load delivers main whole, builds the derived graph, and lists owed reviews and every verb; <code>show FILE</code> (or <code>start --with FILE</code>) delivers a supporting spec whole, and any output that crosses into another file names that command; <code>check --diff HEAD</code> and <code>neighbors</code> run the edge list above; <code>mv</code> renames with reference repair; <code>review</code> records the event; <code>check --clean</code> is the completion check after committing; <code>show</code> and <code>impact</code> are elective and met in <code>start</code>'s listing; the hooks run <code>check --staged</code> &mdash; pre-commit for structure and the seal gate, commit-msg for the review and vocabulary gates &mdash; and block red (<a href="#dl-hook">dl-hook</a>). Every result is stamped with the commit it was computed against (<a href="#dl-concurrency">dl-concurrency</a>). Absent the tool, each step is done by hand.</p>
+<p>With <code>lspec</code> installed, load with <code>start MAIN</code>, reconcile with <code>check --main MAIN --diff HEAD</code>, and finish with <code>check --clean</code>. <code>start</code> delivers the file, reports dependencies and lists commands; use <code>--main MAIN</code> on subsequent commands for a nondefault filename. Use <code>mv</code> for reference-preserving renames and <code>review</code> to record reviews. Both hooks must be installed; red blocks a commit (<a href="#dl-hook">dl-hook</a>). Reports name their basis commit. Without the tool, follow the same protocol by hand.</p>
 <p>Verification is reference-following: it catches only defects that break a reference. A drift class that breaks none gets a rule that wires one &mdash; retained counts for cardinality mismatches, git history for lossy moves and retrojected entries, whole-view re-derivation for fossil clauses (<a href="#dl-counts">dl-counts</a>, <a href="#dl-snapshots">dl-snapshots</a>, <a href="#dl-bootloader">dl-bootloader</a>).</p>
 <p>The discipline: <strong>changes are surgical and logged, the canonical store is touched in exactly one place, every touched node's neighborhood is reconciled, and rationale is preserved rather than re-derived.</strong></p>
 
@@ -510,7 +499,19 @@
 <p><strong>Granular addressability.</strong> HTML gives arbitrary <code>id</code> anchors on any element &mdash; table rows, spans, list items &mdash; which is what the dense reference web (<a href="#p3">P3</a>) runs on. Markdown anchors only headings natively; the swap quietly discards a property the method depends on.</p>
 <p><strong>One file per spec, renders identically anywhere.</strong> A collection is several such files, each whole (<a href="#p19">P19</a>). The artifact passes between humans and stateless sessions with no tooling and navigation intact. "Self-contained" scopes to the <em>state</em>; presentation is externalized to one stylesheet dependency and degrades gracefully to plain semantic HTML offline (<a href="#dl-substrate">dl-substrate</a>).</p>
 <p><strong>Git is the memory of the memory.</strong> A living spec lives in version control: git is the sole record of the document's own past (<a href="#dl-snapshots">dl-snapshots</a>), so every content change, audit event (a clean sweep empty only when no files change), and verbatim claim is checkable rather than asserted.</p>
-<p><strong>Structural conventions are executable.</strong> Decision rows use <code>&lt;tr id="dl-&hellip;"&gt;</code>; every cell is subject to the cap. The structural checks (<a href="#p4">P4</a>) &mdash; e.g. anchors resolve, no duplicate ids, count checksums, cells within cap &mdash; run as <code>lspec check</code> (standard library, no browser), which the pre-commit hook runs on every commit; the artifact stays tooling-free to <em>read</em>, the tool being optional maintenance automation like git, not part of the state (<a href="#dl-validator">dl-validator</a>). Hooks do not clone with a repo, so CI runs the same check (<a href="#dl-hook">dl-hook</a>). The embedded seed is checked as a specimen. A dependency anchor encloses its complete claim; a heading alone covers only the title (<a href="#p3">P3</a>). A count checksum is declared on its enumeration: <code>data-count="differences"</code> on a list, <code>data-count="p=principles"</code> for an id series. A &sect;N that cites an outside document sits inside its link or <code>&lt;cite&gt;</code>; bare, it is read as this collection's own volatile ordinal. Unresolved <code data-literal>[ADAPT]</code>/<code data-literal>[PROJECT]</code> markers fail instance readiness: <code>check --template</code> validates a template instead, and <code>data-literal</code> on a <code>&lt;code&gt;</code> declares a mention &mdash; a declaration the checker trusts, not proof the text is nonoperative. A <code>seed:</code> commit subject types a deliberate initialization or replacement of an instance's lineage, scoped to the files the commit touches; a body line can never type a commit. The commit vocabulary is declared once, in main's conventions, as the text of a single <code>data-commit-types</code> code element &mdash; whitespace-separated types, with <code>seed</code>, <code>audit</code>, and <code>review</code> reserved because the tool assigns them operational meanings; the commit-msg hook rejects a subject typed outside the declared set, and a document with no declaration is reported as unenforced, never silently defaulted (<a href="#dl-committypes">dl-committypes</a>). An element with a stable id and the <code>data-sealed</code> attribute is a protected claim: once committed, its normalized text, id, path, marker, and collection membership change only when the same commit adds or substantively updates a decision row whose <code>data-changes</code> attribute names the old repository-relative <code>path#id</code>, whitespace-separated when several &mdash; historical identifiers resolved against the comparison baseline, not hyperlinks, so a deleted claim leaves no broken anchor (<a href="#dl-seal">dl-seal</a>). The gate requires a recorded decision, not proof the decision is sound, and protects marked claims only.</p>
+<p><strong>Structural conventions are executable.</strong> <code>lspec check</code> checks structure; green does not establish truth or adequate review. Install both git hooks to check the staged candidate and block red; hooks do not clone, so CI must run the checks too. The script's docstring documents gate and history mechanics. The document remains readable and operable without the tool (<a href="#dl-validator">dl-validator</a>, <a href="#dl-hook">dl-hook</a>).</p>
+<table>
+<thead><tr><th>Markup</th><th>Contract</th></tr></thead>
+<tbody>
+<tr><td><code>id</code> and <code>href</code></td><td>Unique, resolving anchors; dependency anchors enclose complete claims (<a href="#p3">P3</a>).</td></tr>
+<tr><td><code>tr id="dl-…"</code></td><td>Decision row; each cell is capped at 40 words.</td></tr>
+<tr><td><code>data-count="differences"</code> / <code>data-count="p=principles"</code></td><td>Declare the counted list or id series. Link retained count assertions to the enumeration (<a href="#dl-counts">dl-counts</a>).</td></tr>
+<tr><td><code>data-commit-types</code></td><td>One code element in main declares allowed types; retain seed/audit/review. Absence is reported as unenforced (<a href="#dl-committypes">dl-committypes</a>).</td></tr>
+<tr><td><code>data-sealed</code> / <code>data-changes</code></td><td>Protect a claim and name the old repo-relative path#id in its authorizing decision row (<a href="#dl-seal">dl-seal</a>). These are historical identifiers, not hyperlinks.</td></tr>
+<tr><td><code data-literal>[ADAPT]</code> / <code data-literal>[PROJECT]</code></td><td>Resolve before an instance commits. Use <code>check --template</code> for templates; <code>code data-literal</code> declares a mention and <code>pre data-specimen</code> a checked specimen.</td></tr>
+</tbody>
+</table>
+<p>A <code>seed:</code> subject initializes or replaces the lineage of the files it touches; maintenance commits and body text do not. Cite outside section numbers inside a link or <code>&lt;cite&gt;</code>; bare section ordinals are forbidden (<a href="#dl-novolatile">dl-novolatile</a>).</p>
 <p><strong>A collection addresses across files.</strong> A cross-file reference is <code>path#id</code>; a link to a file outside the collection carries <code>rel="external"</code>, any other linked HTML file needs a split row; the graph over a collection is derived from the current files and thrown away, never stored; main is named once per session as the argument to <code>start</code> (<a href="#dl-graphderived">dl-graphderived</a>).</p>
 <p><strong>Classless CSS is <a href="#c1">Cornerstone&nbsp;I</a> applied to styling.</strong> water.css externalizes presentation to one line, so every session spends its attention on content rather than a bespoke stylesheet it must read, preserve, and avoid breaking. This page ships only the water.css link &mdash; no custom block &mdash; the same principle taken to its limit, matching the <a href="#seed">seed</a>.</p>
 <p>Net: the principles say <em>what</em> state to hold; the substrate is part of <em>how</em> to hold it. Changing the carrier "for convenience" is a content decision in disguise.</p>

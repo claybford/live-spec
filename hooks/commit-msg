@@ -9,6 +9,8 @@
 #   - vocabulary gate: the subject's type must come from main's staged
 #     data-commit-types declaration; legacy documents without one are
 #     reported ("commit vocabulary not enforced"), never defaulted.
+# Removing or redirecting a dependency of a surviving claim requires review,
+# including same-commit target removal. Deleting the claim retires its debt.
 # Structural checks ran in pre-commit. Install:
 #   ln -sf ../../hooks/commit-msg .git/hooks/commit-msg
 set -e

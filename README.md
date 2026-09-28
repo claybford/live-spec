@@ -64,13 +64,18 @@ The review gate
 blocks a commit while a review obligation was already outstanding at HEAD,
 unless the subject is a recorded `review:` naming the claim or a `seed:`
 boundary for the dependent file — `python3 lspec.py review` handles the former
-(obligations the commit newly creates are reported as warnings). The
+(obligations the commit newly creates are reported as warnings).
+Removing or redirecting an existing dependency of a surviving claim requires a
+`review:` commit, even when the target is removed in the same commit. Deleting
+the dependent claim retires its obligations. `lspec review` accepts pending
+retirements after their links have been removed. The
 vocabulary gate rejects a subject typed outside main's declared
 `data-commit-types` set; a document without the declaration is reported as
 unenforced, never defaulted. The seal gate blocks any change to a
 `data-sealed` claim — text, id, path, marker, or collection membership —
-without a same-commit decision row naming the old `path#id` in
-`data-changes`. After committing, `python3 lspec.py check --clean` is the
+without a same-commit decision newly naming the old `path#id` in
+`data-changes`, or updated decision-cell text in a row already naming it.
+Adding unrelated addresses does not renew an existing authorization. After committing, `python3 lspec.py check --clean` is the
 completion check: it reports staged, unstaged, and untracked files repo-wide
 and fails while any remain. Unavailable
 history blocks: recover with `git fetch --unshallow`, or record an explicit

@@ -646,7 +646,7 @@ class N(unittest.TestCase):
         rc, out = cli(d, "neighbors", "motor.html#power")
         self.assertEqual(rc, 0, out)
         self.assertIn("inbound (2):", out)
-        self.assertIn("sub.html#sclaim [depends-on]  (load whole: lspec show sub.html)", out)
+        self.assertIn("sub.html#sclaim [depends-on]  (load whole: python3 lspec.py --main main.html show sub.html)", out)
         rc, out = cli(d, "neighbors", "main.html#top")
         self.assertIn("inbound (0): none", out)
 
@@ -746,7 +746,7 @@ class L(unittest.TestCase):
     def test_cross_file_outputs_carry_load_hint(self):
         d = repo(); edit(d, "motor.html", "120 kW", "105 kW")
         rc, out = cli(d, "impact", "HEAD")
-        self.assertIn("(load whole: lspec show motor.html)", out)   # the changed target is not main
+        self.assertIn("(load whole: python3 lspec.py --main main.html show motor.html)", out)   # the changed target is not main
         self.assertNotIn("lspec show main.html", out)                 # main is already loaded
 
 
@@ -1050,14 +1050,18 @@ class RevisionRegressions(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn('claim deleted', out)
 
-    def test_disappearance_link_removed_is_reported_not_blocked(self):
+    def test_disappearance_link_removed_requires_review(self):
         d = repo(); edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
         edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>',
              'motor power')
         sh('git', 'add', '-A', cwd=d)
         rc, out = self.gate(d, 'docs: drop dependency')
-        self.assertEqual(rc, 0, out)
+        self.assertEqual(rc, 1, out)
         self.assertIn('dependency removed', out)
+        rc, out = self.gate(d, 'review: main.html#claim')
+        self.assertEqual(rc, 0, out)
+        rc, out = cli(d, 'review', 'main.html#claim', '-m', 'independent of power now')
+        self.assertEqual(rc, 0, out)
 
     def test_disappearance_unverifiable_blocks(self):
         s = lspec.Spec('main.html', MAIN.format(extra=''))
@@ -1070,7 +1074,9 @@ class RevisionRegressions(unittest.TestCase):
         self.assertIn('boom', cause)
         r["kind"] = "unknown"; r["note"] = "shallow"
         cause, blocks = lspec.disappear_cause(r, argparse.Namespace(specs={}))
-        self.assertTrue(blocks)               # unknown stays unknown, and blocks
+        self.assertFalse(blocks)              # proven deletion needs no review history
+        cause, blocks = lspec.disappear_cause(r, argparse.Namespace(specs={lspec.canon('main.html'): s}))
+        self.assertTrue(blocks)               # a surviving claim still needs evidence
 
     def test_unborn_head_only_warns(self):
         d = tempfile.mkdtemp()
@@ -1330,8 +1336,10 @@ class HookIntegration(unittest.TestCase):
         edit(d, 'motor.html', 'id="power"', 'id="rated"')
         edit(d, 'main.html', 'href="motor.html#power"', 'href="motor.html#rated"')
         r = self.gcommit(d, 'docs: rename power to rated', add=['motor.html', 'main.html'])
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('this commit creates a review obligation', r.stdout + r.stderr)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('dependency removed or redirected', r.stdout + r.stderr)
+        # Bypass hooks to verify historical debt still survives an out-of-band rename.
+        sh('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-m', 'docs: rename', cwd=d)
         # the obligation is still owed after the rename — never OWED: none
         rc, out = cli(d, 'impact', 'HEAD')
         self.assertIn('depends-on motor.html#rated', out.split('OUTSTANDING')[1])
@@ -1346,6 +1354,57 @@ class HookIntegration(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         rc, out = cli(d, 'impact', 'HEAD')
         self.assertIn('OWED: none', out)
+
+    def test_retirement_and_target_deletion_in_one_commit(self):
+        d = self.hrepo()
+        edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>',
+             'an independently established rating')
+        edit(d, 'motor.html', '<p id="power">120 kW, see <a href="main.html#claim">main</a>.</p>', '')
+        r = self.gcommit(d, 'fix: retire target', add=['main.html', 'motor.html'])
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('dependency removed or redirected', r.stdout + r.stderr)
+        env = dict(os.environ, LSPEC_MAIN='main.html')
+        r = subprocess.run([sys.executable, 'lspec.py', '--main', 'main.html',
+                            'review', 'main.html#claim', '-m', 'Independent rating verified'],
+                           cwd=d, env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('OWED: none', cli(d, 'impact', 'HEAD')[1])
+
+    def test_review_handles_already_staged_target_file_deletion(self):
+        d = self.hrepo()
+        edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>',
+             'an independently established rating')
+        edit(d, 'main.html', '<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
+        sh('git', 'rm', 'motor.html', cwd=d)
+        r = self.gcommit(d, 'docs: retire motor', add=['main.html'])
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        env = dict(os.environ, LSPEC_MAIN='main.html')
+        r = subprocess.run([sys.executable, 'lspec.py', '--main', 'main.html',
+                            'review', 'main.html#claim', '-m', 'Independent rating verified'],
+                           cwd=d, env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('OWED: none', cli(d, 'impact', 'HEAD')[1])
+
+    def test_redirect_requires_review_even_without_prior_debt(self):
+        d = self.hrepo()
+        edit(d, 'motor.html', '</main>', '<p id="alternate">90 kW</p></main>')
+        r = self.gcommit(d, 'docs: alternate', add=['motor.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        edit(d, 'main.html', 'href="motor.html#power"', 'href="motor.html#alternate"')
+        r = self.gcommit(d, 'docs: redirect', add=['main.html'])
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = self.gcommit(d, 'review: main.html#claim')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_deleting_dependent_claim_retires_without_review(self):
+        d = self.hrepo()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        self.assertEqual(self.gcommit(d, 'fix: derate', add=['motor.html']).returncode, 0)
+        edit(d, 'main.html', '<p id="claim">This design needs '
+             '<a rel="depends-on" href="motor.html#power">motor power</a>.</p>', '')
+        edit(d, 'motor.html', ', see <a href="main.html#claim">main</a>', '')
+        r = self.gcommit(d, 'docs: delete claim', add=['main.html', 'motor.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_first_commit_on_unborn_head(self):
         d = self.hrepo(committed=False)
@@ -1613,6 +1672,27 @@ class SealGate(unittest.TestCase):
         rc, out = self.staged(d)
         self.assertEqual(rc, 0, out)
 
+    def test_existing_rationale_can_newly_authorize_claim(self):
+        d = lrepo()
+        authorize(d, 'dl-req', 'main.html#top')
+        commit(d, 'docs: existing rationale')
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
+        edit(d, 'main.html', 'data-changes="main.html#top"',
+             'data-changes="main.html#top main.html#req"')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 0, out)
+
+    def test_equivalent_address_does_not_renew_authorization(self):
+        d = lrepo()
+        authorize(d, 'dl-req', 'main.html#req')
+        commit(d, 'docs: existing authorization')
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
+        edit(d, 'main.html', 'data-changes="main.html#req"',
+             'data-changes="./main.html#req"')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('[sealed] main.html#req', out)
+
     def test_marker_removal_blocked(self):
         d = lrepo()
         edit(d, 'main.html', ' data-sealed', '')
@@ -1778,9 +1858,12 @@ class SealGate(unittest.TestCase):
         rc, out = self.staged(d)
         self.assertEqual(rc, 1, out)          # class= is not a substantive update
         self.assertIn('[sealed] main.html#req', out)
-        # ...but editing the row's data-changes declaration IS substantive
+        # An unrelated address must not renew the req authorization.
         edit(d, 'main.html', 'class="pretty" data-changes="main.html#req"',
              'data-changes="main.html#req main.html#top"')
+        rc, out = self.staged(d)
+        self.assertEqual(rc, 1, out)
+        edit(d, 'main.html', '<td>w</td>', '<td>New evidence permits this change.</td>')
         rc, out = self.staged(d)
         self.assertEqual(rc, 0, out)
 
@@ -1895,6 +1978,25 @@ class CleanCheck(unittest.TestCase):
 
 
 class CliArgs(unittest.TestCase):
+    def test_generated_commands_preserve_main_and_quote_paths(self):
+        import shlex
+        d = repo()
+        rc, out = cli(d, 'start')
+        self.assertEqual(rc, 0, out)
+        commands = out.split('next commands (MAIN is supplied on every invocation):')[1].split('verbs')[0]
+        cwd = os.getcwd()
+        try:
+            os.chdir(d)
+            for line in commands.strip().splitlines():
+                argv = shlex.split(line)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(lspec.main(['lspec', *argv[2:]]), 0)
+            col = argparse.Namespace(main=lspec.canon('a b.html'))
+            argv = shlex.split(lspec.command(col, 'review', 'a b.html#claim'))
+            self.assertEqual(argv, ['python3', 'lspec.py', '--main', 'a b.html', 'review', 'a b.html#claim'])
+        finally:
+            os.chdir(cwd)
+
     def test_main_flag_after_subcommand(self):
         d = repo()
         cwd = os.getcwd(); os.chdir(d)

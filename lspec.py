@@ -86,8 +86,11 @@ candidate tree. Created by this commit: warning. Already outstanding at HEAD:
 blocks, unless the subject is a recorded `review:` naming the claim or a
 `seed:` boundary whose staged files' lineages it discards. A HEAD obligation
 with no candidate counterpart is reported with its cause — claim deleted,
-dependency removed, content reverted, seed boundary; only an unverifiable
-comparison blocks. Unknown history blocks, with both recovery paths: fetch
+content reverted, seed boundary. Removing or redirecting an edge of a surviving
+claim requires a recorded review, even if target and edge disappear together.
+Deleting the dependent claim retires its obligations without review. The review
+command accepts pending retirements after their links have been removed.
+Unknown history for a surviving claim blocks, with both recovery paths: fetch
 sufficient history, or record an explicit review against committed state. A
 verified unborn HEAD (first commit) owes nothing and only warns. `lspec
 review` needs no side channel: the hook reads the same subject history does.
@@ -98,8 +101,9 @@ reported ("commit vocabulary not enforced"), never defaulted.
 SEALED CLAIMS (dl-seal). An element with a stable id and the data-sealed
 attribute is protected: once committed, its normalized text, id, path,
 marker, and collection membership may not change unless the same commit adds
-or substantively updates a dl- row whose data-changes attribute names the
-old repo-relative path#id (whitespace-separated when several). data-changes
+the old repo-relative path#id to a decision row's data-changes, or changes decision-cell text in a row already naming it.
+Adding unrelated addresses never renews an existing authorization. Addresses
+are whitespace-separated when several. data-changes
 addresses are historical identifiers resolved against the comparison
 baseline, not hyperlinks — a deleted claim need not leave a broken anchor.
 An unchanged or whitespace-only row authorizes nothing. Protection covers
@@ -149,6 +153,7 @@ import argparse
 import html
 import os
 import re
+import shlex
 import subprocess
 import sys
 from html.parser import HTMLParser
@@ -1103,7 +1108,8 @@ def print_owed(owed, prefix="REVIEW", col=None):
     print(f"{prefix} OWED ({len(owed)})")
     if any(r["kind"] == "unknown" for r in owed):
         print("  CLEARANCE UNKNOWN: fetch sufficient history (git fetch --unshallow for a shallow clone),")
-        print("  or explicitly review against committed state and record it with lspec review CLAIM.")
+        hint = command(col, "review", "CLAIM") if col else "lspec review CLAIM"
+        print(f"  or explicitly review against committed state and record it with {hint}.")
     for r in owed:
         d, t = r["dependent"], r["target"]
         line = f"  {addr(*d)}  depends-on {addr(*t)}  [{r['kind']}]"
@@ -1138,11 +1144,16 @@ def deliver(path, raw):
           f'other means before doing anything else.\n')
 
 
+def command(col, verb, *args):
+    """Runnable hints retain MAIN and quote paths; no persistent session state."""
+    return shlex.join(["python3", "lspec.py", "--main", rel(col.main), verb, *args])
+
+
 def load_hint(col, *paths):
     """Suffix naming every non-main file the line touches, so a crossing hands
     the agent the whole-load command at the moment it would otherwise skim."""
     seen = [p for i, p in enumerate(paths) if p != col.main and p not in paths[:i]]
-    return "".join(f"  (load whole: lspec show {rel(p)})" for p in seen)
+    return "".join(f"  (load whole: {command(col, 'show', rel(p))})" for p in seen)
 
 
 def load(args, basis="worktree"):
@@ -1235,23 +1246,22 @@ def gate_claims(msg_path):
 
 def disappear_cause(r, col):
     """Why a HEAD obligation has no candidate counterpart. -> (cause, blocks).
-    A disappearance clears only when the comparison establishes the fact —
-    claim deleted, dependency removed, content reverted, or this commit's
-    seed boundary; unavailable evidence stays unknown and blocks."""
+    Proven claim deletion or reversion retires the debt. A removed dependency
+    of a surviving claim needs a recorded review; unavailable evidence blocks."""
     fp, src = r["dependent"]
     tp, fr = r["target"]
-    if r["kind"] == "unknown":
-        return f"clearance cannot be established ({r['note']})", True
     try:
         s = col.specs.get(fp)
         if s is None:
             return "dependent file removed", False
         if src not in s.elems:
             return "claim deleted", False
+        if r["kind"] == "unknown":
+            return f"clearance cannot be established ({r['note']})", True
         links = [l for l in s.links_in(src) if l["rel"] == "depends-on"]
         if not any((resolve(fp, l["href"])[0] or fp, resolve(fp, l["href"])[1]) == (tp, fr)
                    for l in links):
-            return "dependency removed", False
+            return "dependency removed; record a review of the surviving claim", True
         # The link stands, so the obligation left only if the target's staged
         # text equals the baseline text; anything less established blocks.
         base = r.get("baseline")
@@ -1292,15 +1302,24 @@ def vocab_gate(col, rc, msg_path):
     return rc
 
 
-def _row_key(row):
-    """Meaningful decision content: the row's normalized text plus its
-    data-changes declaration. Presentation-only attribute edits (class and
-    kin) and whitespace edits authorize nothing; a text or data-changes
-    change does."""
-    text = re.sub(r"\s+", " ", norm(row)).strip()
-    m = re.search(r'\bdata-changes="([^"]*)"', row)
-    changes = " ".join(sorted(m.group(1).split())) if m else ""
-    return text + "\x00" + changes
+def row_changes(row):
+    match = re.search(r'\bdata-changes="([^"]*)"', row)
+    addresses = set(match.group(1).split()) if match else set()
+    # Equivalent legal spellings name the same claim, not new authorization.
+    # Keep invalid traversal untouched so the gate can reject it explicitly.
+    out = set()
+    for address in addresses:
+        path, sep, frag = address.partition("#")
+        if sep and path and not path.startswith("/") and ".." not in path.split("/"):
+            path = posix(os.path.normpath(path))
+        out.add(path + sep + frag)
+    return out
+
+
+def row_decision(row):
+    """Decision-cell text only: attributes and presentation do not renew consent."""
+    return tuple(norm(cell) for cell in re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S))
+
 
 
 def renamed_from(root, new_abs):
@@ -1329,10 +1348,10 @@ def renamed_from(root, new_abs):
 def seal_gate(col, rc):
     """The seal gate (staged checking): a claim marked data-sealed at
     HEAD may not change — normalized text, deletion, id/path change, marker
-    removal, or leaving the collection — unless the same commit adds or
-    substantively updates a dl- row whose data-changes names the old
-    repo-relative path#id. Protection is read from HEAD; authorization from
-    the staged tree. The gate requires a recorded decision, not proof the
+    removal, or leaving the collection — unless the same commit newly names
+    its old repo-relative path#id in a decision row's data-changes or changes
+    the cells of a row already naming it. Protection is read from HEAD;
+    authorization from the staged tree. The gate requires a recorded decision, not proof the
     decision is sound. An incomplete baseline fails; it never clears."""
     root = repo_root()
     if root is None:
@@ -1400,12 +1419,13 @@ def seal_gate(col, rc):
             continue
         old_rows = dict(base.rows()) if base else {}
         for rid, row in s.rows():
-            if rid in old_rows and _row_key(old_rows[rid]) == _row_key(row):
-                continue         # an unchanged row authorizes nothing
-            m = re.search(r'\bdata-changes="([^"]*)"', row)
-            if not m:
-                continue
-            for a in m.group(1).split():
+            old = old_rows.get(rid)
+            authorized = row_changes(row)
+            if old is not None and row_decision(old) == row_decision(row):
+                # Existing rationale can cover a newly named claim, but adding
+                # another address cannot renew consent for an old one.
+                authorized -= row_changes(old)
+            for a in sorted(authorized):
                 apath, sep, frag = a.partition("#")
                 if (not sep or not apath or not frag or apath.startswith("/")
                         or re.match(r"[A-Za-z]:", apath)
@@ -1436,6 +1456,29 @@ def seal_gate(col, rc):
     return rc
 
 
+def retired_dependencies(col):
+    """HEAD edges removed or redirected while their source claim survives.
+    Compare edges, not outstanding debt: removing a target and edge together
+    must still record a disposition. Deleted sources need no review.
+    """
+    if head_status() == "unborn":
+        return []
+    head = Collection(rel(col.main), basis="HEAD")
+    if head.fails:
+        raise HistoryUnavailable("; ".join(head.fails))
+    if col.main not in head.specs:
+        old = renamed_from(repo_root(), col.main)
+        if old:
+            head = Collection(old, basis="HEAD")
+            if head.fails:
+                raise HistoryUnavailable("; ".join(head.fails))
+    current = {(fp, l["src"], tp, fr) for fp, l, tp, fr in col.depends_on_edges()}
+    return [(fp, l, tp, fr) for fp, l, tp, fr in head.depends_on_edges()
+            if l["src"] is not None and fp in col.specs
+            and l["src"] in col.specs[fp].elems
+            and (fp, l["src"], tp, fr) not in current]
+
+
 def review_gate(col, rc, msg_path):
     """The commit-msg gate. Compares obligations computed against HEAD (over
     HEAD's own edges) with obligations against the candidate tree:
@@ -1444,7 +1487,7 @@ def review_gate(col, rc, msg_path):
       `review:` naming the claim or a `seed:` boundary whose staged files'
       lineages it discards — the same boundary the baselines will apply;
     - a HEAD obligation with no counterpart is reported with its cause;
-      only unverifiable comparisons block;
+      retirement of a surviving claim's edge requires an explicit review;
     - unknown history blocks, with both recovery paths;
     - a verified unborn HEAD (first commit) owes nothing and only warns."""
     root = repo_root()
@@ -1464,6 +1507,18 @@ def review_gate(col, rc, msg_path):
             p = canon(os.path.join(root, n))
             if p in col.specs:
                 pending.add(p)     # scoped to files the seed commit touches
+    try:
+        retired = retired_dependencies(col)
+    except HistoryUnavailable as e:
+        print(f"  [review-gate] cannot establish dependency retirement: {e}")
+        return 1
+    for fp, link, tp, fr in retired:
+        name = f"{repo_rel(fp)}#{link['src']}"
+        if fp not in pending and name not in named:
+            print(f"  [review-gate] {name}: dependency removed or redirected "
+                  f"({addr(tp, fr)}); assess the surviving claim and record: "
+                  f"{command(col, 'review', addr(fp, link['src']))}")
+            rc = 1
     cand = owed_reviews(col, basis="staged", pending_seeds=pending)
     try:
         head_owed = owed_reviews(SimpleNamespace(
@@ -1491,13 +1546,13 @@ def review_gate(col, rc, msg_path):
                       f"clearance cannot be established (unknown history: {why})")
                 print("      recover: fetch sufficient history (git fetch --unshallow for a "
                       "shallow clone), or record a review:")
-                print(f"        python3 lspec.py review {dep_name(r)}")
+                print(f"        {command(col, 'review', addr(*r['dependent']))}")
                 rc = 1
         elif priors:
             if dep_name(r) not in named:
                 print(f"  [review-gate] {dep_name(r)} depends-on {addr(*r['target'])} "
                       f"was already owed at HEAD; clear it with: "
-                      f"python3 lspec.py review {dep_name(r)}")
+                      f"{command(col, 'review', addr(*r['dependent']))}")
                 rc = 1
         else:
             print(f"  warn: this commit creates a review obligation {dep_name(r)} "
@@ -1511,6 +1566,8 @@ def review_gate(col, rc, msg_path):
                   f"commit's seed boundary")
             continue
         cause, blocks = disappear_cause(r, col)
+        if dep_name(r) in named:
+            continue                 # the explicit review records this disposition
         if blocks:
             print(f"  [review-gate] {dep_name(r)} depends-on {addr(*t)}: {cause}")
             rc = 1
@@ -1817,9 +1874,15 @@ def cmd_start(args):
     rels = [rel(x) for x in col.specs]
     _, dirty_paths = uncommitted(rels)
     print_owed(owed_reviews(col, dirty_paths), col=col)
+    print("\nnext commands (MAIN is supplied on every invocation):")
+    for verb, operands in (("check", ("--diff", "HEAD")), ("show", ("--graph",)),
+                           ("check", ("--clean",))):
+        print("  " + command(col, verb, *operands))
     print("\nverbs — read-only: " + " ".join(READ_ONLY) + "   mutating: " + " ".join(MUTATING))
-    print("  start MAIN [--with FILE…] · check [--diff BASE] [--neighborhood T] · show T [--text] | show FILE (whole) | show --graph · "
-          "neighbors T [--whole-file] · impact BASE · mv OLD NEW · review CLAIM... [-m MSG]")
+    for verb, operands in (("start", ()), ("show", ("FILE_OR_CLAIM",)),
+                           ("neighbors", ("CLAIM",)), ("impact", ("BASE",)),
+                           ("mv", ("OLD", "NEW")), ("review", ("CLAIM",))):
+        print("  " + command(col, verb, *operands))
     return rc
 
 
@@ -1937,6 +2000,8 @@ def cmd_review(args):
     col = load(args)
     if repo_root() is None:
         print("lspec review: not a git checkout", file=sys.stderr); return 2
+    retired = retired_dependencies(col)
+    retiring = {(fp, link["src"]) for fp, link, tp, fr in retired}
     names, files, claims = [], set(), []
     for t in args.claims:
         try:
@@ -1947,7 +2012,7 @@ def cmd_review(args):
             print(f"lspec review: {t} names a file; name the dependent claim", file=sys.stderr)
             return 2
         deps = [l for l in col.specs[p].links_in(frag) if l["rel"] == "depends-on"]
-        if not deps:
+        if not deps and (p, frag) not in retiring:
             print(f"lspec review: {addr(p, frag)} has no depends-on link; nothing to review",
                   file=sys.stderr); return 2
         names.append(f"{repo_rel(p)}#{frag}")
@@ -1956,9 +2021,12 @@ def cmd_review(args):
         for l in deps:
             tgt, _ = resolve(p, l["href"])
             files.add(repo_rel(tgt or p))
-    # A review discharges an obligation; it never manufactures one.
+        for fp, link, tp, fr in retired:
+            if (fp, link["src"]) == (p, frag):
+                files.add(repo_rel(tp))
+    # Include edge retirement even when HEAD had no outstanding debt.
     _, dpaths = uncommitted([rel(x) for x in col.specs])
-    owed = {r["dependent"] for r in owed_reviews(col, dpaths)}
+    owed = {r["dependent"] for r in owed_reviews(col, dpaths)} | retiring
     clear = [addr(p, f) for p, f in claims if (p, f) not in owed]
     if clear:
         print("lspec review: nothing is owed for " + ", ".join(clear)
@@ -1977,7 +2045,14 @@ def cmd_review(args):
         for f in fails:
             print("  " + f, file=sys.stderr)
         return 2
-    git("add", "--", *sorted(files), cwd=repo_root())
+    root = repo_root()
+    stageable = [f for f in sorted(files)
+                 if os.path.exists(os.path.join(root, f))
+                 or exists_at(os.path.join(root, f), "staged")]
+    # A retired target may already be deleted from both index and worktree.
+    # Its staged deletion belongs in the commit but cannot be git-added again.
+    if stageable:
+        git("add", "--", *stageable, cwd=root)
     subject = "review: " + ", ".join(names)
     msg = subject + (f"\n\n{args.message}" if args.message else "")
     # No side channel: the commit-msg hook reads this very subject, the same

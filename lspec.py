@@ -143,6 +143,16 @@ internal omissions. The byte count is UTF-8. CLI help and start list operations;
 the spec binds protocol steps to them. The collection graph is rebuilt from
 files and split rows, never maintained as a separate manifest.
 
+FEEDBACK. Change checks ask about removed decision rows, excluding unchanged
+rows relocated with files. A fix: subject or an edit to an explicitly named
+diagnostic register prompts a recurrence question. These notices are advisory,
+not semantic verdicts, and do not change exit status. Dirty target notices
+compare claim existence/text across HEAD, index and worktree; unrelated file
+edits get a separate unfinished-work notice. start lists actual edges/seals;
+its inventory cannot establish that protection selection is complete. mv and
+review print next steps. The advisory post-commit hook runs the committed
+checker's completion check; it cannot undo a commit or catch a skipped commit.
+
 STAMP (dl-concurrency). Every run reports the commit it was computed against
 and whether the repository has uncommitted changes (repo-wide). The stamp
 exposes a basis, not a lock; git does not prevent concurrent writes in a
@@ -467,8 +477,16 @@ def uncommitted(rels):
     paths = set()
     if dirty:
         root = repo_root() or os.getcwd()
-        for ln in git("status", "--porcelain", "--", *rels, check=False).splitlines():
-            paths.add(canon(os.path.join(root, ln[3:].split(" -> ")[-1].strip('"'))))
+        entries = iter(git("status", "--porcelain=v1", "-z", "--", *rels,
+                           check=False).split("\0"))
+        for entry in entries:
+            if not entry:
+                continue
+            paths.add(canon(os.path.join(root, entry[3:])))
+            if "R" in entry[:2] or "C" in entry[:2]:
+                old = next(entries, "")
+                if old:
+                    paths.add(canon(os.path.join(root, old)))
     return line, paths
 
 
@@ -1018,6 +1036,24 @@ def shorten(s, n=70):
 
 # =============================================================== reviews
 
+def target_dirty(path, frag, cache):
+    """Compare claim existence/text in HEAD, index and worktree independently.
+    A staged edit hidden by a worktree revert still counts; unrelated rows do not.
+    """
+    if path not in cache:
+        try:
+            try:
+                working = Spec(path)
+            except FileNotFoundError:
+                working = None
+            cache[path] = (file_at("HEAD", path), file_staged(path), working)
+        except (HistoryUnavailable, OSError):
+            return True  # unavailable evidence must not imply a clean target
+    values = [(frag in spec.elems, spec.text(frag)) if spec else (False, None)
+              for spec in cache[path]]
+    return any(value != values[0] for value in values[1:])
+
+
 def owed_reviews(col, dirty_paths=None, basis="HEAD", pending_seeds=()):
     """-> list of dicts: dependent (path,src), target (path,frag), kind,
     baseline, note. Unknown history is reported separately from new links.
@@ -1031,7 +1067,7 @@ def owed_reviews(col, dirty_paths=None, basis="HEAD", pending_seeds=()):
         return [{"dependent": (fp, l["src"]), "target": (tp, fr), "kind": "unknown",
                  "baseline": None, "note": "not a git checkout"}
                 for fp, l, tp, fr in col.depends_on_edges()]
-    cache, seen = {}, {}
+    cache, seen, dirty_cache = {}, {}, {}
     for fp, l, tp, fr in col.depends_on_edges():
         if l["src"] is None:
             continue
@@ -1090,7 +1126,7 @@ def owed_reviews(col, dirty_paths=None, basis="HEAD", pending_seeds=()):
                 rec["dirty"] = True
             owed.append(rec); seen[pair] = rec
             continue
-        if dirty_paths and tp in dirty_paths:
+        if dirty_paths and tp in dirty_paths and target_dirty(tp, fr, dirty_cache):
             if pair in seen:
                 seen[pair]["dirty"] = True
             else:
@@ -1622,6 +1658,67 @@ def cmd_clean():
     return 1
 
 
+DIAGNOSIS_REMINDER = ("If this fixes a previously diagnosed failure, record "
+                      "symptom · distinguishing evidence · fix.")
+
+
+def diagnostic_text(spec):
+    """Recognize explicitly named diagnostic registers, not arbitrary fixes."""
+    if spec is None:
+        return ()
+    regions = []
+    for eid in spec.elems:
+        if re.fullmatch(r"diagnostic(?:[-_]register)?", eid, re.I):
+            start, end = spec.elems[eid]
+            if re.fullmatch(r"h[1-6]", spec.tags[eid]):
+                level = int(spec.tags[eid][1])
+                following = re.search(r"<h[1-" + str(level) + r"]\b", spec.raw[end:], re.I)
+                end = end + following.start() if following else len(spec.raw)
+            regions.append(norm(spec.raw[start:end]))
+    # Also recognize a titled register without a prescribed id.
+    for match in re.finditer(r"<h([1-6])\b[^>]*>(.*?)</h\1>", spec.raw, re.S | re.I):
+        if "diagnostic register" in norm(match[2]).lower():
+            following = re.search(r"<h[1-" + match[1] + r"]\b", spec.raw[match.end():], re.I)
+            end = match.end() + following.start() if following else len(spec.raw)
+            regions.append(norm(spec.raw[match.start():end]))
+    return tuple(regions)
+
+
+def change_reminders(col, base, fix=False):
+    """Advisory questions only; never change a check's exit status."""
+    if not require_commit(base):
+        if fix:
+            print("  reminder [recurring-failure]: " + DIAGNOSIS_REMINDER)
+        return
+    previous = Collection(rel(col.main), basis=base)
+    if col.main not in previous.specs and base == "HEAD":
+        old = renamed_from(repo_root(), col.main)
+        if old:
+            previous = Collection(old, basis=base)
+    if previous.fails:
+        print("  note: change reminders unavailable: baseline collection incomplete")
+        return
+    current_rows = {(p, rid) for p, spec in col.specs.items() for rid, _ in spec.rows()}
+    # A row moved with a file or split retains its id and text; do not call it deleted.
+    moved_rows = {(rid, norm(row)) for spec in col.specs.values() for rid, row in spec.rows()}
+    for p, spec in previous.specs.items():
+        for rid, row in spec.rows():
+            if (p, rid) not in current_rows and (rid, norm(row)) not in moved_rows:
+                print(f"  reminder [decision-removed] {addr(p, rid)}: Was this decision "
+                      "replaced? Preserve the displaced choice and reason in its replacement; "
+                      "otherwise confirm this row no longer needs retaining.")
+    changed_register = any(diagnostic_text(old) and
+                           diagnostic_text(old) != diagnostic_text(col.specs.get(p))
+                           for p, old in previous.specs.items())
+    if fix or changed_register:
+        print("  reminder [recurring-failure]: " + DIAGNOSIS_REMINDER)
+
+
+def unfinished_notice():
+    if stamp()[1]:
+        print("Uncommitted changes remain; this check does not complete the session.")
+
+
 def cmd_check(args):
     if getattr(args, "clean", False):
         if getattr(args, "staged", False) or getattr(args, "commit_msg", None):
@@ -1672,6 +1769,10 @@ def cmd_check(args):
             neighborhood(col, p, frag, semantic=False, staged=staged)
     if args.neighborhood or args.diff:
         print_semantic()
+    msg = getattr(args, "commit_msg", None)
+    if args.diff or staged:
+        change_reminders(col, args.diff or "HEAD",
+                         fix=bool(msg and subject_type(gate_subject(msg), "fix") is not None))
     return rc
 
 
@@ -1868,6 +1969,12 @@ def cmd_start(args):
             print(f"lspec start --with: {e}", file=sys.stderr); return 2
         deliver(wp, col.specs[wp].raw)
     print_graph(col)
+    sealed = [(p, eid) for p, spec in col.specs.items() for eid in spec.sealed]
+    print(f"sealed claims: {len(sealed)}")
+    for p, eid in sealed:
+        print("  " + addr(p, eid))
+    print("Parsed protection inventory: use these identifiers and counts in the seed "
+          "assessment. This does not establish that the selection is complete.")
     print()
     rc = cmd_check(argparse.Namespace(main=args.main, neighborhood=None, diff=None))
     print()
@@ -1989,6 +2096,8 @@ def mv_file(col, old, new):
 
 
 def after_mv(main):
+    print("Rename prepared; nothing committed.")
+    print("Reconcile next: " + command(SimpleNamespace(main=main), "check", "--diff", "HEAD"))
     print()
     rc = cmd_check(argparse.Namespace(main=rel(main), neighborhood=None, diff=None))
     if rc:
@@ -2024,6 +2133,13 @@ def cmd_review(args):
         for fp, link, tp, fr in retired:
             if (fp, link["src"]) == (p, frag):
                 files.add(repo_rel(tp))
+    fails = check_structure(col)
+    if fails:
+        print("lspec review: collection is red; a review must land on a green tree:",
+              file=sys.stderr)
+        for f in fails:
+            print("  " + f, file=sys.stderr)
+        return 2
     # Include edge retirement even when HEAD had no outstanding debt.
     _, dpaths = uncommitted([rel(x) for x in col.specs])
     owed = {r["dependent"] for r in owed_reviews(col, dpaths)} | retiring
@@ -2037,13 +2153,6 @@ def cmd_review(args):
     if extra:
         print("lspec review: unrelated changes are staged (" + ", ".join(sorted(extra))
               + "); commit or unstage them first", file=sys.stderr)
-        return 2
-    fails = check_structure(col)
-    if fails:
-        print("lspec review: collection is red; a review must land on a green tree:",
-              file=sys.stderr)
-        for f in fails:
-            print("  " + f, file=sys.stderr)
         return 2
     root = repo_root()
     stageable = [f for f in sorted(files)
@@ -2063,6 +2172,7 @@ def cmd_review(args):
         raise RuntimeError("git commit failed (hook red?)")
     sha = git("rev-parse", "--short", "HEAD").strip()
     print(f"{sha} {subject}")
+    print("Review committed. Confirm session completion with: python3 lspec.py check --clean")
     return 0
 
 
@@ -2111,6 +2221,10 @@ def main(argv):
         rc = {"start": cmd_start, "check": cmd_check, "show": cmd_show,
               "neighbors": cmd_neighbors, "impact": cmd_impact, "mv": cmd_mv,
               "review": cmd_review}[args.verb](args)
+        if args.verb in ("check", "show", "neighbors", "impact") and not (
+                getattr(args, "clean", False) or getattr(args, "staged", False)
+                or getattr(args, "commit_msg", None)):
+            unfinished_notice()
         sys.stdout.flush()   # surface EPIPE here, not at interpreter shutdown
         return rc
     except RuntimeError as e:

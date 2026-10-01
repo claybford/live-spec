@@ -1,0 +1,12 @@
+#!/bin/sh
+# Advisory only: the commit already succeeded. Use the committed checker,
+# so unrelated working-tree edits to lspec.py cannot change this report.
+root=$(git rev-parse --show-toplevel) || exit 0
+cd "$root" || exit 0
+# Preserve Git's selected index, including linked-worktree/alternate indexes.
+if python3 -c 'import subprocess, sys; source = subprocess.check_output(["git", "show", "HEAD:lspec.py"], text=True); sys.argv = ["lspec.py", "check", "--clean"]; exec(compile(source, "HEAD:lspec.py", "exec"), {"__name__": "__main__"})'; then
+  echo "post-commit: working tree clean."
+else
+  echo "post-commit: commit succeeded; completion check did not pass. Resolve remaining work or the reported error before finishing."
+fi
+exit 0

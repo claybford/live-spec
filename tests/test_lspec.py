@@ -1272,8 +1272,12 @@ class HookIntegration(unittest.TestCase):
     def install(self, d, *names):
         for n in names:
             dst = os.path.join(d, '.git', 'hooks', n)
-            shutil.copy(os.path.join(self.HOOKS, n), dst)
-            os.chmod(dst, 0o755)
+            os.makedirs(os.path.join(d, 'hooks'), exist_ok=True)
+            shutil.copy2(os.path.join(self.HOOKS, n), os.path.join(d, 'hooks', n))
+            if os.path.lexists(dst):
+                os.unlink(dst)
+            # Exactly the documented relative symlink; never repair source modes.
+            os.symlink('../../hooks/' + n, dst)
 
     def hrepo(self, committed=True):
         """A temp repo with lspec.py committed and both hooks installed."""
@@ -1297,6 +1301,43 @@ class HookIntegration(unittest.TestCase):
         return subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t',
                                'commit', '--allow-empty', '-m', msg],
                               cwd=d, capture_output=True, text=True, env=env, check=False)
+
+    def test_documented_install_preserves_executable_sources_and_blocks(self):
+        d = self.hrepo()
+        for name in ('pre-commit', 'commit-msg'):
+            hook = Path(d, '.git', 'hooks', name)
+            self.assertEqual(os.readlink(hook), '../../hooks/' + name)
+            self.assertTrue(os.access(hook, os.X_OK), name)
+        edit(d, 'main.html', '<table>',
+             '<code data-commit-types>docs fix seed audit review</code><table>')
+        self.assertEqual(self.gcommit(d, 'docs: vocabulary', add=['main.html']).returncode, 0)
+        result = self.gcommit(d, 'chore: forbidden')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('[commit-types]', result.stdout + result.stderr)
+
+    def test_post_commit_reports_leftovers_without_reversing_commit(self):
+        d = self.hrepo()
+        self.install(d, 'post-commit')
+        sh('git', 'add', 'hooks/post-commit', cwd=d)
+        self.assertEqual(self.gcommit(d, 'docs: install completion hook').returncode, 0)
+        Path(d, 'unfinished.txt').write_text('draft')
+        result = self.gcommit(d, 'docs: session event')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('untracked: unfinished.txt', result.stdout + result.stderr)
+        self.assertIn('commit succeeded', result.stdout + result.stderr)
+        self.assertEqual(sh('git', 'log', '-1', '--format=%s', cwd=d).strip(), 'docs: session event')
+        Path(d, 'unfinished.txt').unlink()
+        result = self.gcommit(d, 'docs: clean event')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('post-commit: working tree clean', result.stdout + result.stderr)
+
+    def test_fix_subject_prints_one_nonblocking_recurrence_question(self):
+        d = self.hrepo()
+        result = self.gcommit(d, 'fix: corrected implementation')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((result.stdout + result.stderr).count('reminder [recurring-failure]'), 1)
+        result = self.gcommit(d, 'docs: no repair')
+        self.assertNotIn('reminder [recurring-failure]', result.stdout + result.stderr)
 
     def test_acceptance_sequence(self):
         d = self.hrepo()
@@ -2010,6 +2051,120 @@ class CliArgs(unittest.TestCase):
                 self.assertEqual(rc, 0, f"{argv}: {out.getvalue()}{err.getvalue()}")
         finally:
             os.chdir(cwd)
+
+
+class ChangeFeedback(unittest.TestCase):
+    def fixture(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def test_unrelated_dirty_row_does_not_flag_target(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '<h1 id="top">Motor</h1>', '<h1 id="top">Motor heading</h1>')
+        rc, out = cli(d, 'neighbors', 'motor.html#power')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('REVIEW OWED: none', out)
+        self.assertNotIn('[uncommitted]', out)
+        self.assertIn('Uncommitted changes remain', out)
+
+    def test_staged_target_change_hidden_by_worktree_revert_is_dirty(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        sh('git', 'add', 'motor.html', cwd=d)
+        edit(d, 'motor.html', '105 kW', '120 kW')
+        rc, out = cli(d, 'neighbors', 'motor.html#power')
+        self.assertIn('[uncommitted]', out)
+        self.assertEqual(rc, 0, out)
+
+    def test_worktree_revert_never_clears_committed_debt(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        commit(d, 'docs: derate')
+        edit(d, 'motor.html', '105 kW', '120 kW')
+        rc, out = cli(d, 'neighbors', 'motor.html#power')
+        self.assertIn('[content]', out)
+        self.assertIn('target has uncommitted changes', out)
+        self.assertNotIn('OWED: none', out)
+
+    def test_target_deletion_is_flagged_before_commit(self):
+        d = self.fixture()
+        edit(d, 'motor.html', 'id="power"', 'id="different"')
+        rc, out = cli(d, 'start')
+        self.assertIn('[uncommitted]', out)
+
+    def add_decision(self, d):
+        row = '<tr id="dl-old"><td>Chosen</td><td>Rejected</td><td>Because</td></tr>'
+        edit(d, 'main.html', '</table>', row + '</table>')
+        commit(d, 'docs: decision')
+        return row
+
+    def test_removed_decision_warns_without_failing(self):
+        d = self.fixture()
+        row = self.add_decision(d)
+        edit(d, 'main.html', row, '')
+        rc, out = cli(d, 'check', '--diff', 'HEAD')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('reminder [decision-removed] main.html#dl-old', out)
+        sh('git', 'add', 'main.html', cwd=d)
+        rc, out = cli(d, 'check', '--staged')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('reminder [decision-removed]', out)
+
+    def test_staged_reminders_ignore_unstaged_row_deletion(self):
+        d = self.fixture()
+        row = self.add_decision(d)
+        edit(d, 'main.html', row, '')
+        rc, out = cli(d, 'check', '--staged')
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('reminder [decision-removed]', out)
+
+    def test_file_rename_does_not_report_removed_decisions(self):
+        d = self.fixture()
+        self.add_decision(d)
+        rc, out = cli(d, 'mv', 'main.html', 'renamed.html')
+        self.assertEqual(rc, 0, out)
+        cwd = os.getcwd()
+        try:
+            os.chdir(d)
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                rc = lspec.main(['lspec', '--main', 'renamed.html', 'check', '--staged'])
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 0, stream.getvalue())
+        self.assertNotIn('reminder [decision-removed]', stream.getvalue())
+
+    def test_existing_diagnostic_register_change_prompts_once(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>',
+             '<h2 id="diagnostic">Diagnostic register</h2><p id="failure">Symptom and fix</p></main>')
+        commit(d, 'docs: diagnosis')
+        edit(d, 'motor.html', 'Symptom and fix', 'Symptom, tell and fix')
+        rc, out = cli(d, 'check', '--diff', 'HEAD')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.count('reminder [recurring-failure]'), 1)
+        self.assertIn('If this fixes', out)
+
+    def test_start_lists_actual_seals(self):
+        d = self.fixture()
+        edit(d, 'motor.html', 'id="power"', 'id="power" data-sealed')
+        rc, out = cli(d, 'start')
+        self.assertIn('sealed claims: 1', out)
+        self.assertIn('  motor.html#power', out)
+        self.assertIn('depends-on edges: 1', out)
+        self.assertIn('does not establish that the selection is complete', out)
+
+    def test_mv_and_review_print_next_steps(self):
+        d = self.fixture()
+        rc, out = cli(d, 'mv', 'motor.html#power', 'motor.html#rated')
+        self.assertIn('Rename prepared; nothing committed', out)
+        self.assertIn('python3 lspec.py --main main.html check --diff HEAD', out)
+        commit(d, 'docs: renamed')
+        rc, out = cli(d, 'review', 'main.html#claim')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('Review committed. Confirm session completion', out)
+        self.assertIn('python3 lspec.py check --clean', out)
 
 
 if __name__ == "__main__":

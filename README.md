@@ -84,3 +84,36 @@ review against committed state. Template validation is explicit:
 Install both: `ln -sf ../../hooks/pre-commit .git/hooks/pre-commit` and
 `ln -sf ../../hooks/commit-msg .git/hooks/commit-msg`. Hooks don't clone, so run
 `python3 lspec.py check` in CI. Tests: `python3 -m unittest tests.test_lspec`.
+
+
+### Change-aware feedback
+
+`check --diff` and staged checks ask about removed decision rows. A `fix:`
+commit, or a change to an explicitly named diagnostic register, prompts a
+recurrence check. These are advisory questions, not proof of an error; they do
+not change exit status. Diagnostic detection recognizes an id of `diagnostic`,
+`diagnostic-register`, or `diagnostic_register`, or a heading titled
+"Diagnostic register". Other layouts may not trigger it.
+
+Dirty dependency reports compare each target claim across HEAD, index and
+working tree. General unfinished-work notices remain separate. `start` lists
+parsed dependencies and sealed claims for factual seed assessments; it cannot
+judge whether the protection selection is complete.
+
+Install the advisory completion hook too:
+
+```sh
+ln -sf ../../hooks/post-commit .git/hooks/post-commit
+```
+
+After a successful commit it runs the committed tool's `check --clean`. It
+reports leftovers but cannot undo the commit or detect a session that never
+commits. `mv` and `review` also print their next completion steps.
+
+All three hook source files must retain executable permissions. If individual
+downloads lose file modes, restore them before installing:
+
+```sh
+chmod +x hooks/pre-commit hooks/commit-msg hooks/post-commit
+git update-index --chmod=+x hooks/pre-commit hooks/commit-msg hooks/post-commit
+```

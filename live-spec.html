@@ -141,11 +141,13 @@
 
 &lt;h2 id="open"&gt;Open Items&lt;/h2&gt;
 &lt;p&gt;A watch entry is an open-items row: claim, triggering event, date,
-  re-verifies-when. When handling a failure, check for an established diagnosis:
-  a confirmed failure diagnosed a second time earns a diagnostic-register row
-  (symptom &middot; tell &middot; fix). Any unresolved work remains in the open
-  list and links to that row. Repeated symptoms alone do not confirm a diagnosis.
-  Keep a ruled-out register when an eliminated cause is re-proposed.&lt;/p&gt;
+  re-verifies-when. A first occurrence, even if root-caused, does not yet earn
+  a diagnostic-register row. Record the first occurrence, diagnosis, and fix
+  with the change; keep any unverified diagnosis or fix in an open watch entry.
+  Add a diagnostic-register row (symptom &middot; tell &middot; fix) when
+  a later occurrence confirms the same diagnosis; repeated symptoms alone do
+  not qualify. Any unresolved work remains in the open list and links to that
+  row. Keep a ruled-out register when an eliminated cause is re-proposed.&lt;/p&gt;
 &lt;table&gt;&lt;tr&gt;&lt;th&gt;Item&lt;/th&gt;&lt;th&gt;Gates&lt;/th&gt;&lt;th&gt;Resolves when&lt;/th&gt;&lt;/tr&gt;&lt;/table&gt;
 
 &lt;h2 id="log"&gt;Decision Log&lt;/h2&gt;

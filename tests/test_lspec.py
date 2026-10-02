@@ -2167,5 +2167,226 @@ class ChangeFeedback(unittest.TestCase):
         self.assertIn('python3 lspec.py check --clean', out)
 
 
+class Finish(unittest.TestCase):
+    def fixture(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def snapshot(self, d):
+        # Includes index, refs, objects, reflogs and every working-tree file.
+        return {str(p.relative_to(d)): (p.read_bytes(), p.stat().st_mode,
+                                       p.stat().st_mtime_ns)
+                for p in Path(d).rglob('*') if p.is_file()}
+
+    def test_clean_prompt_baseline_and_read_only(self):
+        d = self.fixture()
+        before = self.snapshot(d)
+        rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(before, self.snapshot(d))
+        self.assertIn('PASS', out)
+        self.assertIn('WORKING TREE — CLEAN', out)
+        self.assertIn('REVIEW OWED: none', out)
+        self.assertIn('Review what changed or was learned during this session', out)
+        self.assertIn('including decisions, findings, and changed assumptions.', out)
+        self.assertIn('Distinguish verification actually performed from expected behavior.', out)
+        self.assertIn('rerun `python3 lspec.py --main main.html finish`', out)
+        self.assertIn('start records no session baseline', out)
+        self.assertIn('committed session changes cannot be identified', out)
+        self.assertIn('Open/watch items may remain at handoff', out)
+        self.assertIn('does not certify semantic agreement', out)
+
+    def test_dirty_inventory_mapping_and_read_only(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        sh('git', 'add', 'motor.html', cwd=d)
+        edit(d, 'motor.html', '105 kW', '120 kW')  # hide staged edit from HEAD/worktree diff
+        Path(d, 'notes.txt').write_text('finding')
+        before = self.snapshot(d)
+        rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(before, self.snapshot(d))
+        self.assertIn('staged: motor.html [spec]', out)
+        self.assertIn('unstaged: motor.html [spec]', out)
+        self.assertIn('untracked: notes.txt [other]', out)
+        self.assertIn('CHANGED motor.html#power [staged]', out)
+        self.assertIn('CHANGED motor.html#power [unstaged/untracked]', out)
+        self.assertIn('== motor.html#power; one-hop: main.html#claim', out)
+        self.assertIn('UNMAPPED notes.txt', out)
+        self.assertIn('[uncommitted]', out)
+        self.assertEqual(cli(d, 'check', '--clean')[0], 1)
+
+    def test_committed_debt_survives_finish_and_pending_edge_removal(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        commit(d, 'docs: derate')
+        rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('[content]', out)
+        self.assertIn('WORKING TREE — CLEAN', out)
+        edit(d, 'main.html', 'rel="depends-on"', '')
+        sh('git', 'add', 'main.html', cwd=d)
+        before = self.snapshot(d)
+        rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(before, self.snapshot(d))
+        self.assertIn('[content]', out)
+        self.assertIn('[pending dependency retirement]', out)
+        self.assertIn('MARKUP main.html#claim', out)
+        self.assertEqual(cli(d, 'finish'), (rc, out))
+        self.assertEqual(before, self.snapshot(d))
+
+    def test_invalid_spec_fails_but_still_prompts(self):
+        d = self.fixture()
+        edit(d, 'motor.html', 'id="power"', 'id="gone"')
+        rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 1, out)
+        self.assertIn("no id 'power'", out)
+        self.assertIn('SESSION ACCOUNTING', out)
+        self.assertIn('MOVED motor.html#gone', out)
+        self.assertIn('one-hop: main.html#claim', out)
+        edit(d, 'motor.html', 'id="gone"', 'id="power"')
+        edit(d, 'motor.html', '120 kW', '[ADAPT]')
+        self.assertEqual(cli(d, 'finish')[0], cli(d, 'check')[0])
+        self.assertIn('[adapt]', cli(d, 'finish')[1])
+
+    def test_untracked_supporting_spec(self):
+        d = self.fixture()
+        Path(d, 'topic').mkdir()
+        Path(d, 'topic', 'extra.html').write_text('<p id="new">New finding</p>')
+        edit(d, 'main.html', '</table>',
+             '<tr id="dl-split-extra"><td><a href="topic/extra.html">extra</a></td>'
+             '<td>keep here</td><td>Own topic</td></tr></table>')
+        rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('untracked: topic/extra.html [spec]', out)
+        self.assertIn('ADDED topic/extra.html#new', out)
+
+    def test_worktree_validation_does_not_run_staged_or_clean_gates(self):
+        d = self.fixture()
+        edit(d, 'motor.html', 'id="power"', 'id="gone"')
+        sh('git', 'add', 'motor.html', cwd=d)
+        edit(d, 'motor.html', 'id="gone"', 'id="power"')
+        rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('MOVED motor.html#gone [staged]', out)
+        self.assertEqual(cli(d, 'check', '--staged')[0], 1)
+
+    def test_one_hop_only_and_ignored_files_excluded(self):
+        d = self.fixture()
+        edit(d, 'main.html', '</main>',
+             '<p id="distant">See <a href="#claim">design</a>.</p></main>')
+        Path(d, '.gitignore').write_text('ignored.txt\n')
+        commit(d, 'docs: references')
+        Path(d, 'ignored.txt').write_text('cache')
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('== motor.html#power; one-hop: main.html#claim', out)
+        self.assertNotIn('main.html#distant', out)
+        self.assertNotIn('ignored.txt', out)
+
+    def test_main_rename_keeps_committed_debt(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        commit(d, 'docs: derate')
+        cli(d, 'mv', 'main.html', 'renamed.html')
+        before = self.snapshot(d)
+        rc, out = cli(d, 'finish', 'renamed.html')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('staged: renamed.html (from main.html) [spec]', out)
+        self.assertIn('main.html#claim  depends-on motor.html#power  [content]', out)
+        self.assertEqual(before, self.snapshot(d))
+
+    def test_non_spec_declared_reference_and_unmapped_spec_edit(self):
+        d = self.fixture()
+        Path(d, 'script.py').write_text('old')
+        edit(d, 'main.html', '</main>',
+             '<p id="implementation">See <a href="script.py">script</a>.</p></main>')
+        commit(d, 'docs: reference')
+        Path(d, 'script.py').write_text('new')
+        edit(d, 'motor.html', '</main>', '<p>Unanchored finding</p></main>')
+        rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('unstaged: script.py [other]', out)
+        self.assertIn('== main.html#implementation; one-hop: script.py', out)
+        self.assertIn('UNMAPPED motor.html', out)
+        self.assertNotIn('UNMAPPED script.py', out)
+        self.assertIn('REVIEW OWED: none', out)  # plain link never manufactures debt
+
+    def test_deleted_supporting_spec_uses_old_neighbors(self):
+        d = self.fixture()
+        Path(d, 'motor.html').unlink()
+        edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>',
+             'reconsideration')
+        p = Path(d, 'main.html')
+        p.write_text(re.sub(r'<tr id="dl-split-motor">.*?</tr>', '', p.read_text()))
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('staged: motor.html [spec]', out)
+        self.assertIn('REMOVED motor.html#power', out)
+        self.assertIn('== motor.html#power; one-hop: main.html#claim', out)
+        self.assertIn('[pending dependency retirement]', out)
+
+    def test_main_options_subdirectory_and_rename_inventory(self):
+        d = self.fixture()
+        cli(d, 'mv', 'motor.html', 'drive unit.html')
+        Path(d, 'sub').mkdir()
+        cwd = os.getcwd()
+        try:
+            os.chdir(Path(d, 'sub'))
+            for tail in (['../main.html'], ['--main', '../main.html']):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = lspec.main(['lspec', 'finish', *tail])
+                self.assertEqual(rc, 0, out.getvalue())
+                self.assertIn('staged: drive unit.html (from motor.html) [spec]', out.getvalue())
+                self.assertIn('--main ../main.html finish', out.getvalue())
+        finally:
+            os.chdir(cwd)
+
+    def test_unknown_history_is_reported_not_cleared(self):
+        d = self.fixture()
+        before = self.snapshot(d)
+        with mock.patch.object(lspec, 'review_baseline', side_effect=lspec.HistoryUnavailable('shallow')):
+            rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 0, out)  # same read-only report semantics as start/impact
+        self.assertIn('CLEARANCE UNKNOWN', out)
+        self.assertIn('git fetch --unshallow', out)
+        self.assertEqual(before, self.snapshot(d))
+
+    def test_unborn_and_non_git(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        Path(d, 'main.html').write_text('<p id="claim">Finding</p>')
+        rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('unavailable (not a git checkout)', out)
+        self.assertIn('SESSION ACCOUNTING', out)
+        sh('git', 'init', '-q', cwd=d)
+        before = self.snapshot(d)
+        rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('no available HEAD commit', out)
+        self.assertIn('ADDED main.html#claim', out)
+        self.assertEqual(before, self.snapshot(d))
+
+    def test_input_and_git_errors_still_prompt_and_restore_environment(self):
+        d = self.fixture()
+        with mock.patch.dict(os.environ, {'GIT_OPTIONAL_LOCKS': '1'}):
+            with mock.patch.object(lspec, 'working_changes', side_effect=RuntimeError('unavailable index')):
+                rc, out = cli(d, 'finish')
+            self.assertEqual(rc, 2, out)
+            self.assertIn('SESSION ACCOUNTING', out)
+            self.assertEqual(os.environ['GIT_OPTIONAL_LOCKS'], '1')
+            # load() uses SystemExit for missing MAIN on all existing verbs.
+            with self.assertRaises(SystemExit) as err:
+                cli(d, 'finish', 'missing.html')
+            self.assertEqual(err.exception.code, 2)
+            self.assertEqual(os.environ['GIT_OPTIONAL_LOCKS'], '1')
+
+
 if __name__ == "__main__":
     unittest.main()

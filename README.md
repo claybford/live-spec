@@ -40,8 +40,9 @@ the spec reads without it, and the session protocol says what to do by hand. It 
 a session the spec whole (`python3 lspec.py start`), runs the conventions the spec makes
 mechanical as a commit-time gate (`check`), computes owed reviews from git history
 (`neighbors`, `impact`), and makes renames and recorded reviews operations (`mv`,
-`review`). Green means the implemented structural checks passed; semantic
-correctness and review adequacy require judgment. The semantics live in the spec
+`review`). Its closing command, `finish`, gathers checks, change evidence, and a
+session-accounting prompt before handoff. Green means the implemented structural
+checks passed; semantic correctness and review adequacy require judgment. The semantics live in the spec
 and the tool's docstring; `python3 lspec.py start` lists the verbs.
 
 ## Working on this repo
@@ -49,6 +50,8 @@ and the tool's docstring; `python3 lspec.py start` lists the verbs.
 An agent session starts with AGENTS.md: run `python3 lspec.py start live-spec.html`
 and read everything it prints, from the opening header through the end marker,
 with no reported truncation, before anything else.
+Before handing work back, run `python3 lspec.py finish live-spec.html`, address
+its findings, and report any blocker or unfinished work.
 
 Every session-event is a commit; every full sweep takes an `audit:` commit. A
 clean sweep may update bookkeeping; use `git commit --allow-empty` only when no
@@ -86,7 +89,41 @@ Install both: `ln -sf ../../hooks/pre-commit .git/hooks/pre-commit` and
 `python3 lspec.py check` in CI. Tests: `python3 -m unittest tests.test_lspec`.
 
 
-### Change-aware feedback
+### Session review and change-aware feedback
+
+For a different instance, substitute its MAIN path in the lifecycle commands
+above. MAIN can also be supplied with `--main`.
+
+`finish` is read-only: it uses the ordinary working-tree structural checks and
+existing review obligations, without editing files, acknowledging reviews,
+staging, committing, or creating bookkeeping state. Validation, outstanding
+reviews, and Git state are reported separately. Exit 1 means structural failure;
+exit 2 means unreadable input or unavailable Git evidence. Outstanding or unknown
+reviews are reported without changing the exit status, as with `start` and
+`impact`. Dirty state alone does not fail; `check --clean` retains its explicit
+cleanliness requirement and the existing commit policy is unchanged.
+
+The inventory includes repo-wide staged, unstaged, and non-ignored untracked
+changes, distinguishing collection specs from other files. HEAD/index/worktree
+comparisons include staged edits hidden by an unstaged revert. Parsed claim
+changes and declared links identify review candidates and their one-hop
+neighbors, including old references for removed claims. Mapping is partial;
+unmapped files are named, and filenames never establish semantic impact.
+This does not run staged commit gates or validate the index as a candidate commit.
+
+`start` records no session baseline, so `finish` cannot identify committed session
+changes. HEAD is used only to compare uncommitted state, never as an invented
+session baseline. Outside Git, structural checks and the prompt still run;
+history and change evidence are explicitly unavailable. Git evidence does not
+cover conversation-only decisions, findings, or changed assumptions, so the
+session-accounting prompt always appears, even with a clean tree.
+
+Act on that prompt using the spec's existing recording and open-items rules.
+Open/watch items are distinct from mechanically outstanding review obligations;
+unresolved work may legitimately remain at handoff. A clean tree does not prove
+the spec is current, and uncommitted work may be coherent. `finish` supplies
+checks, evidence, and a prompt; it cannot certify semantic agreement, adequate
+evidence, or that the agent performed the review, nor enforce its own invocation.
 
 `check --diff` and staged checks ask about removed decision rows. A `fix:`
 commit, or a change to an explicitly named diagnostic register, prompts a

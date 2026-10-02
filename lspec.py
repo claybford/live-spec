@@ -3,6 +3,8 @@
 
   lspec start MAIN                 deliver MAIN whole, build the collection, run
                                    every check, list owed reviews and the verbs
+  lspec finish MAIN                read-only handoff: validate, report reviews,
+                                   changes and affected claims; prompt accounting
   lspec check [MAIN] [--diff BASE] [--neighborhood TARGET] [--template]
                                    structural checks (instance readiness by
                                    default; --template validates a template);
@@ -117,6 +119,22 @@ standalone (not a staged-tree check, not a pre-commit requirement): it
 detects outstanding changes when invoked; it neither forces invocation nor
 proves that a clean audit was recorded.
 
+HANDOFF (finish). Uses ordinary working-tree structural checks, not --clean
+or commit gates. Review obligations are reported, never acknowledged; as with
+start/impact, outstanding or unknown reviews do not themselves fail this report.
+Dirty state is evidence, not a failure. Exit 1 means structural failures; exit 2
+means unreadable input or unavailable Git evidence. Outside Git, available
+structural checks still run and history/change evidence is explicitly unavailable.
+HEAD/index/worktree comparisons include staged edits hidden by worktree reverts,
+untracked non-ignored files, and collection exits. Parsed ids and declared links
+give review candidates, not semantic impact; unmapped files remain explicit.
+start records no session baseline: committed session changes cannot be identified.
+HEAD is only the comparison basis for uncommitted changes, not a session start.
+Git evidence cannot account for conversation-only decisions or findings. Always
+review the session-accounting prompt, including on a clean tree. No invocation
+record or other bookkeeping is written; finish cannot certify semantic review
+or enforce its own invocation. Open/watch items remain distinct from review debt.
+
 SPECIMENS. A pre block marked data-specimen="NAME" is decoded once and checked
 as a single-file specimen: local hyperlinks must use #fragment, never a file
 path, including rel="external" links. Remote URLs remain allowed. Local file
@@ -183,7 +201,7 @@ WORD2NUM.update({f"{t}-{NUM[u]}": 30 + 10 * i + u
 WORD2NUM.update({"hundred": 100})
 TENS_WORDS = {"twenty", *TENS}
 VOID = {"br", "hr", "meta", "link", "img", "input", "col", "wbr", "source"}
-READ_ONLY = ["start", "check", "show", "neighbors", "impact"]
+READ_ONLY = ["start", "finish", "check", "show", "neighbors", "impact"]
 MUTATING = ["mv", "review"]
 
 
@@ -1612,6 +1630,32 @@ def review_gate(col, rc, msg_path):
     return rc
 
 
+def working_changes(root):
+    """Repo-wide porcelain inventory: (category, destination, original or None)."""
+    r = git("status", "--porcelain=v1", "--untracked-files=all", "-z", cwd=root)
+    changes = []
+    entries = r.split("\0")
+    i = 0
+    while i < len(entries):
+        e = entries[i]
+        i += 1
+        if not e:
+            continue
+        x, y, path = e[0], e[1], e[3:]
+        old = None
+        if x in "RC" or y in "RC":
+            old = entries[i]
+            i += 1                     # rename/copy: the original path follows
+        if x == "?":
+            changes.append(("untracked", path, None))
+            continue
+        if x != " ":
+            changes.append(("staged", path, old))
+        if y != " ":
+            changes.append(("unstaged", path, old))
+    return changes
+
+
 def cmd_clean():
     """check --clean: the session-completion check. Report staged, unstaged,
     and untracked (non-ignored) files repo-wide; nonzero while any remain.
@@ -1621,39 +1665,21 @@ def cmd_clean():
     if root is None:
         print("lspec check --clean: not a git checkout", file=sys.stderr)
         return 2
-    r = git("status", "--porcelain=v1", "-z", cwd=root)
-    staged, unstaged, untracked = [], [], []
-    entries = r.split("\0")
-    i = 0
-    while i < len(entries):
-        e = entries[i]
-        i += 1
-        if not e:
-            continue
-        x, y, path = e[0], e[1], e[3:]
-        if x in "RC" or y in "RC":
-            i += 1                     # rename/copy: the original path follows
-        if x == "?":
-            untracked.append(path)
-            continue
-        if x != " ":
-            staged.append(path)
-        if y != " ":
-            unstaged.append(path)
+    changes = working_changes(root)
     try:
         head = git("rev-parse", "--short", "HEAD", cwd=root).strip()
     except (RuntimeError, OSError):
         head = "no commits yet"
     print(f"basis {head}")
-    n = len(staged) + len(unstaged) + len(untracked)
+    n = len(changes)
     if not n:
         print("CLEAN — no staged, unstaged, or untracked changes")
         return 0
     print(f"UNCLEAN — {n} file(s) outstanding:")
-    for label, paths in (("staged", staged), ("unstaged", unstaged),
-                         ("untracked", untracked)):
-        for pth in paths:
-            print(f"  {label}: {pth}")
+    for label in ("staged", "unstaged", "untracked"):
+        for kind, pth, _ in changes:
+            if kind == label:
+                print(f"  {label}: {pth}")
     print("  record or discard the changes; --clean never does either itself")
     return 1
 
@@ -1719,21 +1745,11 @@ def unfinished_notice():
         print("Uncommitted changes remain; this check does not complete the session.")
 
 
-def cmd_check(args):
-    if getattr(args, "clean", False):
-        if getattr(args, "staged", False) or getattr(args, "commit_msg", None):
-            print("lspec check: --clean stands alone — it reports the working tree and "
-                  "index; it is not a staged-tree check", file=sys.stderr)
-            return 2
-        return cmd_clean()
-    staged = bool(getattr(args, "staged", False) or getattr(args, "commit_msg", None))
-    col = load(args, basis="staged" if staged else "worktree")
-    rels = [rel(p) for p in col.specs]
-    line, dirty = stamp(staged=staged)
-    print(line)
+def report_structure(col, markers=True):
+    """Shared structural report; no commit gates or bookkeeping writes."""
     for d in col.disconnected:
         print(f"  note: {rel(d)} is not linked from the collection (disconnected)")
-    fails = check_structure(col, markers=not getattr(args, "template", False))
+    fails = check_structure(col, markers=markers)
     for p, s in col.specs.items():
         if not s.count_decls:
             print(f"  note: {rel(p)} declares no count checksums (data-count)")
@@ -1749,6 +1765,22 @@ def cmd_check(args):
         counts = ", ".join(f"{n} {g[0]}" for g, n in s.count_groups) or "no counts declared"
         print(f"PASS — {len(col.specs)} file(s); {rel(col.main)}: {counts}; "
               f"all structural checks green")
+    return rc
+
+
+def cmd_check(args):
+    if getattr(args, "clean", False):
+        if getattr(args, "staged", False) or getattr(args, "commit_msg", None):
+            print("lspec check: --clean stands alone — it reports the working tree and "
+                  "index; it is not a staged-tree check", file=sys.stderr)
+            return 2
+        return cmd_clean()
+    staged = bool(getattr(args, "staged", False) or getattr(args, "commit_msg", None))
+    col = load(args, basis="staged" if staged else "worktree")
+    rels = [rel(p) for p in col.specs]
+    line, dirty = stamp(staged=staged)
+    print(line)
+    rc = report_structure(col, markers=not getattr(args, "template", False))
     if staged:
         rc = seal_gate(col, rc)
     if getattr(args, "commit_msg", None) and repo_root() is not None:
@@ -1958,6 +1990,159 @@ def cmd_impact(args):
     return 0
 
 
+def finish_changes(col, head, staged, changes, root):
+    """Map uncommitted evidence through parsed claims/links in all three trees.
+    Comparing both transitions keeps staged changes visible after a worktree revert.
+    Collection membership is not itself evidence that a file's content changed.
+    """
+    collections = (head, staged, col)
+    spec_paths = set().union(*(set(c.specs) for c in collections))
+    changed_paths = {canon(os.path.join(root, name)) for _, path, old in changes
+                     for name in (path, old) if name}
+    print("\nWORKING TREE — " + ("DIRTY (not a failure)" if changes else "CLEAN"))
+    for kind, path, old in changes:
+        p = canon(os.path.join(root, path))
+        was_spec = old and canon(os.path.join(root, old)) in spec_paths
+        label = "spec" if p in spec_paths or was_spec else "other"
+        print(f"  {kind}: {path}" + (f" (from {old})" if old else "") + f" [{label}]")
+    if not changes:
+        print("  no staged, unstaged, or untracked changes")
+
+    affected, mapped = set(), set()
+    has_head = head_status() == "ok"
+    print("\nAFFECTED CLAIM CANDIDATES — parsed changes and declared links only")
+    for p in sorted(changed_paths & spec_paths):
+        # Read actual file versions even if a split row was removed: dropping
+        # collection membership does not mean every claim in that file changed.
+        versions = (file_at("HEAD", p) if has_head else None, file_staged(p),
+                    Spec(p) if os.path.isfile(p) else None)
+        for label, before, after in (("staged", versions[0], versions[1]),
+                                     ("unstaged/untracked", versions[1], versions[2])):
+            cur = after or Spec(p, "")
+            for frag, (kind, detail) in sorted(classify(cur, before).items()):
+                if kind == "unchanged":
+                    if cur.element(frag) == before.element(frag):
+                        continue
+                    kind = "markup"  # href/rel/seal edits can leave rendered text unchanged
+                print(f"  {kind.upper()} {addr(p, frag)} [{label}]"
+                      + (f" (was #{detail})" if kind == "moved" else "")
+                      + (load_hint(col, p) if p in col.specs else " [not in working collection]"))
+                affected.add((p, frag)); mapped.add(p)
+                if kind == "moved":
+                    affected.add((p, detail))
+    # A declared file reference is a reason to inspect its source, never a
+    # claim that filenames alone prove semantic impact or create review debt.
+    for c in collections:
+        for fp, link, tp, frag in c.edges():
+            if tp in changed_paths - spec_paths and link["src"]:
+                affected.add((fp, link["src"])); mapped.add(tp)
+    for p, frag in sorted(affected):
+        neighbors = set()
+        for c in collections:
+            neighbors.update((fp, l["src"]) for fp, l in c.inbound(p, frag))
+            s = c.specs.get(p)
+            if s and frag in s.elems:
+                for l in s.links_in(frag):
+                    tp, fr = resolve(p, l["href"])
+                    if (tp, fr) != (None, None):
+                        neighbors.add((tp or p, fr))
+        neighbors.discard((p, frag))
+        names = ", ".join(addr(*n) for n in sorted(neighbors, key=lambda n: addr(*n)))
+        print(f"  == {addr(p, frag)}; one-hop: {names or 'none declared'}"
+              + (load_hint(col, p) if p in col.specs else " [not in working collection]"))
+    if not affected:
+        print("  none mapped")
+    for p in sorted(changed_paths - mapped):
+        print(f"  UNMAPPED {rel(p)} — no changed parsed claim or declared reference")
+    print("  Mapping is partial: unanchored text, file modes and other changes may "
+          "remain unmapped even within listed files; filenames do not prove semantic impact.")
+    return changed_paths
+
+
+def finish_reviews(col, collections, dirty_paths):
+    """Keep committed debt visible even when a pending edit removes its edge."""
+    owed = {}
+    for c in collections:
+        for r in owed_reviews(c, dirty_paths):
+            key = (r["dependent"], r["target"], r["kind"])
+            owed[key] = r
+    retirements = set()
+    for c in collections[1:]:
+        for fp, l, tp, fr in retired_dependencies(c):
+            retirements.add((fp, l["src"], tp, fr))
+    pending = [{"dependent": (fp, src), "target": (tp, fr),
+                "kind": "pending dependency retirement", "baseline": None,
+                "note": "requires a recorded review"}
+               for fp, src, tp, fr in sorted(retirements)]
+    print("\nOUTSTANDING REVIEW OBLIGATIONS — committed baselines and pending retirements")
+    print_owed([*owed.values(), *pending], col=col)
+
+
+def cmd_finish(args):
+    # Git status may otherwise refresh the index even though it is a read
+    # command. Scope this to finish, including every helper it calls.
+    locks = os.environ.get("GIT_OPTIONAL_LOCKS")
+    os.environ["GIT_OPTIONAL_LOCKS"] = "0"
+    hint = SimpleNamespace(main=args.main or "live-spec.html")
+    try:
+        col = load(args)
+        hint = col
+        print(stamp()[0])
+        print("\nVALIDATION — working-tree structure")
+        rc = report_structure(col)
+        print("\nCOMMIT STATE — " + (git("rev-parse", "HEAD").strip()
+              if repo_root() and head_status() == "ok" else "no available HEAD commit"))
+        print("Session baseline unavailable: start records no session baseline; "
+              "committed session changes cannot be identified. HEAD is only the "
+              "basis for uncommitted evidence, not the session start.")
+        root = repo_root()
+        if root is None:
+            print("\nWORKING TREE — unavailable (not a git checkout)")
+            print("AFFECTED CLAIM CANDIDATES — unavailable without change evidence")
+            print_owed(owed_reviews(col), col=col)
+            return rc
+        state = head_status()
+        if state == "broken":
+            raise HistoryUnavailable("HEAD is unavailable; change/review evidence is incomplete")
+        head = (Collection(col.main, basis="HEAD") if state == "ok" else
+                SimpleNamespace(specs={}, depends_on_edges=lambda: [], edges=lambda: [],
+                                inbound=lambda p, f: []))
+        if state == "ok" and col.main not in head.specs:
+            old = renamed_from(root, col.main)
+            if old:
+                head = Collection(old, basis="HEAD")
+        staged = Collection(col.main, basis="staged")
+        if getattr(head, "fails", []):
+            raise HistoryUnavailable("; ".join(head.fails))
+        if staged.fails:
+            print("  note: index collection incomplete: " + "; ".join(staged.fails))
+        changes = working_changes(root)
+        dirty_paths = finish_changes(col, head, staged, changes, root)
+        finish_reviews(col, (head, staged, col), dirty_paths)
+        return rc
+    finally:
+        if locks is None:
+            os.environ.pop("GIT_OPTIONAL_LOCKS", None)
+        else:
+            os.environ["GIT_OPTIONAL_LOCKS"] = locks
+        print("\nSESSION ACCOUNTING (by hand)")
+        print("Review what changed or was learned during this session, including "
+              "decisions, findings, and changed assumptions. Update affected spec "
+              "claims and preserve consequential outcomes with their supporting "
+              "evidence. Record unresolved questions and unverified claims using "
+              "the existing open-items rules. Where there is a separate artifact, "
+              "reconcile it with the spec. Distinguish verification actually "
+              "performed from expected behavior. Address outstanding review "
+              "obligations and rerun `" + command(hint, "finish") + "` after making changes.")
+        print("\nHANDOFF — structural results, review obligations and Git state are "
+              "separate. Open/watch items may remain at handoff; they are not "
+              "mechanically outstanding review obligations. Report blockers or unfinished work.")
+        print("A clean tree does not prove the spec is current; uncommitted work "
+              "may be coherent. Passing checks does not certify semantic agreement, "
+              "adequate evidence, or completion of this review. Git changes are "
+              "evidence, not a complete account of session activity.")
+
+
 def cmd_start(args):
     col = load(args)
     main = col.main
@@ -1983,10 +2168,10 @@ def cmd_start(args):
     print_owed(owed_reviews(col, dirty_paths), col=col)
     print("\nnext commands (MAIN is supplied on every invocation):")
     for verb, operands in (("check", ("--diff", "HEAD")), ("show", ("--graph",)),
-                           ("check", ("--clean",))):
+                           ("finish", ())):
         print("  " + command(col, verb, *operands))
     print("\nverbs — read-only: " + " ".join(READ_ONLY) + "   mutating: " + " ".join(MUTATING))
-    for verb, operands in (("start", ()), ("show", ("FILE_OR_CLAIM",)),
+    for verb, operands in (("start", ()), ("finish", ()), ("show", ("FILE_OR_CLAIM",)),
                            ("neighbors", ("CLAIM",)), ("impact", ("BASE",)),
                            ("mv", ("OLD", "NEW")), ("review", ("CLAIM",))):
         print("  " + command(col, verb, *operands))
@@ -2189,6 +2374,11 @@ def main(argv):
                         help="main spec (same as the global --main)")
     s = sub.add_parser("start"); s.add_argument("main_pos", nargs="?"); add_main(s)
     s.add_argument("--with", dest="with_", nargs="+", metavar="FILE", help="also deliver these supporting specs whole")
+    f = sub.add_parser("finish", help="read-only session review and handoff",
+                      description="Validate the working spec, report review obligations and "
+                      "available Git changes, and prompt session accounting. Dirty state "
+                      "alone does not fail. No session baseline is recorded by start.")
+    f.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(f)
     c = sub.add_parser("check"); c.add_argument("main_pos", nargs="?"); add_main(c)
     c.add_argument("--diff", metavar="BASE"); c.add_argument("--neighborhood", metavar="TARGET")
     c.add_argument("--template", action="store_true",
@@ -2218,7 +2408,7 @@ def main(argv):
     if getattr(args, "main_pos", None):
         args.main = args.main_pos
     try:
-        rc = {"start": cmd_start, "check": cmd_check, "show": cmd_show,
+        rc = {"start": cmd_start, "finish": cmd_finish, "check": cmd_check, "show": cmd_show,
               "neighbors": cmd_neighbors, "impact": cmd_impact, "mv": cmd_mv,
               "review": cmd_review}[args.verb](args)
         if args.verb in ("check", "show", "neighbors", "impact") and not (

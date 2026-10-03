@@ -1,193 +1,45 @@
 #!/usr/bin/env python3
 """lspec — maintenance automation for a Living Specification. Stdlib only.
 
-  lspec start MAIN                 deliver MAIN whole, build the collection, run
-                                   every check, list owed reviews and the verbs
-  lspec finish MAIN                validate, report reviews and change evidence,
-                                   prompt accounting; issue a local commit receipt
-  lspec check [MAIN] [--diff BASE] [--neighborhood TARGET] [--template]
-                                   structural checks (instance readiness by
-                                   default; --template validates a template);
-                                   optionally the neighborhood of every element
-                                   changed since BASE, or of TARGET
-  lspec show TARGET [--text]       the exact element (or its normalized text);
-                                   a bare FILE delivers it whole; --graph prints
-                                   the collection graph (no target needed)
-  lspec neighbors TARGET           inbound, outbound, counterparts, dependents;
-                                   mechanical results and reviews owed
-  lspec impact BASE                elements changed / moved / removed since BASE,
-                                   and the dependent claims each puts in question
-  lspec mv OLD NEW                 rename a file or an anchor with reference repair;
-                                   never commits (a file rename is staged for one
-                                   commit; an anchor rename is left as a diff)
-  lspec review CLAIM... [-m MSG]   record a review event: commit typed `review:`
-                                   naming the dependent claims, empty when clean
+The active spec carries the session's operating rules. live-spec.html defines
+the methodology and seed; README.md documents installation and tool workflows.
+Use `lspec --help` and `lspec COMMAND --help` for commands and options.
 
-neighbors requires an anchored TARGET; use `neighbors FILE --whole-file` for
-file-wide output.
+Exit status: 0 = pass, 1 = failed check, 2 = unreadable input, unavailable
+required evidence, bad target, or refused operation. Reporting review debt
+does not itself fail start, finish, impact, or neighbors. Mechanical checks
+cannot establish semantic correctness or review adequacy.
 
-TARGET is `path#id` (path relative to cwd) or `#id` in MAIN. MAIN defaults to
-live-spec.html when present; pass --main to override. Read-only verbs never
-touch files or git; finish writes a receipt in Git metadata, mv edits files,
-review commits. finish never edits source, stages, or acknowledges reviews.
+Implementation details beyond the seed's operating rules:
 
-Exit 0 = pass. 1 = a check failed (impact/neighbors only report owed reviews;
-they exit 0). 2 = unreadable input, bad target, or refused operation.
+* Review baselines belong to typed edges: dependent id plus target address.
+  Unrelated occurrences of an href do not reset introduction; upgrading a
+  plain link to depends-on introduces the edge at that commit. Comparison
+  uses normalized target text in committed trees.
 
-WHAT IS CHECKED. Structural PASS does not establish semantic consistency or
-review clearance. A link resolves; an id is unique; a stated count matches its
-enumeration; each cell in a decision row (tr id="dl-…") is within the 40-word
-cap; a file is justified by exactly one split row; main's single
-<code data-commit-types> declaration is well-formed and reserves the types
-the tool operates (seed, audit, review);
-a depends-on target's rendered text differs from the text in the tree of the
-last review naming the dependent claim; a link's source id differs from the
-basis commit; rel="depends-on" rides only on <a href> elements; unresolved
-[ADAPT]/[PROJECT] markers fail instance readiness — `check --template`
-validates a template instead, <code data-literal> declares a mention, and
-declared <pre data-specimen> content is exempt; quoting a marker in ordinary
-markup hides nothing. Nothing here proves a claim true or a review adequate.
+* The lineage floor is the newest commit whose subject types seed: and
+  touches the dependent file. Edges present at that floor start there.
+  Body lines and maintenance commit types do not establish seed boundaries.
 
-COLLECTION. MAIN is the root; a file is in the collection iff a split row
-(<tr id="dl-split-…"> whose selection cell links the file) reaches it from
-MAIN; one parent per file. Linked-but-unjustified files are orphans (FAIL);
-unlinked .html beside the collection is disconnected (noted).
+* Rename tracing preserves prior debt only for unambiguous moves: the old
+  address disappears in the same commit and its text is unique at the new
+  address. Address-only changes still require confirmation. Ambiguous moves,
+  unavailable trees, and unestablished shallow-history baselines yield
+  UNKNOWN rather than clearance.
 
-CLEARANCE (dl-reviewgit). For a dependent claim A#S with rel="depends-on" to
-B#T, the baseline is the newest commit whose subject is `review: …` naming
-A#S; if none, the commit that introduced the edge. Review is owed iff B#T's
-normalized text at HEAD differs from its text in the baseline tree (or B#T is
-gone). Uncommitted changes never clear anything and are flagged. A renamed
-target has no history under its new id, so it is owed (address-only when its
-text is unchanged) — a rename resets review. Introduction is keyed to the
-edge itself — the dependent claim's id plus its typed target: a commit that
-merely touches the href string elsewhere in the file (an unrelated plain
-link, a second claim's own edge) moves no other claim's baseline, and a plain
-link upgraded to depends-on starts at the upgrade commit, when the typed edge
-is born. A rename repaired in one commit does not re-birth the edge: its
-history is traced through the old address, so an outstanding review survives
-the rename; a reviewed edge stays reviewed, owing only the cheap address-only
-confirmation. The trace is followed only for an unambiguous move — the old
-address gone in the same commit, the text unique at the new one; identical
-text alone proves nothing (two claims can say the same thing), and an
-ambiguous move is unknown history, never an established baseline. The
-seed floor is checked before walking later commits: an edge
-already present in the floor's tree starts there. The floor is the newest
-commit whose SUBJECT types `seed:` for the file, so a re-instantiation under
-a reused filename inherits neither a prior lineage's introductions nor its
-reviews. `seed:` types a deliberate initialization or replacement of an
-instance's lineage, scoped to the files the commit touches; a body line can
-never type a commit, and maintenance types never floor.
+* data-specimen pre blocks are decoded once and checked independently as
+  single-file specimens. Local links must use #fragment, even with
+  rel="external"; remote URLs are allowed. Ordinary pre blocks are examples.
+  data-literal declares literal readiness-marker mentions; ordinary quoting
+  does not exempt them. --template skips the unresolved-marker gate.
 
-HOOK (dl-hook). Two hooks run `lspec check --staged`, which reads the index
-itself — an unstaged edit never makes a broken staged tree pass. pre-commit
-runs structure and the seal gate; commit-msg runs the review gate and
-the commit-vocabulary gate — the subject does not exist until commit-msg.
-Both also pass --finish-receipt: a successful finish must have seen the current
-MAIN, HEAD, index, working files and checker. Stage intended changes before
-finish. Changed state requires another finish; neither hook runs it implicitly.
-The review gate compares obligations
-computed against HEAD (over HEAD's own edges) with obligations against the
-candidate tree. Created by this commit: warning. Already outstanding at HEAD:
-blocks, unless the subject is a recorded `review:` naming the claim or a
-`seed:` boundary whose staged files' lineages it discards. A HEAD obligation
-with no candidate counterpart is reported with its cause — claim deleted,
-content reverted, seed boundary. Removing or redirecting an edge of a surviving
-claim requires a recorded review, even if target and edge disappear together.
-Deleting the dependent claim retires its obligations without review. The review
-command accepts pending retirements after their links have been removed.
-Unknown history for a surviving claim blocks, with both recovery paths: fetch
-sufficient history, or record an explicit review against committed state. A
-verified unborn HEAD (first commit) owes nothing and only warns. `lspec
-review` needs no side channel: the hook reads the same subject history does.
-The vocabulary gate rejects a subject whose type prefix is absent from main's
-staged data-commit-types declaration; a legacy document without one is
-reported ("commit vocabulary not enforced"), never defaulted.
+* data-changes values are whitespace-separated historical path#id addresses,
+  not links requiring surviving targets. Unchanged or whitespace-only
+  decision cells do not renew authorization.
 
-SEALED CLAIMS (dl-seal). An element with a stable id and the data-sealed
-attribute is protected: once committed, its normalized text, id, path,
-marker, and collection membership may not change unless the same commit adds
-the old repo-relative path#id to a decision row's data-changes, or changes decision-cell text in a row already naming it.
-Adding unrelated addresses never renews an existing authorization. Addresses
-are whitespace-separated when several. data-changes
-addresses are historical identifiers resolved against the comparison
-baseline, not hyperlinks — a deleted claim need not leave a broken anchor.
-An unchanged or whitespace-only row authorizes nothing. Protection covers
-explicitly marked claims only; the gate requires a recorded decision, not
-proof of its correctness. With no HEAD, declarations are validated and no
-prior-lock obligation applies; unavailable required history fails.
-
-COMPLETION (check --clean). Reports staged, unstaged, and untracked
-non-ignored files repo-wide and exits nonzero while any remain. Read-only and
-standalone (not a staged-tree check, not a pre-commit requirement): it
-detects outstanding changes when invoked; it neither forces invocation nor
-proves that a clean audit was recorded.
-
-HANDOFF (finish). Uses ordinary working-tree structural checks, not --clean
-or commit gates. Review obligations are reported, never acknowledged; as with
-start/impact, outstanding or unknown reviews do not themselves fail this report.
-Dirty state is evidence, not a failure. Exit 1 means structural failures; exit 2
-means unreadable input or unavailable Git evidence. Outside Git, available
-structural checks still run and history/change evidence is explicitly unavailable.
-HEAD/index/worktree comparisons include staged edits hidden by worktree reverts,
-untracked non-ignored files, and collection exits. Parsed ids and declared links
-give review candidates, not semantic impact; unmapped files remain explicit.
-start records no session baseline: committed session changes cannot be identified.
-HEAD is only the comparison basis for uncommitted changes, not a session start.
-Git evidence cannot account for conversation-only decisions or findings. Always
-review the session-accounting prompt, including on a clean tree. Open/watch items
-remain distinct from review debt. A successful stable run atomically replaces
-lspec/finish-receipt.json in the per-worktree Git directory. A failed run removes
-the old receipt. The receipt binds MAIN, HEAD, canonical index entries, tracked
-and nonignored untracked file contents/modes (including symlinks and deletions),
-and this checker. Git metadata and stat-cache timestamps are excluded. Gitlinks,
-special files and paths through symlink directories fail closed. No receipt is
-issued outside Git. This local disposable receipt is neither history nor a lock;
-it certifies invocation for a state, never semantic review. Installed hooks gate
-commits on it, but cannot enforce handoff without a commit or prevent bypass.
-A successful commit changes HEAD: rerun finish before handoff. A failed commit
-can reuse its receipt while the bound state is unchanged.
-
-SPECIMENS. A pre block marked data-specimen="NAME" is decoded once and checked
-as a single-file specimen: local hyperlinks must use #fragment, never a file
-path, including rel="external" links. Remote URLs remain allowed. Local file
-links fail without consulting the surrounding tree. Ordinary pre blocks remain
-examples only.
-
-COUNTS. Declared enumerations are checked against every recognized assertion
-using integer digits or supported number words. Matching counts do not prove
-item identity or completeness if the assertion changes with the enumeration.
-
-CLAIMS. Both dependency source and target ids must enclose complete claims.
-A heading id covers only its title. Use a section around heading and prose,
-or a row around a tabular claim. The parser cannot judge semantic completeness.
-
-HISTORY. Unavailable trees or an unestablished baseline yield UNKNOWN, never
-clearance. A shallow boundary cannot establish link introduction. Fetch enough
-history (git fetch --unshallow for a shallow clone), or explicitly review the
-claim against committed state and record a new review. Structural checks and
-read-only report exit codes are independent of review clearance.
-
-DELIVERY. Frames name both boundaries; missing boundaries or a truncation notice
-invalidate delivery. Present frames do not prove comprehension or exclude silent
-internal omissions. The byte count is UTF-8. CLI help and start list operations;
-the spec binds protocol steps to them. The collection graph is rebuilt from
-files and split rows, never maintained as a separate manifest.
-
-FEEDBACK. Change checks ask about removed decision rows, excluding unchanged
-rows relocated with files. A fix: subject or an edit to an explicitly named
-diagnostic register prompts a recurrence question. These notices are advisory,
-not semantic verdicts, and do not change exit status. Dirty target notices
-compare claim existence/text across HEAD, index and worktree; unrelated file
-edits get a separate unfinished-work notice. start lists actual edges/seals;
-its inventory cannot establish that protection selection is complete. mv and
-review print next steps. The advisory post-commit hook runs the committed
-checker's completion check; it cannot undo a commit or catch a skipped commit.
-
-STAMP (dl-concurrency). Every run reports the commit it was computed against
-and whether the repository has uncommitted changes (repo-wide). The stamp
-exposes a basis, not a lock; git does not prevent concurrent writes in a
-shared worktree.
+* Count checks recognize digits and number words, but matching cardinality
+  cannot establish item identity or completeness. Change reports also detect
+  reference source-id changes against their comparison basis.
 """
 
 import argparse

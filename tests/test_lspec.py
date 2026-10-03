@@ -1293,11 +1293,14 @@ class HookIntegration(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return d
 
-    def gcommit(self, d, msg, add=None):
+    def gcommit(self, d, msg, add=None, finish=True):
         """git commit with the hooks live; LSPEC_MAIN points at the fixture."""
         if add is not None:
             sh('git', 'add', '--', *add, cwd=d)
         env = dict(os.environ, LSPEC_MAIN='main.html')
+        if finish:
+            subprocess.run([sys.executable, 'lspec.py', 'finish', 'main.html'],
+                           cwd=d, capture_output=True, text=True, env=env, check=False)
         return subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t',
                                'commit', '--allow-empty', '-m', msg],
                               cwd=d, capture_output=True, text=True, env=env, check=False)
@@ -1514,13 +1517,15 @@ class HookIntegration(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn('anchor', r.stdout + r.stderr)
 
-    def test_hook_passes_valid_staged_tree_despite_worktree_breakage(self):
+    def test_hook_requires_successful_finish_even_with_valid_staged_tree(self):
         d = self.hrepo()
         edit(d, 'motor.html', '120 kW', '105 kW')
         sh('git', 'add', '-A', cwd=d)                            # staged: valid
         edit(d, 'motor.html', 'id="power"', 'id="torque"')       # worktree: broken
         r = self.gcommit(d, 'docs: derate')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('[finish-receipt]', r.stdout + r.stderr)
+        self.assertEqual(cli(d, 'check', '--staged')[0], 0)
 
     def test_hook_enforces_declared_vocabulary(self):
         d = self.hrepo()
@@ -2163,7 +2168,7 @@ class ChangeFeedback(unittest.TestCase):
         commit(d, 'docs: renamed')
         rc, out = cli(d, 'review', 'main.html#claim')
         self.assertEqual(rc, 0, out)
-        self.assertIn('Review committed. Confirm session completion', out)
+        self.assertIn('Review committed. Rerun', out)
         self.assertIn('python3 lspec.py check --clean', out)
 
 
@@ -2174,12 +2179,14 @@ class Finish(unittest.TestCase):
         return d
 
     def snapshot(self, d):
-        # Includes index, refs, objects, reflogs and every working-tree file.
+        # Only the local receipt may change: include index, refs, objects,
+        # reflogs and every working-tree file, with contents/modes/timestamps.
         return {str(p.relative_to(d)): (p.read_bytes(), p.stat().st_mode,
                                        p.stat().st_mtime_ns)
-                for p in Path(d).rglob('*') if p.is_file()}
+                for p in Path(d).rglob('*') if p.is_file()
+                and p != Path(d, '.git', 'lspec', 'finish-receipt.json')}
 
-    def test_clean_prompt_baseline_and_read_only(self):
+    def test_clean_prompt_baseline_and_only_receipt_written(self):
         d = self.fixture()
         before = self.snapshot(d)
         rc, out = cli(d, 'finish')
@@ -2197,7 +2204,7 @@ class Finish(unittest.TestCase):
         self.assertIn('Open/watch items may remain at handoff', out)
         self.assertIn('does not certify semantic agreement', out)
 
-    def test_dirty_inventory_mapping_and_read_only(self):
+    def test_dirty_inventory_mapping_and_only_receipt_written(self):
         d = self.fixture()
         edit(d, 'motor.html', '120 kW', '105 kW')
         sh('git', 'add', 'motor.html', cwd=d)
@@ -2386,6 +2393,379 @@ class Finish(unittest.TestCase):
                 cli(d, 'finish', 'missing.html')
             self.assertEqual(err.exception.code, 2)
             self.assertEqual(os.environ['GIT_OPTIONAL_LOCKS'], '1')
+
+class FinishReceipt(unittest.TestCase):
+    # Reuse real-hook fixtures without inheriting and rerunning their test cases.
+    HOOKS = HookIntegration.HOOKS
+    setUp = HookIntegration.setUp
+    tearDown = HookIntegration.tearDown
+    track = HookIntegration.track
+    install = HookIntegration.install
+    hrepo = HookIntegration.hrepo
+    gcommit = HookIntegration.gcommit
+
+    def receipt(self, d):
+        gitdir = sh('git', 'rev-parse', '--absolute-git-dir', cwd=d).strip()
+        return Path(gitdir, 'lspec', 'finish-receipt.json')
+
+    def tool(self, d, *args, env=None):
+        return subprocess.run([sys.executable, 'lspec.py', *args], cwd=d,
+                              env=dict(os.environ, LSPEC_MAIN='main.html', **(env or {})),
+                              capture_output=True, text=True)
+
+    def finish(self, d, env=None):
+        r = self.tool(d, 'finish', 'main.html', env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def gate(self, d, env=None):
+        return self.tool(d, 'check', '--staged', '--finish-receipt', 'main.html', env=env)
+
+    def test_missing_receipt_blocks_and_finish_allows_commit(self):
+        d = self.hrepo()
+        self.receipt(d).unlink()
+        head = sh('git', 'rev-parse', 'HEAD', cwd=d)
+        r = self.gcommit(d, 'docs: event', finish=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('no finish receipt', r.stdout + r.stderr)
+        self.assertEqual(sh('git', 'rev-parse', 'HEAD', cwd=d), head)
+        self.finish(d)
+        receipt = self.receipt(d).read_bytes()
+        r = self.gcommit(d, 'docs: event', finish=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.receipt(d).read_bytes(), receipt)
+        self.assertIn('HEAD differs', self.gate(d).stdout)
+        self.finish(d)
+        self.assertEqual(self.gate(d).returncode, 0)
+
+    def test_exact_receipt_schema_and_no_other_writes(self):
+        d = self.hrepo()
+        before = Finish.snapshot(self, d)
+        self.finish(d)
+        self.assertEqual(before, Finish.snapshot(self, d))
+        receipt = lspec.json.loads(self.receipt(d).read_text())
+        self.assertEqual(set(receipt), {'format', 'main', 'head', 'index_sha256',
+                                      'worktree_sha256', 'checker_sha256', 'issued_at'})
+        self.assertEqual(receipt['format'], 1)
+        self.assertEqual(receipt['main'], 'main.html')
+        self.assertEqual(receipt['head'], sh('git', 'rev-parse', 'HEAD', cwd=d).strip())
+        self.assertEqual(receipt['checker_sha256'], lspec.file_sha256(Path(d, 'lspec.py')))
+        for key in ('index_sha256', 'worktree_sha256', 'checker_sha256'):
+            self.assertRegex(receipt[key], r'^[0-9a-f]{64}$')
+        self.assertEqual(list(self.receipt(d).parent.iterdir()), [self.receipt(d)])
+        before = Finish.snapshot(self, d), self.receipt(d).read_bytes()
+        self.assertEqual(self.gate(d).returncode, 0)
+        self.assertEqual(before, (Finish.snapshot(self, d), self.receipt(d).read_bytes()))
+
+    def test_staged_unstaged_and_untracked_changes_invalidate(self):
+        for kind in ('staged', 'unstaged', 'untracked'):
+            with self.subTest(kind=kind):
+                d = self.hrepo()
+                self.finish(d)
+                if kind == 'untracked':
+                    Path(d, 'nested').mkdir()
+                    Path(d, 'nested', 'new file.txt').write_text('finding')
+                else:
+                    edit(d, 'motor.html', '120 kW', '105 kW')
+                    if kind == 'staged':
+                        sh('git', 'add', 'motor.html', cwd=d)
+                        edit(d, 'motor.html', '105 kW', '120 kW')
+                r = self.gate(d)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn('staged state' if kind == 'staged' else 'working-file state', r.stdout)
+                self.finish(d)
+                self.assertEqual(self.gate(d).returncode, 0)
+
+    def test_staging_after_finish_invalidates_but_stat_refresh_does_not(self):
+        d = self.hrepo()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        self.finish(d)
+        sh('git', 'add', 'motor.html', cwd=d)
+        self.assertIn('staged state differs', self.gate(d).stdout)
+        self.finish(d)
+        os.utime(Path(d, 'motor.html'), (1000000000, 1000000000))
+        sh('git', 'update-index', '--refresh', cwd=d)
+        self.assertEqual(self.gate(d).returncode, 0)
+
+    def test_deletion_mode_symlink_and_ignored_paths(self):
+        d = self.hrepo()
+        Path(d, '.gitignore').write_text('cache\ntracked.txt\n')
+        Path(d, 'tracked.txt').write_text('tracked')
+        Path(d, 'link').symlink_to('main.html')
+        sh('git', 'add', '.gitignore', 'link', cwd=d)
+        sh('git', 'add', '-f', 'tracked.txt', cwd=d)
+        self.finish(d)
+        Path(d, 'cache').write_text('ignored')
+        self.assertEqual(self.gate(d).returncode, 0)
+        for kind in ('mode', 'symlink', 'tracked-ignored', 'deletion'):
+            with self.subTest(kind=kind):
+                if kind == 'mode':
+                    Path(d, 'tracked.txt').chmod(0o755)
+                elif kind == 'symlink':
+                    Path(d, 'link').unlink()
+                    Path(d, 'link').symlink_to('motor.html')
+                elif kind == 'tracked-ignored':
+                    Path(d, 'tracked.txt').write_text('changed')
+                else:
+                    Path(d, 'tracked.txt').unlink()
+                self.assertIn('working-file state differs', self.gate(d).stdout)
+                self.finish(d)
+                self.assertEqual(self.gate(d).returncode, 0)
+
+    def test_staged_deletion_remaining_on_disk_is_bound(self):
+        d = self.hrepo()
+        Path(d, 'notes.txt').write_text('keep locally')
+        self.assertEqual(self.gcommit(d, 'docs: notes', add=['notes.txt']).returncode, 0)
+        sh('git', 'rm', '--cached', 'notes.txt', cwd=d)
+        Path(d, '.git', 'info', 'exclude').write_text('notes.txt\n')
+        self.finish(d)
+        Path(d, 'notes.txt').write_text('changed after finish')
+        self.assertIn('working-file state differs', self.gate(d).stdout)
+
+    def test_malformed_receipts_fail_closed(self):
+        d = self.hrepo()
+        self.finish(d)
+        good = lspec.json.loads(self.receipt(d).read_text())
+        bad = ['{', '[]', '{}', lspec.json.dumps(dict(good, format=True)),
+               lspec.json.dumps(dict(good, format=2)),
+               lspec.json.dumps(dict(good, issued_at='yesterday')),
+               lspec.json.dumps(dict(good, issued_at='2026-10-03T00:00:00')),
+               lspec.json.dumps(dict(good, index_sha256=None))]
+        for text in bad:
+            with self.subTest(text=text):
+                self.receipt(d).write_text(text)
+                r = self.gate(d)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn('[finish-receipt]', r.stdout)
+        self.finish(d)
+        self.assertEqual(self.gate(d).returncode, 0)
+
+    def test_main_and_checker_must_match(self):
+        d = self.hrepo()
+        Path(d, 'other.html').write_text('<p id="other">Other instance</p>')
+        sh('git', 'add', 'other.html', cwd=d)
+        r = self.tool(d, 'finish', 'other.html')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('MAIN differs', self.gate(d).stdout)
+        self.finish(d)
+        receipt = lspec.json.loads(self.receipt(d).read_text())
+        receipt['checker_sha256'] = '0' * 64
+        self.receipt(d).write_text(lspec.json.dumps(receipt))
+        self.assertIn('checker differs', self.gate(d).stdout)
+
+    def test_staged_checker_must_match_running_finish(self):
+        d = self.hrepo()
+        with Path(d, 'lspec.py').open('a') as f:
+            f.write('\n# new checker revision\n')
+        self.finish(d)
+        r = self.gcommit(d, 'docs: event', finish=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('checker differs', r.stdout + r.stderr)
+        sh('git', 'add', 'lspec.py', cwd=d)
+        self.finish(d)
+        r = self.gcommit(d, 'docs: checker', finish=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_failed_finish_removes_old_receipt_and_still_prompts(self):
+        d = self.hrepo()
+        self.finish(d)
+        edit(d, 'motor.html', 'id="power"', 'id="broken"')
+        r = self.tool(d, 'finish', 'main.html')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('SESSION ACCOUNTING', r.stdout)
+        self.assertFalse(self.receipt(d).exists())
+        edit(d, 'motor.html', 'id="broken"', 'id="power"')
+        self.finish(d)
+        r = self.tool(d, 'finish', 'missing.html')
+        self.assertEqual(r.returncode, 2)
+        self.assertFalse(self.receipt(d).exists())
+
+    def test_concurrent_change_during_report_prevents_receipt(self):
+        d = self.hrepo()
+        self.finish(d)
+        original = lspec.finish_report
+        def change_after_report(args):
+            rc = original(args)
+            Path(d, 'concurrent.txt').write_text('changed')
+            return rc
+        with mock.patch.object(lspec, 'finish_report', side_effect=change_after_report):
+            rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('state changed during finish', out)
+        self.assertFalse(self.receipt(d).exists())
+
+    def test_failed_atomic_write_removes_old_receipt_and_temporary(self):
+        d = self.hrepo()
+        self.finish(d)
+        with mock.patch.object(lspec.os, 'replace', side_effect=OSError('disk error')):
+            rc, out = cli(d, 'finish')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('disk error', out)
+        self.assertFalse(self.receipt(d).exists())
+        self.assertEqual(list(self.receipt(d).parent.iterdir()), [])
+
+    def test_special_files_fail_closed_without_blocking_read(self):
+        d = self.hrepo()
+        # Git omits untracked FIFOs entirely; replace a tracked ordinary file.
+        Path(d, 'pipe').write_text('ordinary')
+        sh('git', 'add', 'pipe', cwd=d)
+        Path(d, 'pipe').unlink()
+        os.mkfifo(Path(d, 'pipe'))
+        r = self.tool(d, 'finish', 'main.html')
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn('special file', r.stderr)
+        self.assertIn('SESSION ACCOUNTING', r.stdout)
+        self.assertFalse(self.receipt(d).exists())
+
+    def test_submodule_fails_closed_even_when_not_checked_out(self):
+        d = self.hrepo()
+        head = sh('git', 'rev-parse', 'HEAD', cwd=d).strip()
+        sh('git', 'update-index', '--add', '--cacheinfo', '160000', head, 'submodule', cwd=d)
+        r = self.tool(d, 'finish', 'main.html')
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn('cannot fingerprint submodule', r.stderr)
+        self.assertFalse(self.receipt(d).exists())
+
+    def test_conflict_stages_are_part_of_index_fingerprint(self):
+        d = self.hrepo()
+        oid = sh('git', 'rev-parse', 'HEAD:main.html', cwd=d).strip()
+        def conflict(stage):
+            data = '0 ' + '0' * len(oid) + '\tconflict.txt\n'
+            data += f'100644 {oid} {stage}\tconflict.txt\n'
+            subprocess.run(['git', 'update-index', '--index-info'], input=data,
+                           text=True, cwd=d, check=True)
+        conflict(1)
+        self.finish(d)
+        conflict(2)
+        self.assertIn('staged state differs', self.gate(d).stdout)
+
+    def test_unborn_and_non_git_receipts(self):
+        d = self.hrepo(committed=False)
+        self.finish(d)
+        self.assertIsNone(lspec.json.loads(self.receipt(d).read_text())['head'])
+        sh('git', 'add', '-A', cwd=d)
+        self.assertIn('staged state differs', self.gate(d).stdout)
+        self.finish(d)
+        self.assertEqual(self.gcommit(d, 'seed: new', finish=False).returncode, 0)
+        shutil.rmtree(Path(d, '.git'))
+        r = self.finish(d)
+        self.assertIn('unavailable outside Git; no receipt written', r.stdout)
+        self.assertFalse(Path(d, '.git').exists())
+
+    def test_receipt_flag_is_opt_in_and_requires_staged(self):
+        d = self.hrepo()
+        self.receipt(d).unlink()
+        self.assertEqual(self.tool(d, 'check', '--staged', 'main.html').returncode, 0)
+        for flags in (['--finish-receipt'], ['--finish-receipt', '--staged', '--clean']):
+            r = self.tool(d, 'check', 'main.html', *flags)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn('--finish-receipt requires --staged', r.stderr)
+
+    def test_failed_commit_can_reuse_receipt(self):
+        d = self.hrepo()
+        edit(d, 'main.html', '<table>',
+             '<code data-commit-types>docs fix seed audit review</code><table>')
+        sh('git', 'add', 'main.html', cwd=d)
+        self.finish(d)
+        before = self.receipt(d).read_bytes()
+        r = self.gcommit(d, 'chore: forbidden', finish=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('[commit-types]', r.stdout + r.stderr)
+        self.assertEqual(before, self.receipt(d).read_bytes())
+        r = self.gcommit(d, 'docs: vocabulary', finish=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_message_hook_rechecks_after_prepare_commit_msg_mutation(self):
+        d = self.hrepo()
+        self.finish(d)
+        hook = Path(d, '.git', 'hooks', 'prepare-commit-msg')
+        hook.write_text('#!/bin/sh\nprintf changed > late-file.txt\n')
+        hook.chmod(0o755)
+        r = self.gcommit(d, 'docs: event', finish=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('commit-msg: lspec gates failed', r.stdout + r.stderr)
+        self.assertIn('working-file state differs', r.stdout + r.stderr)
+
+    def test_review_staging_requires_explicit_finish_retry(self):
+        d = self.hrepo()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        self.assertEqual(self.gcommit(d, 'docs: derate', add=['motor.html']).returncode, 0)
+        edit(d, 'main.html', 'This design needs', 'This revised design needs')
+        self.finish(d)  # before review has staged its edit
+        r = self.tool(d, 'review', '--main', 'main.html', 'main.html#claim')
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn('the review files are now staged', r.stderr)
+        self.assertIn('staged state differs', r.stdout + r.stderr)
+        self.assertIn('main.html', sh('git', 'diff', '--cached', '--name-only', cwd=d))
+        self.finish(d)
+        r = self.tool(d, 'review', '--main', 'main.html', 'main.html#claim')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('Review committed. Rerun', r.stdout)
+        self.assertIn('HEAD differs', self.gate(d).stdout)
+        self.assertIn('REVIEW OWED: none', self.finish(d).stdout)
+
+    def test_empty_review_commit_and_outstanding_gate_remain(self):
+        d = self.hrepo()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        self.assertEqual(self.gcommit(d, 'docs: derate', add=['motor.html']).returncode, 0)
+        r = self.finish(d)
+        self.assertIn('REVIEW OWED (1)', r.stdout)
+        r = self.gcommit(d, 'docs: unrelated', finish=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('[review-gate]', r.stdout + r.stderr)
+        r = self.tool(d, 'review', '--main', 'main.html', 'main.html#claim')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(sh('git', 'diff', 'HEAD^', 'HEAD', '--stat', cwd=d), '')
+
+    def test_linked_worktree_has_independent_receipt_and_working_hooks(self):
+        d = self.hrepo()
+        w = self.track(tempfile.mkdtemp())
+        sh('git', 'worktree', 'add', '-q', '-b', 'linked', w, cwd=d)
+        original = self.receipt(d).read_bytes()
+        self.assertFalse(self.receipt(w).exists())
+        self.finish(w)
+        r = self.gcommit(w, 'docs: linked event', finish=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(original, self.receipt(d).read_bytes())
+        self.assertNotEqual(self.receipt(d), self.receipt(w))
+
+    def test_alternate_index_is_respected_and_default_untouched(self):
+        d = self.hrepo()
+        default = Path(d, '.git', 'index').read_bytes()
+        alternate = Path(d, '.git', 'alternate-index')
+        alternate.write_bytes(default)
+        env = dict(os.environ, GIT_INDEX_FILE=str(alternate), LSPEC_MAIN='main.html')
+        Path(d, 'candidate.txt').write_text('alternate candidate')
+        subprocess.run(['git', 'add', 'candidate.txt'], cwd=d, env=env, check=True)
+        self.finish(d, env={'GIT_INDEX_FILE': str(alternate)})
+        r = subprocess.run(['git', 'commit', '-m', 'docs: alternate candidate'],
+                           cwd=d, env=env, text=True, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(default, Path(d, '.git', 'index').read_bytes())
+        self.assertEqual(sh('git', 'show', 'HEAD:candidate.txt', cwd=d), 'alternate candidate')
+
+    def test_commit_a_cannot_smuggle_changes_after_finish(self):
+        d = self.hrepo()
+        self.finish(d)
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        r = subprocess.run(['git', 'commit', '-am', 'docs: derate'], cwd=d,
+                           env=dict(os.environ, LSPEC_MAIN='main.html'),
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('staged state differs', r.stdout + r.stderr)
+
+    def test_partial_commit_cannot_substitute_a_different_index(self):
+        d = self.hrepo()
+        edit(d, 'main.html', 'Main', 'Main heading')
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        sh('git', 'add', '-A', cwd=d)
+        self.finish(d)
+        r = subprocess.run(['git', 'commit', '-m', 'docs: partial', '--', 'motor.html'],
+                           cwd=d, env=dict(os.environ, LSPEC_MAIN='main.html'),
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('staged state differs', r.stdout + r.stderr)
+
 
 
 if __name__ == "__main__":

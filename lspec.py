@@ -3,8 +3,8 @@
 
   lspec start MAIN                 deliver MAIN whole, build the collection, run
                                    every check, list owed reviews and the verbs
-  lspec finish MAIN                read-only handoff: validate, report reviews,
-                                   changes and affected claims; prompt accounting
+  lspec finish MAIN                validate, report reviews and change evidence,
+                                   prompt accounting; issue a local commit receipt
   lspec check [MAIN] [--diff BASE] [--neighborhood TARGET] [--template]
                                    structural checks (instance readiness by
                                    default; --template validates a template);
@@ -28,7 +28,8 @@ file-wide output.
 
 TARGET is `path#id` (path relative to cwd) or `#id` in MAIN. MAIN defaults to
 live-spec.html when present; pass --main to override. Read-only verbs never
-touch files or git; mv edits files, review commits — nothing else does.
+touch files or git; finish writes a receipt in Git metadata, mv edits files,
+review commits. finish never edits source, stages, or acknowledges reviews.
 
 Exit 0 = pass. 1 = a check failed (impact/neighbors only report owed reviews;
 they exit 0). 2 = unreadable input, bad target, or refused operation.
@@ -82,6 +83,9 @@ HOOK (dl-hook). Two hooks run `lspec check --staged`, which reads the index
 itself — an unstaged edit never makes a broken staged tree pass. pre-commit
 runs structure and the seal gate; commit-msg runs the review gate and
 the commit-vocabulary gate — the subject does not exist until commit-msg.
+Both also pass --finish-receipt: a successful finish must have seen the current
+MAIN, HEAD, index, working files and checker. Stage intended changes before
+finish. Changed state requires another finish; neither hook runs it implicitly.
 The review gate compares obligations
 computed against HEAD (over HEAD's own edges) with obligations against the
 candidate tree. Created by this commit: warning. Already outstanding at HEAD:
@@ -131,9 +135,18 @@ give review candidates, not semantic impact; unmapped files remain explicit.
 start records no session baseline: committed session changes cannot be identified.
 HEAD is only the comparison basis for uncommitted changes, not a session start.
 Git evidence cannot account for conversation-only decisions or findings. Always
-review the session-accounting prompt, including on a clean tree. No invocation
-record or other bookkeeping is written; finish cannot certify semantic review
-or enforce its own invocation. Open/watch items remain distinct from review debt.
+review the session-accounting prompt, including on a clean tree. Open/watch items
+remain distinct from review debt. A successful stable run atomically replaces
+lspec/finish-receipt.json in the per-worktree Git directory. A failed run removes
+the old receipt. The receipt binds MAIN, HEAD, canonical index entries, tracked
+and nonignored untracked file contents/modes (including symlinks and deletions),
+and this checker. Git metadata and stat-cache timestamps are excluded. Gitlinks,
+special files and paths through symlink directories fail closed. No receipt is
+issued outside Git. This local disposable receipt is neither history nor a lock;
+it certifies invocation for a state, never semantic review. Installed hooks gate
+commits on it, but cannot enforce handoff without a commit or prevent bypass.
+A successful commit changes HEAD: rerun finish before handoff. A failed commit
+can reuse its receipt while the bound state is unchanged.
 
 SPECIMENS. A pre block marked data-specimen="NAME" is decoded once and checked
 as a single-file specimen: local hyperlinks must use #fragment, never a file
@@ -178,12 +191,17 @@ shared worktree.
 """
 
 import argparse
+import hashlib
 import html
+import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
+import tempfile
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from types import SimpleNamespace
 
@@ -201,8 +219,8 @@ WORD2NUM.update({f"{t}-{NUM[u]}": 30 + 10 * i + u
 WORD2NUM.update({"hundred": 100})
 TENS_WORDS = {"twenty", *TENS}
 VOID = {"br", "hr", "meta", "link", "img", "input", "col", "wbr", "source"}
-READ_ONLY = ["start", "finish", "check", "show", "neighbors", "impact"]
-MUTATING = ["mv", "review"]
+READ_ONLY = ["start", "check", "show", "neighbors", "impact"]
+MUTATING = ["finish", "mv", "review"]
 
 
 # =============================================================== parsing
@@ -1769,6 +1787,11 @@ def report_structure(col, markers=True):
 
 
 def cmd_check(args):
+    if getattr(args, "finish_receipt", False) and (not getattr(args, "staged", False)
+            or getattr(args, "clean", False)):
+        print("lspec check: --finish-receipt requires --staged and cannot use --clean",
+              file=sys.stderr)
+        return 2
     if getattr(args, "clean", False):
         if getattr(args, "staged", False) or getattr(args, "commit_msg", None):
             print("lspec check: --clean stands alone — it reports the working tree and "
@@ -1805,6 +1828,8 @@ def cmd_check(args):
     if args.diff or staged:
         change_reminders(col, args.diff or "HEAD",
                          fix=bool(msg and subject_type(gate_subject(msg), "fix") is not None))
+    if getattr(args, "finish_receipt", False):
+        rc = receipt_gate(col.main, rc)
     return rc
 
 
@@ -2078,7 +2103,197 @@ def finish_reviews(col, collections, dirty_paths):
     print_owed([*owed.values(), *pending], col=col)
 
 
+# ======================================================== finish receipts
+
+def git_bytes(*args, cwd):
+    """Binary Git output preserves arbitrary filenames and blob contents."""
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                       env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"))
+    if r.returncode:
+        raise RuntimeError(r.stderr.decode(errors="replace").strip())
+    return r.stdout
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def manifest_sha256(records):
+    # JSON arrays delimit fields; ensure_ascii preserves surrogate-escaped paths.
+    data = json.dumps(records, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(data.encode("ascii")).hexdigest()
+
+
+def finish_receipt_path():
+    # Each linked worktree has its own Git directory, and therefore its own receipt.
+    gitdir = git("rev-parse", "--absolute-git-dir").strip()
+    return os.path.join(gitdir, "lspec", "finish-receipt.json")
+
+
+def receipt_snapshot(main):
+    """Read content fingerprints without refreshing the index or writing objects.
+    Stat-cache timestamps are intentionally absent. Unsupported file kinds fail
+    closed: a directory/gitlink must never be fingerprinted as if it were empty.
+    """
+    root = canon(repo_root())
+    name = posix(os.path.relpath(canon(main), root))
+    if name == ".." or name.startswith("../"):
+        raise RuntimeError("receipt MAIN must be inside this working tree")
+    state = head_status()
+    if state == "broken":
+        raise HistoryUnavailable("cannot fingerprint unavailable HEAD")
+    head = git("rev-parse", "HEAD").strip() if state == "ok" else None
+    index, paths = [], set()
+    for entry in git_bytes("ls-files", "--stage", "--full-name", "-z", cwd=root).split(b"\0"):
+        if not entry:
+            continue
+        meta, path = entry.split(b"\t", 1)
+        mode, oid, stage = meta.decode("ascii").split()
+        if mode == "160000":
+            raise RuntimeError(f"cannot fingerprint submodule: {os.fsdecode(path)!r}")
+        index.append([os.fsdecode(path), mode, oid, stage])
+        paths.add(path)
+    if head:
+        for entry in git_bytes("ls-tree", "-r", "--full-tree", "-z", head, cwd=root).split(b"\0"):
+            if entry:
+                paths.add(entry.split(b"\t", 1)[1])
+    paths.update(p for p in git_bytes("ls-files", "--others", "--exclude-standard",
+                                     "--full-name", "-z", cwd=root).split(b"\0") if p)
+    metadata_dirs = [canon(git("rev-parse", "--absolute-git-dir").strip()),
+                     canon(git("rev-parse", "--path-format=absolute", "--git-common-dir").strip())]
+    selected_index = canon(git("rev-parse", "--path-format=absolute", "--git-path", "index").strip())
+    working = []
+    for path in sorted(paths):
+        relative = os.fsdecode(path)
+        absolute = os.path.abspath(os.path.join(root, relative))
+        if (any(absolute == d or absolute.startswith(d + os.sep) for d in metadata_dirs)
+                or absolute in (selected_index, selected_index + ".lock", os.path.join(root, ".git"))):
+            continue
+        if os.path.realpath(os.path.dirname(absolute)) != os.path.dirname(absolute):
+            raise RuntimeError(f"cannot fingerprint a path through a symlink directory: {relative!r}")
+        try:
+            mode = os.lstat(absolute).st_mode
+        except FileNotFoundError:
+            working.append([relative, "missing"])
+            continue
+        if stat.S_ISLNK(mode):
+            value = hashlib.sha256(os.fsencode(os.readlink(absolute))).hexdigest()
+            working.append([relative, "120000", value])
+        elif stat.S_ISREG(mode):
+            working.append([relative, "100755" if mode & stat.S_IXUSR else "100644",
+                            file_sha256(absolute)])
+        else:
+            raise RuntimeError(f"cannot fingerprint directory, submodule or special file: {relative!r}")
+    return {"format": 1, "main": name, "head": head,
+            "index_sha256": manifest_sha256(sorted(index)),
+            "worktree_sha256": manifest_sha256(working),
+            "checker_sha256": file_sha256(__file__)}
+
+
+def remove_finish_receipt(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def write_finish_receipt(path, snapshot):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(path),
+                                         prefix=".finish-", delete=False) as f:
+            temporary = f.name
+            json.dump(dict(snapshot, issued_at=datetime.now(timezone.utc).isoformat()),
+                      f, sort_keys=True, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def receipt_problem(main):
+    """None for a matching receipt; otherwise a specific blocking reason."""
+    try:
+        with open(finish_receipt_path(), encoding="utf-8") as f:
+            receipt = json.load(f)
+        fields = {"format", "main", "head", "index_sha256", "worktree_sha256",
+                  "checker_sha256", "issued_at"}
+        if not isinstance(receipt, dict) or set(receipt) != fields:
+            return "malformed receipt"
+        if type(receipt["format"]) is not int or receipt["format"] != 1:
+            return "unsupported receipt format"
+        if not isinstance(receipt["issued_at"], str):
+            return "malformed receipt timestamp"
+        if datetime.fromisoformat(receipt["issued_at"]).tzinfo is None:
+            return "receipt timestamp has no timezone"
+        current = receipt_snapshot(main)
+        labels = {"main": "MAIN", "head": "HEAD", "index_sha256": "staged state",
+                  "worktree_sha256": "working-file state", "checker_sha256": "checker"}
+        for field, label in labels.items():
+            if receipt[field] != current[field]:
+                return f"{label} differs from the last finish"
+    except FileNotFoundError:
+        return "no finish receipt (or a required file disappeared)"
+    except (OSError, ValueError, RuntimeError) as e:
+        return f"receipt unavailable or invalid: {e}"
+    return None
+
+
+def receipt_gate(main, rc=0):
+    problem = receipt_problem(main)
+    if problem:
+        print(f"  [finish-receipt] Commit blocked: {problem}.")
+        print("  Stage the intended changes, run "
+              + command(SimpleNamespace(main=main), "finish") + ", then retry the commit.")
+        return 1
+    print("  PASS finish receipt matches MAIN, HEAD, index, working files and checker")
+    return rc
+
+
 def cmd_finish(args):
+    """Report first, then issue a local receipt only for a stable successful run."""
+    if repo_root() is None:
+        rc = finish_report(args)
+        print("FINISH RECEIPT — unavailable outside Git; no receipt written")
+        return rc
+    path = finish_receipt_path()
+    try:
+        remove_finish_receipt(path)
+        # Still deliver the accounting prompt if fingerprinting cannot complete.
+        problem = None
+        try:
+            before = receipt_snapshot(args.main or "live-spec.html")
+        except (OSError, RuntimeError) as e:
+            problem = e
+        rc = finish_report(args)
+        if problem:
+            raise RuntimeError(f"no finish receipt: {problem}")
+        if rc:
+            print("FINISH RECEIPT — not issued: structural checks failed")
+            return rc
+        after = receipt_snapshot(args.main or "live-spec.html")
+        if before != after:
+            raise RuntimeError("state changed during finish; no receipt issued. Rerun finish.")
+        sys.stdout.flush()  # A broken output pipe must not leave an issued receipt.
+        write_finish_receipt(path, after)
+        print("FINISH RECEIPT — recorded for this state; changes require another finish. "
+              "This records invocation, not semantic review.")
+        sys.stdout.flush()
+        return 0
+    except BaseException:
+        remove_finish_receipt(path)
+        raise
+
+
+def finish_report(args):
     # Git status may otherwise refresh the index even though it is a read
     # command. Scope this to finish, including every helper it calls.
     locks = os.environ.get("GIT_OPTIONAL_LOCKS")
@@ -2354,10 +2569,13 @@ def cmd_review(args):
     r = subprocess.run(["git", "commit", "--allow-empty", "-q", "-m", msg],
                        cwd=repo_root(), check=False)
     if r.returncode:
-        raise RuntimeError("git commit failed (hook red?)")
+        raise RuntimeError("git commit failed (hook red?). If the receipt is missing or stale, "
+                           "the review files are now staged; run " + command(col, "finish")
+                           + " and retry this review.")
     sha = git("rev-parse", "--short", "HEAD").strip()
     print(f"{sha} {subject}")
-    print("Review committed. Confirm session completion with: python3 lspec.py check --clean")
+    print("Review committed. Rerun " + command(col, "finish") + " before handoff.")
+    print("Confirm cleanliness with: python3 lspec.py check --clean")
     return 0
 
 
@@ -2374,10 +2592,12 @@ def main(argv):
                         help="main spec (same as the global --main)")
     s = sub.add_parser("start"); s.add_argument("main_pos", nargs="?"); add_main(s)
     s.add_argument("--with", dest="with_", nargs="+", metavar="FILE", help="also deliver these supporting specs whole")
-    f = sub.add_parser("finish", help="read-only session review and handoff",
+    f = sub.add_parser("finish", help="session review, handoff and local commit receipt",
                       description="Validate the working spec, report review obligations and "
-                      "available Git changes, and prompt session accounting. Dirty state "
-                      "alone does not fail. No session baseline is recorded by start.")
+                      "available Git changes, and prompt session accounting. A successful "
+                      "stable run writes a state-bound receipt in Git metadata for the "
+                      "commit hooks; stage intended changes first and rerun after changes. "
+                      "Dirty state alone does not fail. No session baseline is recorded by start.")
     f.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(f)
     c = sub.add_parser("check"); c.add_argument("main_pos", nargs="?"); add_main(c)
     c.add_argument("--diff", metavar="BASE"); c.add_argument("--neighborhood", metavar="TARGET")
@@ -2386,6 +2606,8 @@ def main(argv):
                         "(instance readiness is the default)")
     c.add_argument("--staged", action="store_true",
                    help="evaluate the candidate commit (the index), not the working tree")
+    c.add_argument("--finish-receipt", action="store_true",
+                   help="require a matching finish receipt (with --staged; used by commit hooks)")
     c.add_argument("--clean", action="store_true",
                    help="completion check: report staged/unstaged/untracked files "
                         "repo-wide; nonzero while any remain (stands alone)")
@@ -2417,14 +2639,14 @@ def main(argv):
             unfinished_notice()
         sys.stdout.flush()   # surface EPIPE here, not at interpreter shutdown
         return rc
-    except RuntimeError as e:
-        print(f"lspec {args.verb}: {e}", file=sys.stderr)
-        return 2
     except BrokenPipeError:
         # A truncated pipe must not read as success: drop further output and
         # exit nonzero so `lspec check | head` cannot hide a red result.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 1
+    except (RuntimeError, OSError) as e:
+        print(f"lspec {args.verb}: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

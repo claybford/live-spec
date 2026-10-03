@@ -41,7 +41,8 @@ a session the spec whole (`python3 lspec.py start`), runs the conventions the sp
 mechanical as a commit-time gate (`check`), computes owed reviews from git history
 (`neighbors`, `impact`), and makes renames and recorded reviews operations (`mv`,
 `review`). Its closing command, `finish`, gathers checks, change evidence, and a
-session-accounting prompt before handoff. Green means the implemented structural
+session-accounting prompt before handoff, and writes a local state-bound commit
+receipt. Green means the implemented structural
 checks passed; semantic correctness and review adequacy require judgment. The semantics live in the spec
 and the tool's docstring; `python3 lspec.py start` lists the verbs.
 
@@ -60,8 +61,9 @@ dependent claims it clears. History lives in git, never in the document body.
 
 Two hooks run the staged copy of `check` and red blocks the commit: pre-commit
 runs the structural checks and the seal gate (`check --staged
---diff HEAD`); commit-msg runs the review gate and the commit-vocabulary gate
-(`check --staged --commit-msg`), where the subject exists. `--staged` reads
+--finish-receipt --diff HEAD`); commit-msg runs the review gate and the commit-vocabulary gate
+(`check --staged --finish-receipt --commit-msg`), where the subject exists.
+Both require a matching finish receipt. `--staged` reads
 the index itself, so an unstaged repair cannot launder a broken candidate.
 The review gate
 blocks a commit while a review obligation was already outstanding at HEAD,
@@ -94,14 +96,16 @@ Install both: `ln -sf ../../hooks/pre-commit .git/hooks/pre-commit` and
 For a different instance, substitute its MAIN path in the lifecycle commands
 above. MAIN can also be supplied with `--main`.
 
-`finish` is read-only: it uses the ordinary working-tree structural checks and
-existing review obligations, without editing files, acknowledging reviews,
-staging, committing, or creating bookkeeping state. Validation, outstanding
+`finish` uses the ordinary working-tree structural checks and existing review
+obligations, without editing source files, acknowledging reviews, staging, or
+committing. It writes only a local receipt in Git metadata. Validation, outstanding
 reviews, and Git state are reported separately. Exit 1 means structural failure;
-exit 2 means unreadable input or unavailable Git evidence. Outstanding or unknown
+exit 2 means unreadable input, unavailable Git evidence, or an unavailable/stale
+snapshot during receipt issuance. Outstanding or unknown
 reviews are reported without changing the exit status, as with `start` and
 `impact`. Dirty state alone does not fail; `check --clean` retains its explicit
-cleanliness requirement and the existing commit policy is unchanged.
+cleanliness requirement. The receipt adds a commit prerequisite; it does not
+require a commit where existing policy would not.
 
 The inventory includes repo-wide staged, unstaged, and non-ignored untracked
 changes, distinguishing collection specs from other files. HEAD/index/worktree
@@ -123,7 +127,65 @@ Open/watch items are distinct from mechanically outstanding review obligations;
 unresolved work may legitimately remain at handoff. A clean tree does not prove
 the spec is current, and uncommitted work may be coherent. `finish` supplies
 checks, evidence, and a prompt; it cannot certify semantic agreement, adequate
-evidence, or that the agent performed the review, nor enforce its own invocation.
+evidence, or that the agent performed the review. Installed hooks require a
+matching receipt before committing; they cannot enforce a final handoff run.
+
+### Finish receipt and commit gate
+
+Stage the intended files **before** running `finish`, then commit. If its report
+leads to more edits, stage those and rerun it. After the last commit, rerun
+`finish` before handoff; HEAD changed, so the pre-commit receipt is now stale.
+Nothing requires committing inconsequential conversation or clearing open/watch
+items merely to obtain a receipt.
+
+The receipt is UTF-8 JSON at `lspec/finish-receipt.json` beneath
+`git rev-parse --absolute-git-dir` (normally `.git/lspec/finish-receipt.json`).
+Linked worktrees each have their own. Its exact fields are:
+
+| Field | Meaning |
+|---|---|
+| `format` | Integer `1`; other versions are rejected |
+| `main` | MAIN's canonical repository-relative path, with `/` separators |
+| `head` | Full HEAD object ID, or JSON `null` before the first commit |
+| `index_sha256` | SHA-256 of canonical staged paths, modes, object IDs and conflict stages |
+| `worktree_sha256` | SHA-256 of canonical tracked/nonignored untracked paths, file contents, executable modes, symlink targets and deletions |
+| `checker_sha256` | SHA-256 of the checker file that ran finish |
+| `issued_at` | UTC ISO-8601 timestamp for inspection; not an expiry or session baseline |
+
+Each run removes any prior receipt first. A successful run with equal snapshots
+before and after its report atomically writes a replacement. Failure leaves no
+receipt. Source, index, refs, review obligations and commits are not changed.
+Receipt and hook temporary files stay in Git metadata, outside the fingerprints.
+Index stat-cache timestamps are excluded, so a refresh alone does not invalidate
+the receipt. Ignored untracked files are excluded; tracked files stay covered
+even when an ignore rule matches. The inventory uses Git’s file enumeration;
+untracked special files that Git omits are not covered. Submodules, tracked special files and paths
+through symlink directories currently fail receipt issuance explicitly.
+
+Both hooks compare the receipt with their current candidate and working files,
+including the staged checker they execute. A missing, malformed or mismatched
+receipt blocks with instructions to stage, finish and retry. Stage checker edits
+too: finishing with a different checker from the candidate does not satisfy the
+gate. Hooks respect Git's selected index; `git commit -a` or path-limited commits
+can change that candidate after finish and be rejected. Prefer explicit staging
+and a plain commit. A failed commit may reuse the receipt if its bound state
+has not changed. The receipt remains on disk after a commit but is stale by HEAD;
+there is no consumed flag, acknowledgment, ownership token or in-spec marker.
+
+For `lspec review`, stage the intended dependent/target edits before finish,
+then run review. If review itself stages files and the hook refuses its receipt,
+the files remain staged: run finish and retry review. It never runs finish on
+your behalf. Receipt checks do not replace the existing review, seal or vocabulary
+gates. A receipt may report outstanding reviews; their existing commit gate
+still decides whether a particular commit is allowed. Outside Git, finish still
+reports available checks and the prompt, explicitly without a receipt.
+
+Update **both** installed hook sources when upgrading. Plain `check --staged`
+remains usable for structural validation and CI without a local receipt; the
+hooks explicitly add `--finish-receipt`. This mechanism is a cooperative local
+gate, not a signature or file lock: it cannot prevent concurrent writes, a
+forged receipt, disabled/bypassed hooks, or handoff without committing. It proves
+only that finish ran for the compared state, not that its prompt was acted on.
 
 `check --diff` and staged checks ask about removed decision rows. A `fix:`
 commit, or a change to an explicitly named diagnostic register, prompts a

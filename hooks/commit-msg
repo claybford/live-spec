@@ -11,6 +11,7 @@
 #     reported ("commit vocabulary not enforced"), never defaulted.
 # Removing or redirecting a dependency of a surviving claim requires review,
 # including same-commit target removal. Deleting the claim retires its debt.
+# Recheck the finish receipt against the final candidate after message preparation.
 # Structural checks ran in pre-commit. Install:
 #   ln -sf ../../hooks/commit-msg .git/hooks/commit-msg
 set -e
@@ -22,13 +23,15 @@ case "$1" in
   /*) msg="$1" ;;
   *)  msg="$root/$1" ;;
 esac
-export GIT_DIR="$root/.git" GIT_INDEX_FILE="$root/.git/index"
-tmp=$(mktemp -d)
+export GIT_DIR="$(git rev-parse --absolute-git-dir)"
+export GIT_INDEX_FILE="$(git rev-parse --path-format=absolute --git-path index)"
+export GIT_OPTIONAL_LOCKS=0
+tmp=$(mktemp -d "$GIT_DIR/lspec-hook.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 tool="$tmp/lspec.py"
 git -C "$root" show :lspec.py > "$tool" 2>/dev/null || tool="$root/lspec.py"
 cd "$root"
-if ! python3 "$tool" check --staged --commit-msg "$msg" "$main"; then
+if ! python3 "$tool" check --staged --finish-receipt --commit-msg "$msg" "$main"; then
   echo "commit-msg: lspec gates failed; red blocks the commit (dl-hook)" >&2
   exit 1
 fi

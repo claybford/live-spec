@@ -12,3 +12,6 @@ node_modules/
 *.swp
 *~
 .DS_Store
+
+# Evaluation harness materials (lab materials, not methodology state)
+/bench/

@@ -36,183 +36,217 @@ entry point, and a supporting spec is loaded only when work crosses into it (P19
 ## The tool: `lspec.py`
 
 `lspec.py` is optional maintenance automation (stdlib only), not part of the state:
-the spec reads without it, and the session protocol says what to do by hand. It feeds
-a session the spec whole (`python3 lspec.py start`), runs the conventions the spec makes
-mechanical as a commit-time gate (`check`), computes owed reviews from git history
-(`neighbors`, `impact`), and makes renames and recorded reviews operations (`mv`,
-`review`). Its closing command, `finish`, gathers checks, change evidence, and a
-session-accounting prompt before handoff, and writes a local state-bound commit
-receipt. Green means the implemented structural
-checks passed; semantic correctness and review adequacy require judgment. The semantics live in the spec
-and the tool's docstring; `python3 lspec.py start` lists the verbs.
+the spec reads without it, and the session protocol says what to do by hand. This
+section is its reference; the spec says *when* each step happens, the tool's own
+output says *how*.
+
+Three verbs mark the three moments of a request:
+
+| Moment | Verb | What it does |
+|---|---|---|
+| Load | `start` | Opens (or reports) the request and lists what to read. It does not print the spec. |
+| Each commit | `reconcile` | Runs every check against the staged candidate and works through a checklist; a cleared checklist issues the receipt the hooks require. |
+| Hand off | `finish` | Requires a clean tree, summarizes the request and closes it. |
+
+The other verbs keep their meanings: `check` (validator), `review` (record a
+dependency review), `show`, `neighbors`, `impact` (inspection) and `mv`
+(reference-preserving renames). `python3 lspec.py --help` and
+`python3 lspec.py VERB --help` list options. Every verb takes `--main MAIN`
+before or after the verb; with a request open, MAIN defaults to the request's.
+
+### A session
+
+```sh
+python3 lspec.py start live-spec.html        # open the request; read what it lists, whole
+# ... edit, then stage the intended changes ...
+python3 lspec.py reconcile --subject "docs: one transition"
+python3 lspec.py reconcile --next            # one judgment item, its evidence and token
+python3 lspec.py reconcile --tick TOKEN --answer ANSWER [--ref ID] [--reason "TEXT"]
+# ... repeat --next/--tick; fix mechanical items in the files and restage ...
+git commit --no-edit                         # the hooks write subject and trailers
+python3 lspec.py finish                      # clean tree: summary, request closed
+```
+
+### `start`
+
+On a tree with no open request, `start` opens one and records its start commit in
+Git metadata. With a request already open (after context compaction, or in a new
+conversation) it reports that request instead of resetting it: its start commit,
+any uncommitted work and how many answers are recorded. If the request was not
+opened in this conversation, ask the user before continuing it.
+
+The output lists every file in the collection with its line count, main's word
+count and its change since the last `audit:` commit (size is shown, not capped),
+the sealed claims, and the open obligations: structural failures, `REVIEW OWED`,
+every watch entry with its date, expired ones flagged, and gate hooks that are
+missing or from an older lspec. `finish` shows the same obligations.
+
+A watch entry is a table row whose id starts with `watch-`. An optional
+`data-watch-until="YYYY-MM-DD"` on it dates the closing condition; `check` fails the
+attribute anywhere else, and once the date passes, `reconcile` holds every commit
+until the entry is closed or its date extended.
+
+The agent then reads every spec that governs the work itself, in sequential pages.
+A whole read comes before any authoritative action: a commit, live program state,
+networked hardware. Skipped ranges and search in place of reading are not a read.
+
+`start --resume COMMIT` is for a follow-up request in the same conversation, with
+the earlier full read still in context. `COMMIT` is the handoff commit the previous
+`finish` printed. It opens the request and shows the collection's changed lines
+since `COMMIT` (or "unchanged") and other changed files. If `COMMIT` is not an
+ancestor of HEAD, or more than 120 collection lines changed, it refuses and asks
+for a full read. After compaction, or in a new conversation, do a full read.
+
+### `reconcile`
+
+`reconcile` evaluates the staged candidate (Git's selected index) against HEAD.
+`--subject` sets the commit subject and `--body` an optional body; both are kept
+until changed. Every run prints the checklist; mechanical items are listed, and
+judgment items are counted without tokens.
+
+**Mechanical items** clear only when the files change:
+
+| Item | Opens when |
+|---|---|
+| `request` | No request is open for MAIN (run `start`). |
+| `structure` | Any `check` failure in the staged collection. |
+| `subject` | No subject; a type outside main's `data-commit-types`; more than 72 characters (except `review:`); `;` chaining clauses. |
+| `review` | Debt already outstanding at HEAD, unknown history, or a removed/redirected dependency of a surviving claim, unless the subject is a `review:` naming the claim or a `seed:` boundary for its file. |
+| `empty`, `placeholder` | An added or changed claim, or a decision cell, is empty or a placeholder such as `TODO`, `TBD`, `TMP…` or `…`. |
+| `provisional` | An added or changed claim states `provisional(…)`, or a table row carries the bare status word, without linking the item that closes it. |
+| `caveat` | An inline temporal caveat (`as of <date>`), or a `[WATCH]` marker that does not link a `watch-` entry. |
+| `watch` | A `data-watch-until` date has passed, or is not `YYYY-MM-DD`. |
+| `baseline` | HEAD or the baseline collection cannot be read; nothing clears on missing evidence. |
+
+**Judgment items** are answered one at a time. `reconcile --next` shows the first
+open item: its evidence, the question, a token for that item only, and one ready
+command per legal answer. `reconcile --tick TOKEN --answer ANSWER` answers it, with
+`--ref ID` or `--reason "TEXT"` where the answer needs one. A bare word after
+`--tick TOKEN` is refused rather than read as an answer, and a trailing MAIN is
+never mistaken for one.
+
+| Item | Asked for | Legal answers |
+|---|---|---|
+| `read` | main, every collection file the commit edits, and files holding targets of their dependencies | `read-whole` |
+| `sealed` | each `data-sealed` claim the commit changes, deletes, renames, unmarks or drops from the collection | `decision --ref ROW` (a `dl-` row added or changed in this commit) · `correction --reason` |
+| `removed` | each decision row the commit removes | `replaced --ref ROW` (added or changed in this commit) · `retired --reason` |
+| `cause` | every `fix:` commit | `established --ref WATCH --reason` · `unverified --ref WATCH` · `recurrence --ref ROW` |
+| `neighbor` | each unchanged claim one hop from a changed claim (cites it or is cited by it), and each claim linked from changed text outside every id'd element | `holds` (if not, fix it in the files) |
+
+A failure seen once gets a watch entry, so both `established` and `unverified`
+name one: a `watch-` row added or changed in this commit, recording symptom,
+date, diagnosis, fix and the condition that closes it. `established` also states
+what established the cause. The text of every watch entry and diagnostic row the
+commit adds or changes is part of the cause item's evidence, so rewriting one
+reopens the answer. `recurrence` names a row
+added or changed in this commit inside the diagnostic register (an element with id
+`diagnostic`, or a heading titled "Diagnostic register"). Changed text outside every
+id'd element can be cited by nothing; when it links a claim, that claim is checked
+as a neighbor, and otherwise it raises no item.
+
+Reasons need at least three words and cannot repeat another item's reason. An
+answer holds while its item's evidence is unchanged, so after a fix only the
+changed and newly created items come back. A container whose only change is
+inside a nested claim does not count as changed. Answers are re-validated on
+every run; a decision row reverted after the answer reopens its item.
+
+When nothing is open, `reconcile` writes the receipt, bound to HEAD, the index,
+the checker file, the subject, the body and the answers, and prints the commit
+instruction. Any later change to the index means rerunning `reconcile`, which
+keeps every answer whose evidence is unchanged. Exit status is 0 with a receipt
+and 1 while anything is open.
+
+The commit carries `Reconciled:` trailers: a checklist digest with the number of
+answers, plus one line per decision, correction, replacement, retirement or cause.
+
+### Hooks
+
+Install all four from the repository root:
+
+```sh
+for h in pre-commit prepare-commit-msg commit-msg post-commit; do
+  ln -sf ../../hooks/$h .git/hooks/$h
+done
+```
+
+The gate hooks run the *staged* `lspec.py` (falling back to the working tree's) and
+only compare the commit with the receipt; every check already ran in `reconcile`,
+so a refusal always means the candidate changed after it.
+
+- `pre-commit` refuses without a receipt matching HEAD, the index and the checker
+  being committed. `git commit -a` and path-limited commits build a different index
+  and are refused.
+- `prepare-commit-msg` writes the reconciled subject, body and `Reconciled:` trailers.
+  Other trailer lines you pass (for example `Co-Authored-By:`) are kept; other text
+  is replaced. Commit with `git commit --no-edit`.
+- `commit-msg` refuses a message whose subject or `Reconciled:` lines differ from
+  the receipt, and rechecks the receipt after message preparation.
+- `post-commit` lists files still uncommitted after the commit and prints nothing
+  when there are none. It uses the committed checker.
+
+All hook sources must keep executable modes (`chmod +x hooks/*` and
+`git update-index --chmod=+x hooks/*` if a download lost them). Hooks do not
+clone; run `python3 lspec.py check` in CI.
+
+### `finish`
+
+`finish` requires a clean working tree; otherwise it lists the leftovers and exits
+1, leaving the request open. Asking the user "should I commit this?" is a pause
+partway through the request, not a handoff. On a clean tree it lists the request's
+commits since its start commit, the open obligations and specific accounting
+questions, closes the request and prints the handoff commit and the
+`start --resume` command for a follow-up.
+
+### Validation and inspection
+
+- `check [MAIN]` validates structure in the working tree; `--staged` validates the
+  index; `--template` skips the unresolved `[ADAPT]`/`[PROJECT]` gate;
+  `--diff BASE` and `--neighborhood TARGET` print neighborhoods; `--clean` lists
+  staged, unstaged and untracked files repo-wide (silent and 0 when there are none).
+- `review CLAIM… [-m TEXT]` stages the named dependent claims and their targets,
+  sets the subject `review: CLAIM, …`, and commits once the checklist is clear;
+  otherwise it prints the checklist (exit 1) and committing it later works the same.
+- `show FILE_OR_CLAIM`, `show --graph`, `neighbors CLAIM`, `impact [BASE]` inspect
+  the collection; `mv OLD NEW` renames a file or anchor and repairs references.
+
+Review baselines, the lineage floor (`seed:` subjects), rename tracing and
+collection rules are unchanged; the module docstring records their mechanics.
+Claim text is compared with block and cell boundaries as separators.
+
+### State and limits
+
+State lives in the per-worktree Git directory under `lspec/`: `request.json`
+(MAIN and the start commit), `reconcile.json` (subject, body, answers),
+`receipt.json`, and a random `secret` from which tokens are derived. Linked
+worktrees have their own. Old `finish-receipt.json` files are ignored.
+
+This is a cooperative local gate, not a signature. An agent with a shell can forge
+a token or bypass hooks; that is deliberate circumvention, outside the gate. Green
+means the checks ran and the questions were answered, not that the answers are
+right. `git commit --amend` and merges are not reconciled.
+
+### Upgrading an instance
+
+Instances seeded from older versions carry their own copy of the tool. To upgrade
+one:
+
+1. Copy `lspec.py` and `hooks/` into the instance.
+2. Install the hooks as above, including `prepare-commit-msg`.
+3. Replace the instance's tooling paragraph with "begin with
+   `python3 lspec.py start MAIN` and follow its output", and its AGENTS.md entry
+   with the seed's instruction text.
+4. Commit through the new gate with an ordinary type (`tool:` or `docs:`). A `seed:`
+   commit would discard the instance's review history.
+
+The new tool reads old instances: `data-changes` attributes are reported as
+retired and ignored (a sealed change is answered in `reconcile`), old receipts are
+ignored, and `review:` history keeps its meaning. Old hooks that still call
+`check --finish-receipt` or `--commit-msg` get a message to install the new ones.
 
 ## Working on this repo
 
-An agent session starts with AGENTS.md: run `python3 lspec.py start live-spec.html`
-and read everything it prints, from the opening header through the end marker,
-with no reported truncation, before anything else.
-Before handing work back, run `python3 lspec.py finish live-spec.html`, address
-its findings, and report any blocker or unfinished work.
-
-Every session-event is a commit; every full sweep takes an `audit:` commit. A
-clean sweep may update bookkeeping; use `git commit --allow-empty` only when no
-files change; a recorded review is a `review:` commit naming the
-dependent claims it clears. History lives in git, never in the document body.
-
-Two hooks run the staged copy of `check` and red blocks the commit: pre-commit
-runs the structural checks and the seal gate (`check --staged
---finish-receipt --diff HEAD`); commit-msg runs the review gate and the commit-vocabulary gate
-(`check --staged --finish-receipt --commit-msg`), where the subject exists.
-Both require a matching finish receipt. `--staged` reads
-the index itself, so an unstaged repair cannot launder a broken candidate.
-The review gate
-blocks a commit while a review obligation was already outstanding at HEAD,
-unless the subject is a recorded `review:` naming the claim or a `seed:`
-boundary for the dependent file — `python3 lspec.py review` handles the former
-(obligations the commit newly creates are reported as warnings).
-Removing or redirecting an existing dependency of a surviving claim requires a
-`review:` commit, even when the target is removed in the same commit. Deleting
-the dependent claim retires its obligations. `lspec review` accepts pending
-retirements after their links have been removed. The
-vocabulary gate rejects a subject typed outside main's declared
-`data-commit-types` set; a document without the declaration is reported as
-unenforced, never defaulted. The seal gate blocks any change to a
-`data-sealed` claim — text, id, path, marker, or collection membership —
-without a same-commit decision newly naming the old `path#id` in
-`data-changes`, or updated decision-cell text in a row already naming it.
-Adding unrelated addresses does not renew an existing authorization. After committing, `python3 lspec.py check --clean` is the
-completion check: it reports staged, unstaged, and untracked files repo-wide
-and fails while any remain. Unavailable
-history blocks: recover with `git fetch --unshallow`, or record an explicit
-review against committed state. Template validation is explicit:
-`python3 lspec.py check --template`.
-Install both: `ln -sf ../../hooks/pre-commit .git/hooks/pre-commit` and
-`ln -sf ../../hooks/commit-msg .git/hooks/commit-msg`. Hooks don't clone, so run
-`python3 lspec.py check` in CI. Tests: `python3 -m unittest tests.test_lspec`.
-
-
-### Session review and change-aware feedback
-
-For a different instance, substitute its MAIN path in the lifecycle commands
-above. MAIN can also be supplied with `--main`.
-
-`finish` uses the ordinary working-tree structural checks and existing review
-obligations, without editing source files, acknowledging reviews, staging, or
-committing. It writes only a local receipt in Git metadata. Validation, outstanding
-reviews, and Git state are reported separately. Exit 1 means structural failure;
-exit 2 means unreadable input, unavailable Git evidence, or an unavailable/stale
-snapshot during receipt issuance. Outstanding or unknown
-reviews are reported without changing the exit status, as with `start` and
-`impact`. Dirty state alone does not fail; `check --clean` retains its explicit
-cleanliness requirement. The receipt adds a commit prerequisite; it does not
-require a commit where existing policy would not.
-
-The inventory includes repo-wide staged, unstaged, and non-ignored untracked
-changes, distinguishing collection specs from other files. HEAD/index/worktree
-comparisons include staged edits hidden by an unstaged revert. Parsed claim
-changes and declared links identify review candidates and their one-hop
-neighbors, including old references for removed claims. Mapping is partial;
-unmapped files are named, and filenames never establish semantic impact.
-This does not run staged commit gates or validate the index as a candidate commit.
-
-`start` records no session baseline, so `finish` cannot identify committed session
-changes. HEAD is used only to compare uncommitted state, never as an invented
-session baseline. Outside Git, structural checks and the prompt still run;
-history and change evidence are explicitly unavailable. Git evidence does not
-cover conversation-only decisions, findings, or changed assumptions, so the
-session-accounting prompt always appears, even with a clean tree.
-
-Act on that prompt using the spec's existing recording and open-items rules.
-Open/watch items are distinct from mechanically outstanding review obligations;
-unresolved work may legitimately remain at handoff. A clean tree does not prove
-the spec is current, and uncommitted work may be coherent. `finish` supplies
-checks, evidence, and a prompt; it cannot certify semantic agreement, adequate
-evidence, or that the agent performed the review. Installed hooks require a
-matching receipt before committing; they cannot enforce a final handoff run.
-
-### Finish receipt and commit gate
-
-Stage the intended files **before** running `finish`, then commit. If its report
-leads to more edits, stage those and rerun it. After the last commit, rerun
-`finish` before handoff; HEAD changed, so the pre-commit receipt is now stale.
-Nothing requires committing inconsequential conversation or clearing open/watch
-items merely to obtain a receipt.
-
-The receipt is UTF-8 JSON at `lspec/finish-receipt.json` beneath
-`git rev-parse --absolute-git-dir` (normally `.git/lspec/finish-receipt.json`).
-Linked worktrees each have their own. Its exact fields are:
-
-| Field | Meaning |
-|---|---|
-| `format` | Integer `1`; other versions are rejected |
-| `main` | MAIN's canonical repository-relative path, with `/` separators |
-| `head` | Full HEAD object ID, or JSON `null` before the first commit |
-| `index_sha256` | SHA-256 of canonical staged paths, modes, object IDs and conflict stages |
-| `worktree_sha256` | SHA-256 of canonical tracked/nonignored untracked paths, file contents, executable modes, symlink targets and deletions |
-| `checker_sha256` | SHA-256 of the checker file that ran finish |
-| `issued_at` | UTC ISO-8601 timestamp for inspection; not an expiry or session baseline |
-
-Each run removes any prior receipt first. A successful run with equal snapshots
-before and after its report atomically writes a replacement. Failure leaves no
-receipt. Source, index, refs, review obligations and commits are not changed.
-Receipt and hook temporary files stay in Git metadata, outside the fingerprints.
-Index stat-cache timestamps are excluded, so a refresh alone does not invalidate
-the receipt. Ignored untracked files are excluded; tracked files stay covered
-even when an ignore rule matches. The inventory uses Git’s file enumeration;
-untracked special files that Git omits are not covered. Submodules, tracked special files and paths
-through symlink directories currently fail receipt issuance explicitly.
-
-Both hooks compare the receipt with their current candidate and working files,
-including the staged checker they execute. A missing, malformed or mismatched
-receipt blocks with instructions to stage, finish and retry. Stage checker edits
-too: finishing with a different checker from the candidate does not satisfy the
-gate. Hooks respect Git's selected index; `git commit -a` or path-limited commits
-can change that candidate after finish and be rejected. Prefer explicit staging
-and a plain commit. A failed commit may reuse the receipt if its bound state
-has not changed. The receipt remains on disk after a commit but is stale by HEAD;
-there is no consumed flag, acknowledgment, ownership token or in-spec marker.
-
-For `lspec review`, stage the intended dependent/target edits before finish,
-then run review. If review itself stages files and the hook refuses its receipt,
-the files remain staged: run finish and retry review. It never runs finish on
-your behalf. Receipt checks do not replace the existing review, seal or vocabulary
-gates. A receipt may report outstanding reviews; their existing commit gate
-still decides whether a particular commit is allowed. Outside Git, finish still
-reports available checks and the prompt, explicitly without a receipt.
-
-Update **both** installed hook sources when upgrading. Plain `check --staged`
-remains usable for structural validation and CI without a local receipt; the
-hooks explicitly add `--finish-receipt`. This mechanism is a cooperative local
-gate, not a signature or file lock: it cannot prevent concurrent writes, a
-forged receipt, disabled/bypassed hooks, or handoff without committing. It proves
-only that finish ran for the compared state, not that its prompt was acted on.
-
-`check --diff` and staged checks ask about removed decision rows. A `fix:`
-commit, or a change to an explicitly named diagnostic register, prompts a
-recurrence check. These are advisory questions, not proof of an error; they do
-not change exit status. Diagnostic detection recognizes an id of `diagnostic`,
-`diagnostic-register`, or `diagnostic_register`, or a heading titled
-"Diagnostic register". Other layouts may not trigger it.
-
-Dirty dependency reports compare each target claim across HEAD, index and
-working tree. General unfinished-work notices remain separate. `start` lists
-parsed dependencies and sealed claims for factual seed assessments; it cannot
-judge whether the protection selection is complete.
-
-Install the advisory completion hook too:
-
-```sh
-ln -sf ../../hooks/post-commit .git/hooks/post-commit
-```
-
-After a successful commit it runs the committed tool's `check --clean`. It
-reports leftovers but cannot undo the commit or detect a session that never
-commits. `mv` and `review` also print their next completion steps.
-
-All three hook source files must retain executable permissions. If individual
-downloads lose file modes, restore them before installing:
-
-```sh
-chmod +x hooks/pre-commit hooks/commit-msg hooks/post-commit
-git update-index --chmod=+x hooks/pre-commit hooks/commit-msg hooks/post-commit
-```
+An agent session starts with AGENTS.md. Every session-event is a commit; every full
+sweep takes an `audit:` commit; a recorded review is a `review:` commit naming the
+dependent claims it clears. Commit types come from `data-commit-types` in
+live-spec.html; never use `seed:` here. History lives in git, never in the
+document body. Tests: `python3 -m unittest tests.test_lspec`.

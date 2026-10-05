@@ -5,17 +5,19 @@ The active spec carries the session's operating rules. live-spec.html defines
 the methodology and seed; README.md documents installation and tool workflows.
 Use `lspec --help` and `lspec COMMAND --help` for commands and options.
 
-Exit status: 0 = pass, 1 = failed check, 2 = unreadable input, unavailable
-required evidence, bad target, or refused operation. Reporting review debt
-does not itself fail start, finish, impact, or neighbors. Mechanical checks
-cannot establish semantic correctness or review adequacy.
+Exit status: 0 = pass, 1 = failed check or open checklist, 2 = unreadable
+input, unavailable required evidence, bad target, or refused operation.
+Reporting review debt does not itself fail start, finish, impact, or
+neighbors. Mechanical checks cannot establish semantic correctness or review
+adequacy; reconcile records that an answer was given, not that it was right.
 
 Implementation details beyond the seed's operating rules:
 
 * Review baselines belong to typed edges: dependent id plus target address.
   Unrelated occurrences of an href do not reset introduction; upgrading a
   plain link to depends-on introduces the edge at that commit. Comparison
-  uses normalized target text in committed trees.
+  uses normalized target text in committed trees: block and cell boundaries
+  separate words, inline tags join them.
 
 * The lineage floor is the newest commit whose subject types seed: and
   touches the dependent file. Edges present at that floor start there.
@@ -33,9 +35,16 @@ Implementation details beyond the seed's operating rules:
   data-literal declares literal readiness-marker mentions; ordinary quoting
   does not exempt them. --template skips the unresolved-marker gate.
 
-* data-changes values are whitespace-separated historical path#id addresses,
-  not links requiring surviving targets. Unchanged or whitespace-only
-  decision cells do not renew authorization.
+* State lives in Git metadata (per worktree) under lspec/: request.json
+  (MAIN and the request's start commit), reconcile.json (subject, body and
+  answers keyed by item and evidence), receipt.json, and a random secret.
+  Tokens are an HMAC of item and evidence under that secret; a shell can
+  forge one, which is deliberate circumvention, like bypassing hooks.
+
+* A sealed change is a decision change (a dl- row added, or its cells
+  changed, in the same commit) or a correction (a stated reason, carried in a
+  Reconciled: trailer). data-changes attributes from older instances are
+  reported as retired and otherwise ignored.
 
 * Count checks recognize digits and number words, but matching cardinality
   cannot establish item identity or completeness. Change reports also detect
@@ -44,12 +53,12 @@ Implementation details beyond the seed's operating rules:
 
 import argparse
 import hashlib
+import hmac
 import html
 import json
 import os
 import re
 import shlex
-import stat
 import subprocess
 import sys
 import tempfile
@@ -58,6 +67,7 @@ from html.parser import HTMLParser
 from types import SimpleNamespace
 
 CELL_WORD_CAP = 40
+WATCH_PREFIX = "watch-"     # a watch entry is a table row whose id starts with this
 # Word numerals resolve through ninety-nine and round hundreds (spaced or
 # hyphenated composites): units to twenty, tens, tens-units, "hundred".
 NUM = ("zero one two three four five six seven eight nine ten eleven twelve "
@@ -71,8 +81,6 @@ WORD2NUM.update({f"{t}-{NUM[u]}": 30 + 10 * i + u
 WORD2NUM.update({"hundred": 100})
 TENS_WORDS = {"twenty", *TENS}
 VOID = {"br", "hr", "meta", "link", "img", "input", "col", "wbr", "source"}
-READ_ONLY = ["start", "check", "show", "neighbors", "impact"]
-MUTATING = ["finish", "mv", "review"]
 
 
 # =============================================================== parsing
@@ -94,6 +102,8 @@ class Spec(HTMLParser):
         self.bad_deps = []       # (start offset, tag): rel="depends-on" off <a href>
         self.sealed = []         # ids of elements carrying data-sealed
         self.bad_sealed = []     # start offsets: data-sealed on an element with no id
+        self.watches = []        # (id or None, data-watch-until value, tag)
+        self.retired_changes = 0 # data-changes attributes (retired ledger)
         self._stack, self._pre = [], 0
         self._spans = {}         # start offset -> end offset, every element
         self._lines = [0]
@@ -126,6 +136,10 @@ class Spec(HTMLParser):
                 self.sealed.append(eid)
             else:
                 self.bad_sealed.append(self._off())
+        if "data-watch-until" in a:
+            self.watches.append((eid, a["data-watch-until"] or "", tag))
+        if "data-changes" in a:
+            self.retired_changes += 1
         if tag in VOID:
             if eid and eid not in self.elems:
                 start = self._off()
@@ -164,7 +178,7 @@ class Spec(HTMLParser):
         return self.raw[s:e]
 
     def text(self, eid):
-        return norm(self.element(eid), sep="") if eid in self.elems else None
+        return claim_text(self.element(eid)) if eid in self.elems else None
 
     def links_in(self, eid):
         s, e = self.elems[eid]
@@ -180,6 +194,21 @@ class Spec(HTMLParser):
 
 def norm(fragment, sep=" "):
     return " ".join(html.unescape(re.sub(r"<[^>]+>", sep, fragment)).split())
+
+
+# Block and cell boundaries separate text; inline tags join it, so that
+# <td>1</td><td>23</td> and <td>12</td><td>3</td>, or <p>a</p><p>b</p> and
+# <p>ab</p>, never compare equal while a<em>b</em> still reads as "ab".
+BLOCK_TAGS = ("address article aside blockquote br caption dd details div dl dt "
+              "fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header "
+              "hgroup hr legend li main nav ol p pre section summary table tbody "
+              "td tfoot th thead tr ul").split()
+BLOCK_RE = re.compile(r"</?(?:%s)\b[^>]*>" % "|".join(BLOCK_TAGS), re.I)
+
+
+def claim_text(fragment):
+    """Normalized rendered text used for every claim comparison."""
+    return norm(BLOCK_RE.sub(" ", fragment), sep="")
 
 
 def words(cell):
@@ -849,6 +878,11 @@ def check_structure(col, specimens=True, markers=True):
         for off, tag in getattr(s, "bad_deps", []):
             fails.append(f"[depends-on] {r}: rel=\"depends-on\" on <{tag}>: "
                          f"only <a href> carries an obligation")
+        for eid, _, tag in getattr(s, "watches", []):
+            if tag != "tr" or not (eid or "").startswith(WATCH_PREFIX):
+                fails.append(f"[watch] {r}: data-watch-until on "
+                             f"{'#' + eid if eid else 'an element with no id'}: it belongs on a "
+                             f"watch entry, a table row whose id starts with {WATCH_PREFIX}")
         for off in s.bad_sealed:
             fails.append(f"[sealed] {r}: data-sealed on an element with no id — "
                          f"protection needs a stable anchor on the complete claim")
@@ -1053,19 +1087,11 @@ def print_owed(owed, prefix="REVIEW", col=None):
 # ================================================================= verbs
 
 def deliver(path, raw):
-    """Print a spec whole with boundary markers; not a comprehension guarantee."""
+    """Print a spec whole between header and end lines (show FILE)."""
     r = rel(path)
-    print(f"==== {r} — {len(raw.splitlines())} lines, {len(raw.encode('utf-8'))} bytes ====")
-    print(f'This header opens a whole-file delivery. Read every line that follows, '
-          f'down to the closing line "==== end {r} ====". If that closing line '
-          f'never appears, or your tool reported truncation, the delivery was cut: '
-          f'read the file in full by other means before doing anything else.')
+    print(f"==== {r} — {len(raw.splitlines())} lines ====")
     print(raw)
     print(f"==== end {r} ====")
-    print(f'This closes a whole-file delivery that opened with a header line '
-          f'beginning "==== {r} —". If you did not see that header, or your tool '
-          f'reported truncation, the delivery was cut: read the file in full by '
-          f'other means before doing anything else.\n')
 
 
 def command(col, verb, *args):
@@ -1074,14 +1100,23 @@ def command(col, verb, *args):
 
 
 def load_hint(col, *paths):
-    """Suffix naming every non-main file the line touches, so a crossing hands
-    the agent the whole-load command at the moment it would otherwise skim."""
+    """Suffix naming every non-main file the line touches, so a crossing tells
+    the agent to read that file whole at the moment it would otherwise skim."""
     seen = [p for i, p in enumerate(paths) if p != col.main and p not in paths[:i]]
-    return "".join(f"  (load whole: {command(col, 'show', rel(p))})" for p in seen)
+    return "".join(f"  (read whole: {rel(p)})" for p in seen)
+
+
+def default_main():
+    """The open request's MAIN, else live-spec.html when present."""
+    if repo_root() is not None:
+        request = read_state("request.json")
+        if request and request.get("main"):
+            return os.path.join(repo_root(), request["main"])
+    return "live-spec.html" if os.path.exists("live-spec.html") else None
 
 
 def load(args, basis="worktree"):
-    main = args.main or ("live-spec.html" if os.path.exists("live-spec.html") else None)
+    main = args.main or default_main()
     if basis == "worktree":
         if main is None or not os.path.exists(main):
             print("lspec: no MAIN (pass --main PATH)", file=sys.stderr)
@@ -1148,21 +1183,9 @@ def head_edges(col, root):
     return edges
 
 
-def gate_subject(msg_path):
-    """The candidate commit's subject: first non-comment line of the message
-    file. Body lines never type a commit."""
-    with open(msg_path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.rstrip("\n").strip()
-            if line and not line.startswith("#"):
-                return line
-    return ""
-
-
-def gate_claims(msg_path):
-    """-> (named claims, is_seed) from the candidate commit's subject.
-    The parse matches review_baseline's exactly."""
-    subject = gate_subject(msg_path)
+def subject_claims(subject):
+    """-> (named review claims, is_seed) from a commit subject. The parse
+    matches review_baseline's exactly; body lines never type a commit."""
     review = subject_type(subject, "review")
     named = {c.strip() for c in review.split(",")} if review is not None else set()
     return named, subject_type(subject, "seed") is not None
@@ -1202,54 +1225,15 @@ def disappear_cause(r, col):
         return f"clearance cannot be established ({e})", True
 
 
-def vocab_gate(col, rc, msg_path):
-    """The commit-vocabulary gate (commit-msg): the subject's type prefix must
-    come from main's staged data-commit-types declaration. A legacy document
-    without a declaration is reported, not defaulted."""
-    main = col.specs.get(col.main)
-    decls = commit_type_decls(main) if main else []
-    if len(decls) != 1:
-        print("  note: commit vocabulary not enforced "
-              "(no single data-commit-types declaration in main)")
-        return rc
-    allowed = decls[0].split()
-    subject = gate_subject(msg_path)
-    prefix, sep, _ = subject.partition(":")
-    if not sep or not prefix.strip():
-        print(f"  [commit-types] the subject {subject!r} has no `type:` prefix; "
-              f"declared types: {' '.join(allowed)}")
-        return 1
-    if prefix.strip() not in allowed:
-        print(f"  [commit-types] type {prefix.strip()!r} is not in main's declared "
-              f"vocabulary: {' '.join(allowed)}")
-        return 1
-    return rc
-
-
-def row_changes(row):
-    match = re.search(r'\bdata-changes="([^"]*)"', row)
-    addresses = set(match.group(1).split()) if match else set()
-    # Equivalent legal spellings name the same claim, not new authorization.
-    # Keep invalid traversal untouched so the gate can reject it explicitly.
-    out = set()
-    for address in addresses:
-        path, sep, frag = address.partition("#")
-        if sep and path and not path.startswith("/") and ".." not in path.split("/"):
-            path = posix(os.path.normpath(path))
-        out.add(path + sep + frag)
-    return out
-
-
 def row_decision(row):
-    """Decision-cell text only: attributes and presentation do not renew consent."""
+    """Decision-cell text only: attributes and presentation are not a decision."""
     return tuple(norm(cell) for cell in re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S))
-
 
 
 def renamed_from(root, new_abs):
     """The repo-relative OLD path if the staged diff renames something onto
-    new_abs, else None. Lets the seal gate recover the baseline collection
-    across a main rename instead of treating the old tree as absent."""
+    new_abs, else None. Lets the gate recover the baseline collection across
+    a main rename instead of treating the old tree as absent."""
     out = git("diff", "--cached", "--find-renames", "--name-status", "-z", "HEAD",
               cwd=root, check=False)
     parts = out.split("\0")
@@ -1269,115 +1253,17 @@ def renamed_from(root, new_abs):
     return None
 
 
-def seal_gate(col, rc):
-    """The seal gate (staged checking): a claim marked data-sealed at
-    HEAD may not change — normalized text, deletion, id/path change, marker
-    removal, or leaving the collection — unless the same commit newly names
-    its old repo-relative path#id in a decision row's data-changes or changes
-    the cells of a row already naming it. Protection is read from HEAD;
-    authorization from the staged tree. The gate requires a recorded decision, not proof the
-    decision is sound. An incomplete baseline fails; it never clears."""
-    root = repo_root()
-    if root is None:
-        return rc
-    state = head_status()
-    if state == "unborn":
-        return rc            # declarations are validated structurally; no prior seal
-    if state != "ok":
-        print("  [sealed] HEAD is unresolvable; sealed-claim protection cannot "
-              "be evaluated (fetch or repair history)")
-        return 1
-    hcol = Collection(rel(col.main), basis="HEAD")
-    if col.main not in hcol.specs:
-        # Main is new or renamed in this commit. Recover the baseline
-        # collection through a staged rename if there is one; otherwise fail
-        # safe — scan every html file at HEAD repo-wide so a deletion cannot
-        # strand a protected claim.
-        old = renamed_from(root, col.main)
+def head_collection(col):
+    """MAIN's collection at HEAD, following a staged rename of main. Raises
+    HistoryUnavailable when the baseline cannot be read completely."""
+    head = Collection(rel(col.main), basis="HEAD")
+    if col.main not in head.specs:
+        old = renamed_from(repo_root(), col.main)
         if old:
-            hcol = Collection(old, basis="HEAD")
-        else:
-            hcol.specs = {}
-            for p in html_files(root, "HEAD"):
-                try:
-                    s = file_at("HEAD", p)
-                except HistoryUnavailable as e:
-                    print(f"  [sealed] baseline unavailable: {e}")
-                    return 1
-                if s is not None:
-                    hcol.specs[p] = s
-    if hcol.fails:
-        # Baseline discovery must be complete before any claim is evaluated.
-        for f in hcol.fails:
-            print(f"  [sealed] baseline incomplete: {f}")
-        return 1
-    violations = []
-    for p, s in hcol.specs.items():
-        for i in getattr(s, "sealed", []):
-            name = f"{repo_rel(p)}#{i}"
-            try:
-                staged = file_staged(p)
-            except HistoryUnavailable as e:
-                print(f"  [sealed] staged tree unreadable for {name}: {e}")
-                return 1
-            if staged is None:
-                violations.append(((p, i), name, "file deleted"))
-            elif p not in col.specs:
-                violations.append(((p, i), name,
-                                   "file leaves the collection (its split row is gone)"))
-            elif i not in staged.elems:
-                violations.append(((p, i), name, "claim deleted or id changed"))
-            elif i not in staged.sealed:
-                violations.append(((p, i), name, "data-sealed marker removed"))
-            elif staged.text(i) != s.text(i):
-                violations.append(((p, i), name, "content changed"))
-    if not violations:
-        return rc
-    covered, problems = set(), []
-    for p, s in col.specs.items():
-        try:
-            base = file_at("HEAD", p)
-        except HistoryUnavailable as e:
-            print(f"  [sealed] baseline unavailable for {rel(p)}: {e}")
-            rc = 1
-            continue
-        old_rows = dict(base.rows()) if base else {}
-        for rid, row in s.rows():
-            old = old_rows.get(rid)
-            authorized = row_changes(row)
-            if old is not None and row_decision(old) == row_decision(row):
-                # Existing rationale can cover a newly named claim, but adding
-                # another address cannot renew consent for an old one.
-                authorized -= row_changes(old)
-            for a in sorted(authorized):
-                apath, sep, frag = a.partition("#")
-                if (not sep or not apath or not frag or apath.startswith("/")
-                        or re.match(r"[A-Za-z]:", apath)
-                        or ".." in apath.split("/")):
-                    problems.append(f"[sealed] {rel(p)} {rid}: bad data-changes address "
-                                    f"{a!r} (want repo-relative path#id)")
-                    continue
-                bp = canon(os.path.join(root, apath))
-                try:
-                    bspec = file_at("HEAD", bp)
-                except HistoryUnavailable as e:
-                    problems.append(f"[sealed] {rel(p)} {rid}: cannot resolve {a!r} "
-                                    f"at HEAD ({e})")
-                    continue
-                if bspec is None or frag not in bspec.elems:
-                    problems.append(f"[sealed] {rel(p)} {rid}: data-changes address "
-                                    f"{a!r} does not resolve at HEAD")
-                    continue
-                covered.add((bp, frag))
-    for prob in problems:
-        print("  " + prob)
-        rc = 1
-    for (p, i), name, cause in violations:
-        if (p, i) not in covered:
-            print(f"  [sealed] {name}: {cause} — a sealed claim changes only with a new "
-                  f"or updated dl- row carrying data-changes=\"{name}\" in the same commit")
-            rc = 1
-    return rc
+            head = Collection(old, basis="HEAD")
+    if head.fails:
+        raise HistoryUnavailable("; ".join(head.fails))
+    return head
 
 
 def retired_dependencies(col):
@@ -1387,15 +1273,7 @@ def retired_dependencies(col):
     """
     if head_status() == "unborn":
         return []
-    head = Collection(rel(col.main), basis="HEAD")
-    if head.fails:
-        raise HistoryUnavailable("; ".join(head.fails))
-    if col.main not in head.specs:
-        old = renamed_from(repo_root(), col.main)
-        if old:
-            head = Collection(old, basis="HEAD")
-            if head.fails:
-                raise HistoryUnavailable("; ".join(head.fails))
+    head = head_collection(col)
     current = {(fp, l["src"], tp, fr) for fp, l, tp, fr in col.depends_on_edges()}
     return [(fp, l, tp, fr) for fp, l, tp, fr in head.depends_on_edges()
             if l["src"] is not None and fp in col.specs
@@ -1403,101 +1281,870 @@ def retired_dependencies(col):
             and (fp, l["src"], tp, fr) not in current]
 
 
-def review_gate(col, rc, msg_path):
-    """The commit-msg gate. Compares obligations computed against HEAD (over
-    HEAD's own edges) with obligations against the candidate tree:
-    - created by this commit: warning;
-    - already outstanding at HEAD: blocks, unless the subject is a recorded
-      `review:` naming the claim or a `seed:` boundary whose staged files'
-      lineages it discards — the same boundary the baselines will apply;
-    - a HEAD obligation with no counterpart is reported with its cause;
-      retirement of a surviving claim's edge requires an explicit review;
-    - unknown history blocks, with both recovery paths;
-    - a verified unborn HEAD (first commit) owes nothing and only warns."""
+# ============================================================ commit gate
+# reconcile runs every check against the staged candidate and lists what is
+# open. Mechanical items clear when the files are fixed. Judgment items are
+# answered one at a time, each with a token shown only beside its evidence;
+# a tick holds while its item's evidence is unchanged. A cleared checklist
+# issues a receipt bound to HEAD, the index, the checker, the subject and the
+# answers; the hooks only confirm that the commit matches it.
+
+SUBJECT_MAX = 72
+PLACEHOLDER_ID = re.compile(r"(?:tmp|temp|placeholder|todo|xxx)(?:[-_\d]|$)", re.I)
+PLACEHOLDER_TEXT = re.compile(r"(?:(?:TMP|TEMP|TODO|TBD|FIXME|XXX|PLACEHOLDER)[A-Z0-9_-]*"
+                              r"|[.?…–—-]+)")
+PROVISIONAL_RE = re.compile(r"\bprovisional\s*\(", re.I)
+# In a table row a bare status word is a status token (the seed's own vocabulary),
+# so the row must link the open item that closes it; in prose only the token
+# form provisional(source) counts, or P6's own discussion would trip the check.
+PROVISIONAL_ROW_RE = re.compile(r"\bprovisional\b", re.I)
+CAVEAT_RE = re.compile(r"\bas[ -](?:of|at)\s+(?:\d{4}|\d{1,2}[/.-]\d"
+                       r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d)", re.I)
+EMPTY_CHECKED = set(BLOCK_TAGS) - {"br", "hr", "td", "th"}
+TRAILER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*: \S")
+# Legal answers per item kind: answer -> (needs --ref, needs --reason).
+ANSWERS = {
+    "read": {"read-whole": (False, False)},
+    "neighbor": {"holds": (False, False)},
+    "sealed": {"decision": (True, False), "correction": (False, True)},
+    "removed": {"replaced": (True, False), "retired": (False, True)},
+    "cause": {"established": (True, True), "unverified": (True, False),
+              "recurrence": (True, False)},
+}
+REF_NAMES = {"decision": "ROW", "replaced": "ROW", "established": "WATCH",
+             "unverified": "WATCH", "recurrence": "ROW"}
+QUESTION_ORDER = ("read", "sealed", "removed", "cause", "neighbor")
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+class GateContext(SimpleNamespace):
+    """Everything one checklist computation read: staged and HEAD collections,
+    changed claims, the request and the subject."""
+
+
+def own_parts(spec, eid):
+    """A claim's own text and links, excluding id'd descendants: a container
+    whose only change is inside a nested claim has not itself changed."""
+    s, e = spec.elems[eid]
+    inner = sorted(v for i, v in spec.elems.items() if i != eid and s < v[0] and v[1] <= e)
+    pieces, pos = [], s
+    for a, b in inner:
+        if a < pos:
+            continue
+        pieces.append(spec.raw[pos:a])
+        pos = b
+    pieces.append(spec.raw[pos:e])
+    links = sorted((l["href"], l["rel"] or "") for l in spec.links if l["src"] == eid)
+    return claim_text(" ".join(pieces)), links
+
+
+def changed_claims(head_specs, staged_specs):
+    """{(path, id): kind} for ids added, changed (own text or links) or
+    removed between HEAD and the staged candidate."""
+    out = {}
+    for p in set(head_specs) | set(staged_specs):
+        hs, ss = head_specs.get(p), staged_specs.get(p)
+        for eid in (ss.elems if ss else {}):
+            if hs is None or eid not in hs.elems:
+                out[(p, eid)] = "added"
+            elif own_parts(hs, eid) != own_parts(ss, eid):
+                out[(p, eid)] = "changed"
+        for eid in (hs.elems if hs else {}):
+            if ss is None or eid not in ss.elems:
+                out[(p, eid)] = "removed"
+    return out
+
+
+def changed_rows(ctx):
+    """Decision rows added or with changed cells in this commit: {rid: path}."""
+    out = {}
+    for p, s in ctx.staged.specs.items():
+        old = dict(ctx.head_specs[p].rows()) if p in ctx.head_specs else {}
+        for rid, row in s.rows():
+            if rid not in old or row_decision(old[rid]) != row_decision(row):
+                out[rid] = p
+    return out
+
+
+def find_id(ctx, ident):
+    """Resolve 'id' or 'path#id' in the staged collection -> (path, id) or None."""
+    path, sep, frag = ident.partition("#")
+    if not sep:
+        path, frag = "", ident
+    for p, s in ctx.staged.specs.items():
+        if frag in s.elems and (not path or canon(path) == p or repo_rel(p) == path):
+            return p, frag
+    return None
+
+
+def item(kind, key, title, mech, evidence="", excerpt="", question="", detail=""):
+    return {"kind": kind, "key": f"{kind}:{key}", "title": title, "mech": mech,
+            "evidence": evidence, "excerpt": excerpt, "question": question,
+            "detail": detail}
+
+
+def change_window(before, after, width=240):
+    """(before, after) excerpts starting just ahead of their first difference,
+    so the evidence shows what changed rather than an unchanged opening."""
+    before, after = before or "", after or ""
+    i = 0
+    while i < min(len(before), len(after)) and before[i] == after[i]:
+        i += 1
+    start = max(0, i - 60)
+    lead = "\u2026" if start else ""
+    return lead + shorten(before[start:], width), lead + shorten(after[start:], width)
+
+
+def sealed_excerpt(before, after):
+    if not after:
+        return f"was: {shorten(before, 300)}\nnow: (absent)"
+    was, now = change_window(before, after, 300)
+    return f"was: {was}\nnow: {now}"
+
+
+def digest(*parts):
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()
+
+
+def gather(col, subject, request):
+    """Read the candidate once: staged and HEAD collections, changed claims."""
     root = repo_root()
-    if root is None:
-        return rc
-    named, is_seed = gate_claims(msg_path)
-    edges = [(fp, l, tp, fr) for fp, l, tp, fr in col.depends_on_edges()
-             if l["src"] is not None]
-    if head_status() == "unborn":
-        for fp, l, tp, fr in sorted(edges, key=lambda e: (addr(e[0], e[1]["src"]), addr(e[2], e[3]))):
-            print(f"  warn: first commit: {addr(fp, l['src'])} depends-on "
-                  f"{addr(tp, fr)} is new (no committed state to owe against)")
-        return rc
+    ctx = GateContext(staged=col, subject=subject or "", request=request, root=root,
+                      head_state=head_status(), head_specs={}, head=None, notes=[],
+                      baseline_error=None)
+    if ctx.head_state == "ok":
+        try:
+            ctx.head = head_collection(col)
+            ctx.head_specs = dict(ctx.head.specs)
+        except HistoryUnavailable as e:
+            ctx.baseline_error = str(e)
+        # Files that left the collection keep their HEAD claims in view.
+        for n in git("diff", "--cached", "--name-only", "HEAD", cwd=root).splitlines():
+            p = canon(os.path.join(root, n))
+            if n.endswith(".html") and p not in ctx.head_specs and p in col.specs:
+                try:
+                    s = file_at("HEAD", p)
+                except HistoryUnavailable:
+                    s = None
+                if s is not None:
+                    ctx.head_specs[p] = s
+    ctx.changed = changed_claims(ctx.head_specs, col.specs)
+    ctx.rows = changed_rows(ctx)
+    return ctx
+
+
+def mechanical_items(ctx, today):
+    items = []
+    col, subject = ctx.staged, ctx.subject
+    main_rel = repo_rel(col.main)
+    req = ctx.request
+    if req is None or req.get("main") != main_rel:
+        items.append(item("request", "open", "no open request for " + main_rel, True,
+                          detail="run " + command(col, "start") + " and read every governing "
+                                 "spec whole before committing"))
+    for f in check_structure(col):
+        items.append(item("structure", f, f, True))
+    if ctx.baseline_error:
+        items.append(item("baseline", "head", "HEAD collection unreadable: "
+                          + ctx.baseline_error, True,
+                          detail="sealed claims and obligations cannot be evaluated; "
+                                 "fetch or repair history"))
+    # subject: vocabulary and shape
+    main = col.specs.get(col.main)
+    decls = commit_type_decls(main) if main else []
+    if not subject:
+        items.append(item("subject", "missing", "no subject", True,
+                          detail="run " + command(col, "reconcile", "--subject", "type: transition")))
+    else:
+        prefix, sep, rest = subject.partition(":")
+        if len(decls) != 1:
+            ctx.notes.append("commit vocabulary not enforced (no single data-commit-types "
+                             "declaration in main)")
+        elif not sep or not prefix.strip():
+            items.append(item("subject", "type", f"subject {subject!r} has no `type:` prefix",
+                              True, detail="declared types: " + decls[0]))
+        elif prefix.strip() not in decls[0].split():
+            items.append(item("subject", "type", f"type {prefix.strip()!r} is not declared",
+                              True, detail="declared types: " + decls[0]))
+        if subject_type(subject, "review") is None and len(subject) > SUBJECT_MAX:
+            items.append(item("subject", "long", f"subject is {len(subject)} characters "
+                              f"(> {SUBJECT_MAX})", True,
+                              detail="one transition per subject; rationale lives in the spec"))
+        if ";" in subject:
+            items.append(item("subject", "chain", "subject chains clauses with ';'", True,
+                              detail="one transition per commit; split the commit"))
+    # content shape of claims this commit adds or changes
+    for (p, eid), kind in sorted(ctx.changed.items()):
+        if kind == "removed" or p not in col.specs:
+            continue
+        s = col.specs[p]
+        name = addr(p, eid)
+        text = s.text(eid)
+        tag = s.tags.get(eid)
+        raw = s.element(eid)
+        visible = re.sub(r"<code\b[^>]*>.*?</code>", " ", raw, flags=re.S)
+        if PLACEHOLDER_ID.match(eid) or (text and PLACEHOLDER_TEXT.fullmatch(text)):
+            items.append(item("placeholder", name, f"{name} is a placeholder", True,
+                              detail="commit real content or nothing"))
+        elif tag in EMPTY_CHECKED and not text:
+            items.append(item("empty", name, f"{name} is empty", True,
+                              detail="an element carries a complete claim or is not committed"))
+        if tag == "tr" and text:
+            cells = [claim_text(c) for c in re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", raw, re.S)]
+            if any(not c or PLACEHOLDER_TEXT.fullmatch(c) for c in cells):
+                items.append(item("empty", name + " cell", f"{name} has an empty or "
+                                  f"placeholder cell", True))
+        own_text, own_links = own_parts(s, eid)
+        provisional = PROVISIONAL_ROW_RE if tag == "tr" else PROVISIONAL_RE
+        if provisional.search(own_text) and not own_links:
+            items.append(item("provisional", name, f"{name} states a provisional value "
+                              "without linking the item that closes it", True,
+                              detail="link the open item (P6)"))
+        if CAVEAT_RE.search(norm(visible)):
+            items.append(item("caveat", name, f"{name} carries an inline temporal caveat", True,
+                              detail="caveats live in watch entries; mark [WATCH] and link one"))
+        if "[WATCH]" in norm(visible) and not links_watch(col, p, own_links):
+            items.append(item("caveat", name + " watch", f"{name} has a [WATCH] marker "
+                              f"without a link to its watch entry (a row whose id starts "
+                              f"with {WATCH_PREFIX})", True))
+    items += watch_items(col, today)
+    items += obligation_items(ctx)
+    for p, s in col.specs.items():
+        if s.retired_changes:
+            ctx.notes.append(f"{rel(p)}: data-changes is retired and ignored; a sealed change "
+                             "is answered as a decision change or a correction")
+    return items
+
+
+def watch_entries(col):
+    """[(path, id, until or None)] for every watch entry in the collection."""
+    out = []
+    for p, s in col.specs.items():
+        until = {eid: value for eid, value, _ in s.watches if eid}
+        for eid in s.ids:
+            if eid.startswith(WATCH_PREFIX) and s.tags.get(eid) == "tr":
+                out.append((p, eid, until.get(eid)))
+    return out
+
+
+def links_watch(col, p, links):
+    """True when one of LINKS (href, rel) from file P targets a watch entry."""
+    for href, _ in links:
+        tp, fr = resolve(p, href)
+        tp = tp or p
+        if fr and fr.startswith(WATCH_PREFIX) and tp in col.specs \
+                and col.specs[tp].tags.get(fr) == "tr":
+            return True
+    return False
+
+
+def watch_items(col, today):
+    """Mechanical items: watch entries whose data-watch-until has passed or is
+    not a date. Misplaced attributes are structural failures (check)."""
+    out = []
+    for p, eid, value in watch_entries(col):
+        if value is None:
+            continue
+        name = addr(p, eid)
+        try:
+            until = datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            out.append(item("watch", name + " date", f"{name}: data-watch-until={value!r} "
+                            "is not a YYYY-MM-DD date", True))
+            continue
+        if until < today:
+            out.append(item("watch", name, f"watch entry {name} expired {value}", True,
+                            detail="close it, or extend its date on purpose"))
+    return out
+
+
+def watch_line(col):
+    entries = watch_entries(col)
+    if not entries:
+        return "WATCH ENTRIES: none"
+    return f"WATCH ENTRIES ({len(entries)}): " + ", ".join(
+        addr(p, eid) + (f" (until {until})" if until else "") for p, eid, until in entries)
+
+
+def obligation_items(ctx):
+    """The review gate: debt already outstanding at HEAD, retirement of a
+    surviving claim's dependency, and unknown history block unless this is a
+    review: commit naming the claim or a seed: boundary for its file."""
+    col = ctx.staged
+    root = ctx.root
+    named, is_seed = subject_claims(ctx.subject)
+    out = []
+    if ctx.head_state != "ok":
+        for fp, l, tp, fr in col.depends_on_edges():
+            if l["src"] is not None and ctx.head_state == "unborn":
+                ctx.notes.append(f"first commit: {addr(fp, l['src'])} depends-on "
+                                 f"{addr(tp, fr)} is new (no committed state to owe against)")
+        if ctx.head_state == "broken":
+            out.append(item("baseline", "broken", "HEAD is unresolvable", True,
+                            detail="fetch or repair history"))
+        return out
     pending = set()
     if is_seed:
         for n in git("diff", "--cached", "--name-only", "HEAD", cwd=root).split():
             p = canon(os.path.join(root, n))
             if p in col.specs:
-                pending.add(p)     # scoped to files the seed commit touches
+                pending.add(p)
+    review_hint = lambda d: "clear it with " + command(col, "review", addr(*d))
     try:
         retired = retired_dependencies(col)
     except HistoryUnavailable as e:
-        print(f"  [review-gate] cannot establish dependency retirement: {e}")
-        return 1
+        out.append(item("review", "retirement", f"dependency retirement cannot be "
+                        f"established: {e}", True))
+        retired = []
     for fp, link, tp, fr in retired:
         name = f"{repo_rel(fp)}#{link['src']}"
         if fp not in pending and name not in named:
-            print(f"  [review-gate] {name}: dependency removed or redirected "
-                  f"({addr(tp, fr)}); assess the surviving claim and record: "
-                  f"{command(col, 'review', addr(fp, link['src']))}")
-            rc = 1
+            out.append(item("review", name + " retired", f"{name}: dependency on "
+                            f"{addr(tp, fr)} removed or redirected", True,
+                            detail="assess the surviving claim; "
+                                   + review_hint((fp, link["src"]))))
     cand = owed_reviews(col, basis="staged", pending_seeds=pending)
     try:
         head_owed = owed_reviews(SimpleNamespace(
             depends_on_edges=lambda: iter(head_edges(col, root))))
     except HistoryUnavailable as e:
         head_owed = [{"dependent": (fp, l["src"]), "target": (tp, fr), "kind": "unknown",
-                      "baseline": None, "note": str(e)} for fp, l, tp, fr in edges]
+                      "baseline": None, "note": str(e)}
+                     for fp, l, tp, fr in col.depends_on_edges() if l["src"] is not None]
 
     def key(r):
         return (r["dependent"][0], r["target"][0], r["target"][1])
+
+    def dep_name(r):
+        return f"{repo_rel(r['dependent'][0])}#{r['dependent'][1]}"
     head_by_key = {}
     for r in head_owed:
         head_by_key.setdefault(key(r), []).append(r)
     cand_keys = {key(r) for r in cand}
-
-    def dep_name(r):
-        return f"{repo_rel(r['dependent'][0])}#{r['dependent'][1]}"
     for r in sorted(cand, key=lambda r: (dep_name(r), addr(*r["target"]))):
         priors = head_by_key.get(key(r), [])
-        unknown = r["kind"] == "unknown" or any(p["kind"] == "unknown" for p in priors)
-        if unknown:
+        label = f"{dep_name(r)} depends-on {addr(*r['target'])}"
+        if r["kind"] == "unknown" or any(p["kind"] == "unknown" for p in priors):
             if dep_name(r) not in named:
                 why = r["note"] if r["kind"] == "unknown" else priors[0]["note"]
-                print(f"  [review-gate] {dep_name(r)} depends-on {addr(*r['target'])}: "
-                      f"clearance cannot be established (unknown history: {why})")
-                print("      recover: fetch sufficient history (git fetch --unshallow for a "
-                      "shallow clone), or record a review:")
-                print(f"        {command(col, 'review', addr(*r['dependent']))}")
-                rc = 1
+                out.append(item("review", label, f"{label}: clearance cannot be established "
+                                f"(unknown history: {why})", True,
+                                detail="fetch sufficient history (git fetch --unshallow for a "
+                                       "shallow clone), or " + review_hint(r["dependent"])))
         elif priors:
             if dep_name(r) not in named:
-                print(f"  [review-gate] {dep_name(r)} depends-on {addr(*r['target'])} "
-                      f"was already owed at HEAD; clear it with: "
-                      f"{command(col, 'review', addr(*r['dependent']))}")
-                rc = 1
+                out.append(item("review", label, f"REVIEW OWED {label} [{r['kind']}]", True,
+                                detail=review_hint(r["dependent"])))
         else:
-            print(f"  warn: this commit creates a review obligation {dep_name(r)} "
-                  f"depends-on {addr(*r['target'])} [{r['kind']}]")
+            ctx.notes.append(f"this commit creates a review obligation {label} [{r['kind']}]")
     for r in sorted(head_owed, key=lambda r: (dep_name(r), addr(*r["target"]))):
         if key(r) in cand_keys:
             continue
-        d, t = r["dependent"], r["target"]
-        if d[0] in pending:
-            print(f"  note: {dep_name(r)} depends-on {addr(*t)} is discarded by this "
-                  f"commit's seed boundary")
+        label = f"{dep_name(r)} depends-on {addr(*r['target'])}"
+        if r["dependent"][0] in pending:
+            ctx.notes.append(f"{label} is discarded by this commit's seed boundary")
             continue
         cause, blocks = disappear_cause(r, col)
         if dep_name(r) in named:
-            continue                 # the explicit review records this disposition
+            continue
         if blocks:
-            print(f"  [review-gate] {dep_name(r)} depends-on {addr(*t)}: {cause}")
-            rc = 1
+            out.append(item("review", label + " left", f"{label}: {cause}", True,
+                            detail=review_hint(r["dependent"])))
         else:
-            print(f"  note: {dep_name(r)} depends-on {addr(*t)} left at HEAD: {cause}")
-    return rc
+            ctx.notes.append(f"{label} left at HEAD: {cause}")
+    return out
+
+
+def judgment_items(ctx):
+    items = []
+    col = ctx.staged
+    start = (ctx.request or {}).get("start") or "unborn"
+    # read whole: main, every collection file this commit edits, and files
+    # holding targets of dependencies declared in edited files
+    edited = {p for (p, _), _ in ctx.changed.items() if p in col.specs}
+    if ctx.head_state == "ok":
+        for n in git("diff", "--cached", "--name-only", "HEAD", cwd=ctx.root).splitlines():
+            p = canon(os.path.join(ctx.root, n))
+            if p in col.specs:
+                edited.add(p)
+    governing = {col.main} | edited
+    for fp, l, tp, fr in col.depends_on_edges():
+        if fp in edited and tp in col.specs:
+            governing.add(tp)
+    for p in sorted(governing, key=lambda p: (p != col.main, rel(p))):
+        lines = len(col.specs[p].raw.splitlines())
+        items.append(item("read", rel(p), f"read {rel(p)} whole", False,
+                          evidence=digest(repo_rel(p), start),
+                          excerpt=f"{rel(p)} — {lines} lines as staged",
+                          question=f"Have you read {rel(p)} whole in this request — every line, "
+                                   "in sequential pages, with no skipped ranges and no search "
+                                   "standing in for reading?"))
+    # sealed claims: decision change or correction
+    if ctx.head_state == "ok" and not ctx.baseline_error:
+        for p, s in ctx.head.specs.items():
+            for i in s.sealed:
+                name = f"{repo_rel(p)}#{i}"
+                try:
+                    staged = file_staged(p)
+                except HistoryUnavailable as e:
+                    items.append(item("baseline", name, f"staged tree unreadable for {name}: {e}",
+                                      True))
+                    continue
+                cause = None
+                if staged is None:
+                    cause = "file deleted"
+                elif p not in col.specs:
+                    cause = "file leaves the collection (its split row is gone)"
+                elif i not in staged.elems:
+                    cause = "claim deleted or id changed"
+                elif i not in staged.sealed:
+                    cause = "data-sealed marker removed"
+                elif staged.text(i) != s.text(i):
+                    cause = "content changed"
+                if cause:
+                    now = staged.text(i) if staged is not None and i in staged.elems else ""
+                    items.append(item("sealed", name, f"sealed claim {name}: {cause}", False,
+                                      evidence=digest(cause, s.text(i) or "", now or ""),
+                                      excerpt=sealed_excerpt(s.text(i), now),
+                                      question=f"{name} is sealed and this commit changes it "
+                                               f"({cause}). Is this a decision change (a decision "
+                                               "row added or changed in this commit) or a "
+                                               "correction (state the reason)?"))
+    # removed decision rows
+    current = {(p, rid) for p, sp in col.specs.items() for rid, _ in sp.rows()}
+    moved = {(rid, norm(row)) for sp in col.specs.values() for rid, row in sp.rows()}
+    for p, sp in sorted(ctx.head_specs.items()):
+        for rid, row in sp.rows():
+            if (p, rid) not in current and (rid, norm(row)) not in moved:
+                name = addr(p, rid)
+                items.append(item("removed", name, f"decision row {name} removed", False,
+                                  evidence=digest(norm(row)),
+                                  excerpt=shorten(norm(row), 400),
+                                  question=f"Decision {name} was removed. Was it replaced "
+                                           "(name the successor row, which keeps the displaced "
+                                           "choice in its rejected cell), or retired (no fresh "
+                                           "session would re-propose its alternative)?"))
+    # a fix: is the cause established?
+    if subject_type(ctx.subject, "fix") is not None:
+        paths = sorted({n for n in git("diff", "--cached", "--name-only", "HEAD", cwd=ctx.root)
+                        .splitlines()} if ctx.head_state == "ok" else [])
+        records = cause_records(ctx)
+        excerpt = f"subject: {ctx.subject}\nfiles: {', '.join(paths) or 'none'}"
+        excerpt += "".join(f"\n{label} {addr(p, eid)} ({kind}): {shorten(text, 240)}"
+                           for label, p, eid, kind, text in records) or \
+            "\nno watch entry or diagnostic-register row is added or changed in this commit"
+        items.append(item("cause", "fix", "is the cause established?", False,
+                          evidence=digest(ctx.subject, *paths,
+                                          *[f"{addr(p, e)}={t}" for _, p, e, _, t in records]),
+                          excerpt=excerpt,
+                          question="This commit is typed fix. A failure seen once gets a watch "
+                                   "entry, added or updated in this commit, recording symptom, "
+                                   "date, diagnosis, fix and the condition that closes it. Is "
+                                   "the cause established (name the entry and what established "
+                                   "it) or unverified (name the entry)? If this failure recurred "
+                                   "with the same diagnosis, name the diagnostic-register row "
+                                   "added or updated in this commit."))
+    # one-hop neighbors of changed claims and of changed text outside any claim
+    neighbors = {}
+    for tp, fr, label, snippet in unanchored_links(ctx):
+        neighbors.setdefault((tp, fr), set()).add((label, snippet, snippet))
+    for (p, eid), kind in ctx.changed.items():
+        if kind == "removed" or p not in col.specs:
+            continue
+        s = col.specs[p]
+        for l in s.links:
+            if l["src"] != eid:
+                continue
+            tp, fr = resolve(p, l["href"])
+            tp = tp or p
+            if fr and tp in col.specs and fr in col.specs[tp].elems:
+                neighbors.setdefault((tp, fr), set()).add(claim_rel(ctx, p, eid, "cited by"))
+    for q, sq in col.specs.items():
+        for l in sq.links:
+            if not l["src"]:
+                continue
+            tp, fr = resolve(q, l["href"])
+            if fr is None:
+                continue
+            tp = tp or q
+            if ctx.changed.get((tp, fr)) in ("added", "changed"):
+                neighbors.setdefault((q, l["src"]), set()).add(claim_rel(ctx, tp, fr, "cites"))
+    for (np_, nid), rels in sorted(neighbors.items(), key=lambda kv: addr(*kv[0])):
+        if (np_, nid) in ctx.changed:
+            continue
+        ns = col.specs[np_]
+        ntext = ns.text(nid) or ""
+        rels = sorted(rels)
+        name = addr(np_, nid)
+        lines = [f"{name}: {shorten(ntext, 300)}"]
+        lines += [f"  {label}: {snippet}" for label, snippet, _ in rels]
+        items.append(item("neighbor", name, f"neighbor {name}", False,
+                          evidence=digest(ntext, *[ev for _, _, ev in rels]),
+                          excerpt="\n".join(lines),
+                          question=f"Does {name} still hold against the changed claims it "
+                                   "cites or is cited by? If not, fix it in the files."))
+    order = {k: n for n, k in enumerate(QUESTION_ORDER)}
+    return sorted(items, key=lambda it: (it["mech"], order.get(it["kind"], 99)))
+
+
+def cause_records(ctx):
+    """Watch entries and diagnostic-register rows this commit adds or changes:
+    the records a fix's cause answer names. Their text is part of the cause
+    item's evidence, so rewriting one reopens the answer."""
+    out = []
+    for (p, eid), kind in sorted(ctx.changed.items()):
+        if kind == "removed" or p not in ctx.staged.specs:
+            continue
+        s = ctx.staged.specs[p]
+        if s.tags.get(eid) != "tr":
+            continue
+        if eid.startswith(WATCH_PREFIX):
+            out.append(("watch entry", p, eid, kind, s.text(eid) or ""))
+        elif any(a <= s.elems[eid][0] < b for a, b in diagnostic_spans(s)):
+            out.append(("diagnostic row", p, eid, kind, s.text(eid) or ""))
+    return out
+
+
+def claim_rel(ctx, p, eid, how):
+    """A neighbor relation to a changed claim: (label, excerpt, evidence)."""
+    was = ctx.head_specs[p].text(eid) if p in ctx.head_specs else None
+    now_text = ctx.staged.specs[p].text(eid)
+    _, now = change_window(was, now_text, 200)
+    return (f"{how} {addr(p, eid)} ({ctx.changed[(p, eid)]})", now,
+            f"{addr(p, eid)}={now_text}")
+
+
+def unanchored_links(ctx):
+    """Links on changed lines outside every id'd element. -> [(target path,
+    id, label, excerpt)]. Such text has no id, so nothing can refer to it;
+    the claims it links to are its only traceable neighbors."""
+    out = []
+    if ctx.head_state != "ok":
+        return out
+    for p, s in sorted(ctx.staged.specs.items()):
+        if p not in ctx.head_specs:
+            continue
+        diff = git("diff", "--cached", "-U0", "--no-color", "HEAD", "--", repo_rel(p),
+                   cwd=ctx.root)
+        hs = ctx.head_specs[p]
+        old_line = new_line = 0
+        for text in diff.splitlines():
+            m = HUNK_RE.match(text)
+            if m:
+                old_line, new_line = int(m.group(1)), int(m.group(2))
+                continue
+            if text.startswith(("+++", "---")) or text[:1] not in "+-":
+                continue
+            # a removed line is placed in HEAD's file, an added one in the candidate's
+            spec, n = (hs, old_line) if text[0] == "-" else (s, new_line)
+            if text[0] == "-":
+                old_line += 1
+            else:
+                new_line += 1
+            if not 0 < n <= len(spec._lines):
+                continue
+            start = spec._lines[n - 1]
+            end = spec._lines[n] if n < len(spec._lines) else len(spec.raw)
+            for l in spec.links:
+                if l["src"] is not None or not start <= l["off"] < end:
+                    continue
+                tp, fr = resolve(p, l["href"])
+                tp = tp or p
+                if fr and tp in ctx.staged.specs and fr in ctx.staged.specs[tp].elems:
+                    where = "added" if text[0] == "+" else "removed"
+                    out.append((tp, fr, f"cited by text {where} outside any claim in {rel(p)}",
+                                shorten(text[1:].strip(), 200)))
+    return out
+
+
+# ---- state in Git metadata
+
+def state_path(name):
+    return os.path.join(git("rev-parse", "--absolute-git-dir").strip(), "lspec", name)
+
+
+def read_state(name):
+    try:
+        with open(state_path(name), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def write_state(name, data):
+    path = state_path(name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + name, dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, sort_keys=True, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def remove_state(name):
+    try:
+        os.unlink(state_path(name))
+    except FileNotFoundError:
+        pass
+
+
+def secret():
+    path = state_path("secret")
+    try:
+        with open(path, encoding="ascii") as f:
+            value = f.read().strip()
+        if len(value) >= 32:
+            return value.encode()
+    except FileNotFoundError:
+        pass
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    value = os.urandom(32).hex()
+    with open(path, "w", encoding="ascii") as f:
+        f.write(value + "\n")
+    return value.encode()
+
+
+def token(it):
+    return hmac.new(secret(), (it["key"] + "\0" + it["evidence"]).encode(),
+                    hashlib.sha256).hexdigest()[:8]
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def head_sha():
+    return git("rev-parse", "HEAD").strip() if head_status() == "ok" else None
+
+
+def file_sha256(path):
+    digest_ = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest_.update(chunk)
+    return digest_.hexdigest()
+
+
+def index_sha256():
+    """The staged candidate: paths, modes, object ids and conflict stages of
+    Git's selected index (stat-cache data excluded)."""
+    r = subprocess.run(["git", "ls-files", "--stage", "-z"], capture_output=True,
+                       env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"), cwd=repo_root())
+    if r.returncode:
+        raise RuntimeError(r.stderr.decode(errors="replace").strip() or "cannot read the index")
+    return hashlib.sha256(r.stdout).hexdigest()
+
+
+# ---- answers
+
+def legal_forms(kind):
+    """Printable legal answers for an item kind."""
+    forms = []
+    for answer, (needs_ref, needs_reason) in ANSWERS[kind].items():
+        form = "--answer " + answer
+        if needs_ref:
+            form += " --ref " + REF_NAMES[answer]
+        if needs_reason:
+            form += ' --reason "TEXT"'
+        forms.append(form)
+    return forms
+
+
+def diagnostic_spans(spec):
+    """Offset ranges of explicitly named diagnostic registers in SPEC."""
+    spans = []
+    for eid, (start, end) in spec.elems.items():
+        if re.fullmatch(r"diagnostic(?:[-_]register)?", eid, re.I):
+            if re.fullmatch(r"h[1-6]", spec.tags[eid]):
+                level = int(spec.tags[eid][1])
+                following = re.search(r"<h[1-" + str(level) + r"]\b", spec.raw[end:], re.I)
+                end = end + following.start() if following else len(spec.raw)
+            spans.append((start, end))
+    for match in re.finditer(r"<h([1-6])\b[^>]*>(.*?)</h\1>", spec.raw, re.S | re.I):
+        if "diagnostic register" in norm(match[2]).lower():
+            following = re.search(r"<h[1-" + match[1] + r"]\b", spec.raw[match.end():], re.I)
+            end = match.end() + following.start() if following else len(spec.raw)
+            spans.append((match.start(), end))
+    return spans
+
+
+def validate(it, given, ctx, other_reasons):
+    """GIVEN is {"answer", "ref", "reason"}. -> (answer list, trailer or None)
+    for a legal answer; raise ValueError naming what is wrong."""
+    kind = it["kind"]
+    answer = (given.get("answer") or "").strip()
+    ref = (given.get("ref") or "").strip()
+    text = " ".join((given.get("reason") or "").split())
+    forms = " | ".join(legal_forms(kind))
+    if not answer:
+        raise ValueError("no answer given; legal answers: " + forms)
+    if answer not in ANSWERS[kind]:
+        raise ValueError(f"{answer!r} is not a legal answer here; legal answers: " + forms)
+    needs_ref, needs_reason = ANSWERS[kind][answer]
+    if needs_ref and not ref:
+        raise ValueError(f"{answer} needs --ref {REF_NAMES[answer]}")
+    if ref and not needs_ref:
+        raise ValueError(f"{answer} takes no --ref")
+    if needs_reason and not text:
+        raise ValueError(f'{answer} needs --reason "TEXT"')
+    if text and not needs_reason:
+        raise ValueError(f"{answer} takes no --reason")
+    name = it["key"].split(":", 1)[1]
+    if needs_reason:
+        if len(text.split()) < 3:
+            raise ValueError("a reason of at least three words is required")
+        if text.casefold() in other_reasons:
+            raise ValueError("this reason is already recorded for another item; "
+                             "each answer states its own reason")
+
+    def changed_row(what):
+        """REF as an id'd table row added or changed in this commit."""
+        found = find_id(ctx, ref)
+        if found is None:
+            raise ValueError(f"no {what} {ref!r} in the staged collection")
+        p, eid = found
+        if ctx.staged.specs[p].tags.get(eid) != "tr":
+            raise ValueError(f"{ref} is not a table row; a {what} is a row")
+        if ctx.changed.get(found) not in ("added", "changed"):
+            raise ValueError(f"{ref} is not added or changed in this commit; record the "
+                             f"{what} in the same commit")
+        return found
+
+    if kind in ("read", "neighbor"):
+        return [answer], None
+    if kind in ("sealed", "removed"):
+        if needs_reason:
+            verb = "correction" if kind == "sealed" else "retired"
+            trailer = (f"Reconciled: correction {name} \u2014 {text}" if kind == "sealed"
+                       else f"Reconciled: {name} retired \u2014 {text}")
+            return [verb, text], trailer
+        p, rid = changed_row("decision row")
+        if not rid.startswith("dl-"):
+            raise ValueError(f"{ref} is not a decision row (dl- id)")
+        if kind == "sealed":
+            return [answer, rid], f"Reconciled: decision {name} by {rid}"
+        return [answer, rid], f"Reconciled: {name} replaced by {rid}"
+    # cause
+    if answer == "recurrence":
+        p, rid = changed_row("diagnostic-register row")
+        off = ctx.staged.specs[p].elems[rid][0]
+        if not any(a <= off < b for a, b in diagnostic_spans(ctx.staged.specs[p])):
+            raise ValueError(f"{ref} is not inside a diagnostic register (an element with id "
+                             "diagnostic, or a heading titled Diagnostic register)")
+        return [answer, addr(p, rid)], f"Reconciled: recurrence recorded at {addr(p, rid)}"
+    p, wid = changed_row("watch entry")
+    if not wid.startswith(WATCH_PREFIX):
+        raise ValueError(f"{ref} is not a watch entry: a watch entry is a row whose id "
+                         f"starts with {WATCH_PREFIX}")
+    where = addr(p, wid)
+    if answer == "established":
+        return [answer, where, text], (f"Reconciled: cause established, watched at {where} "
+                                        f"\u2014 {text}")
+    return [answer, where], f"Reconciled: cause unverified, watched at {where}"
+
+
+def tick_given(tick):
+    """Recorded answer as GIVEN; older list-form records read as answer only."""
+    if isinstance(tick.get("given"), dict):
+        return tick["given"]
+    return {"answer": (tick.get("answer") or [""])[0]}
+
+
+def tick_reason(tick):
+    return " ".join((tick_given(tick).get("reason") or "").split()).casefold()
+
+
+def evaluate(col, subject=None, today=None):
+    """Compute the checklist and apply recorded ticks. -> (ctx, items, state).
+    Each item gains 'status' (open/answered), 'answer' and 'trailer'."""
+    state = read_state("reconcile.json") or {}
+    request = read_state("request.json")
+    if subject is not None:
+        state["subject"] = subject
+    ctx = gather(col, state.get("subject"), request)
+    today = today or datetime.now().date()
+    items = mechanical_items(ctx, today) + judgment_items(ctx)
+    ticks = state.get("ticks", {})
+    for it in items:
+        it["status"], it["answer"], it["trailer"] = "open", None, None
+    reasons = {}
+    for it in items:
+        tick = ticks.get(it["key"])
+        if it["mech"] or not tick or tick.get("evidence") != it["evidence"]:
+            continue
+        others = {r for k, r in reasons.items() if k != it["key"]}
+        try:
+            answer, trailer = validate(it, tick_given(tick), ctx, others)
+        except ValueError as e:
+            it["stale"] = str(e)
+            continue
+        it["status"], it["answer"], it["trailer"] = "answered", answer, trailer
+        if tick_reason(tick):
+            reasons[it["key"]] = tick_reason(tick)
+    return ctx, items, state
+
+
+def issue_or_clear(col, ctx, items, state):
+    """Write the receipt when nothing is open; otherwise remove any receipt."""
+    open_ = [it for it in items if it["status"] == "open"]
+    if open_ or not ctx.subject:
+        remove_state("receipt.json")
+        return None
+    answered = [it for it in items if not it["mech"]]
+    check = digest(*sorted(f"{it['key']}={' '.join(it['answer'])}" for it in answered))[:10]
+    trailers = [f"Reconciled: checklist {check} ({len(answered)} answered)"]
+    trailers += [it["trailer"] for it in answered if it["trailer"]]
+    receipt = {"format": 2, "main": repo_rel(col.main), "head": head_sha(),
+               "index_sha256": index_sha256(), "checker_sha256": file_sha256(__file__),
+               "subject": ctx.subject, "body": state.get("body") or "",
+               "trailers": trailers, "issued_at": now_iso()}
+    write_state("receipt.json", receipt)
+    return receipt
+
+
+def receipt_problem():
+    """None when the receipt matches this candidate; otherwise why not."""
+    receipt = read_state("receipt.json")
+    if receipt is None:
+        return "no reconcile receipt for this candidate"
+    fields = {"format", "main", "head", "index_sha256", "checker_sha256", "subject",
+              "body", "trailers", "issued_at"}
+    if set(receipt) != fields or receipt["format"] != 2:
+        return "malformed reconcile receipt"
+    try:
+        if receipt["head"] != head_sha():
+            return "no reconcile receipt for this candidate (the last one predates HEAD)"
+        if receipt["index_sha256"] != index_sha256():
+            return "the staged state changed since reconcile"
+    except (RuntimeError, OSError) as e:
+        return f"cannot compare the candidate: {e}"
+    if receipt["checker_sha256"] != file_sha256(__file__):
+        return "the checker being committed differs from the one that ran reconcile"
+    return None
+
+
+def compose_message(receipt, provided=""):
+    lines = [l for l in provided.splitlines() if not l.startswith("#")]
+    extra = [l for l in lines[1:] if TRAILER_RE.match(l) and not l.startswith("Reconciled:")]
+    msg = receipt["subject"] + "\n"
+    if receipt["body"].strip():
+        msg += "\n" + receipt["body"].strip() + "\n"
+    return msg + "\n" + "\n".join(extra + receipt["trailers"]) + "\n"
+
+
+def message_problem(receipt, text):
+    lines = [l.rstrip() for l in text.splitlines() if not l.startswith("#")]
+    subject = next((l.strip() for l in lines if l.strip()), "")
+    if subject != receipt["subject"]:
+        return f"the message subject {subject!r} is not the reconciled subject"
+    if [l for l in lines if l.startswith("Reconciled:")] != receipt["trailers"]:
+        return "the Reconciled: trailers do not match the receipt"
+    return None
 
 
 def working_changes(root):
@@ -1524,90 +2171,6 @@ def working_changes(root):
         if y != " ":
             changes.append(("unstaged", path, old))
     return changes
-
-
-def cmd_clean():
-    """check --clean: the session-completion check. Report staged, unstaged,
-    and untracked (non-ignored) files repo-wide; nonzero while any remain.
-    Read-only: it neither stages, commits, discards, nor repairs, and a clean
-    result proves only that nothing was outstanding when invoked."""
-    root = repo_root()
-    if root is None:
-        print("lspec check --clean: not a git checkout", file=sys.stderr)
-        return 2
-    changes = working_changes(root)
-    try:
-        head = git("rev-parse", "--short", "HEAD", cwd=root).strip()
-    except (RuntimeError, OSError):
-        head = "no commits yet"
-    print(f"basis {head}")
-    n = len(changes)
-    if not n:
-        print("CLEAN — no staged, unstaged, or untracked changes")
-        return 0
-    print(f"UNCLEAN — {n} file(s) outstanding:")
-    for label in ("staged", "unstaged", "untracked"):
-        for kind, pth, _ in changes:
-            if kind == label:
-                print(f"  {label}: {pth}")
-    print("  record or discard the changes; --clean never does either itself")
-    return 1
-
-
-DIAGNOSIS_REMINDER = ("If this fixes a previously diagnosed failure, record "
-                      "symptom · distinguishing evidence · fix.")
-
-
-def diagnostic_text(spec):
-    """Recognize explicitly named diagnostic registers, not arbitrary fixes."""
-    if spec is None:
-        return ()
-    regions = []
-    for eid in spec.elems:
-        if re.fullmatch(r"diagnostic(?:[-_]register)?", eid, re.I):
-            start, end = spec.elems[eid]
-            if re.fullmatch(r"h[1-6]", spec.tags[eid]):
-                level = int(spec.tags[eid][1])
-                following = re.search(r"<h[1-" + str(level) + r"]\b", spec.raw[end:], re.I)
-                end = end + following.start() if following else len(spec.raw)
-            regions.append(norm(spec.raw[start:end]))
-    # Also recognize a titled register without a prescribed id.
-    for match in re.finditer(r"<h([1-6])\b[^>]*>(.*?)</h\1>", spec.raw, re.S | re.I):
-        if "diagnostic register" in norm(match[2]).lower():
-            following = re.search(r"<h[1-" + match[1] + r"]\b", spec.raw[match.end():], re.I)
-            end = match.end() + following.start() if following else len(spec.raw)
-            regions.append(norm(spec.raw[match.start():end]))
-    return tuple(regions)
-
-
-def change_reminders(col, base, fix=False):
-    """Advisory questions only; never change a check's exit status."""
-    if not require_commit(base):
-        if fix:
-            print("  reminder [recurring-failure]: " + DIAGNOSIS_REMINDER)
-        return
-    previous = Collection(rel(col.main), basis=base)
-    if col.main not in previous.specs and base == "HEAD":
-        old = renamed_from(repo_root(), col.main)
-        if old:
-            previous = Collection(old, basis=base)
-    if previous.fails:
-        print("  note: change reminders unavailable: baseline collection incomplete")
-        return
-    current_rows = {(p, rid) for p, spec in col.specs.items() for rid, _ in spec.rows()}
-    # A row moved with a file or split retains its id and text; do not call it deleted.
-    moved_rows = {(rid, norm(row)) for spec in col.specs.values() for rid, row in spec.rows()}
-    for p, spec in previous.specs.items():
-        for rid, row in spec.rows():
-            if (p, rid) not in current_rows and (rid, norm(row)) not in moved_rows:
-                print(f"  reminder [decision-removed] {addr(p, rid)}: Was this decision "
-                      "replaced? Preserve the displaced choice and reason in its replacement; "
-                      "otherwise confirm this row no longer needs retaining.")
-    changed_register = any(diagnostic_text(old) and
-                           diagnostic_text(old) != diagnostic_text(col.specs.get(p))
-                           for p, old in previous.specs.items())
-    if fix or changed_register:
-        print("  reminder [recurring-failure]: " + DIAGNOSIS_REMINDER)
 
 
 def unfinished_notice():
@@ -1639,28 +2202,28 @@ def report_structure(col, markers=True):
 
 
 def cmd_check(args):
-    if getattr(args, "finish_receipt", False) and (not getattr(args, "staged", False)
-            or getattr(args, "clean", False)):
-        print("lspec check: --finish-receipt requires --staged and cannot use --clean",
-              file=sys.stderr)
-        return 2
+    """The validator for CI and ad hoc use: structure (working tree, or the
+    index with --staged), neighborhoods, and --clean. Commit gating lives in
+    reconcile; the hooks only match its receipt."""
+    if getattr(args, "finish_receipt", False) or getattr(args, "commit_msg", None):
+        print("lspec check: --finish-receipt and --commit-msg are retired; this hook comes "
+              "from an older lspec. Install the current hooks (README, upgrading an "
+              "instance) and gate commits with reconcile.", file=sys.stderr)
+        return 1
     if getattr(args, "clean", False):
-        if getattr(args, "staged", False) or getattr(args, "commit_msg", None):
+        if getattr(args, "staged", False):
             print("lspec check: --clean stands alone — it reports the working tree and "
                   "index; it is not a staged-tree check", file=sys.stderr)
             return 2
         return cmd_clean()
-    staged = bool(getattr(args, "staged", False) or getattr(args, "commit_msg", None))
+    staged = bool(getattr(args, "staged", False))
     col = load(args, basis="staged" if staged else "worktree")
-    rels = [rel(p) for p in col.specs]
     line, dirty = stamp(staged=staged)
     print(line)
     rc = report_structure(col, markers=not getattr(args, "template", False))
-    if staged:
-        rc = seal_gate(col, rc)
-    if getattr(args, "commit_msg", None) and repo_root() is not None:
-        rc = vocab_gate(col, rc, args.commit_msg)
-        rc = review_gate(col, rc, args.commit_msg)
+    for p, s in col.specs.items():
+        if s.retired_changes:
+            print(f"  note: {rel(p)}: data-changes is retired and ignored")
     if args.neighborhood:
         print()
         neighborhood(col, *col.parse_target(args.neighborhood), semantic=False, staged=staged)
@@ -1676,12 +2239,6 @@ def cmd_check(args):
             neighborhood(col, p, frag, semantic=False, staged=staged)
     if args.neighborhood or args.diff:
         print_semantic()
-    msg = getattr(args, "commit_msg", None)
-    if args.diff or staged:
-        change_reminders(col, args.diff or "HEAD",
-                         fix=bool(msg and subject_type(gate_subject(msg), "fix") is not None))
-    if getattr(args, "finish_receipt", False):
-        rc = receipt_gate(col.main, rc)
     return rc
 
 
@@ -1867,382 +2424,372 @@ def cmd_impact(args):
     return 0
 
 
-def finish_changes(col, head, staged, changes, root):
-    """Map uncommitted evidence through parsed claims/links in all three trees.
-    Comparing both transitions keeps staged changes visible after a worktree revert.
-    Collection membership is not itself evidence that a file's content changed.
-    """
-    collections = (head, staged, col)
-    spec_paths = set().union(*(set(c.specs) for c in collections))
-    changed_paths = {canon(os.path.join(root, name)) for _, path, old in changes
-                     for name in (path, old) if name}
-    print("\nWORKING TREE — " + ("DIRTY (not a failure)" if changes else "CLEAN"))
-    for kind, path, old in changes:
-        p = canon(os.path.join(root, path))
-        was_spec = old and canon(os.path.join(root, old)) in spec_paths
-        label = "spec" if p in spec_paths or was_spec else "other"
-        print(f"  {kind}: {path}" + (f" (from {old})" if old else "") + f" [{label}]")
-    if not changes:
-        print("  no staged, unstaged, or untracked changes")
-
-    affected, mapped = set(), set()
-    has_head = head_status() == "ok"
-    print("\nAFFECTED CLAIM CANDIDATES — parsed changes and declared links only")
-    for p in sorted(changed_paths & spec_paths):
-        # Read actual file versions even if a split row was removed: dropping
-        # collection membership does not mean every claim in that file changed.
-        versions = (file_at("HEAD", p) if has_head else None, file_staged(p),
-                    Spec(p) if os.path.isfile(p) else None)
-        for label, before, after in (("staged", versions[0], versions[1]),
-                                     ("unstaged/untracked", versions[1], versions[2])):
-            cur = after or Spec(p, "")
-            for frag, (kind, detail) in sorted(classify(cur, before).items()):
-                if kind == "unchanged":
-                    if cur.element(frag) == before.element(frag):
-                        continue
-                    kind = "markup"  # href/rel/seal edits can leave rendered text unchanged
-                print(f"  {kind.upper()} {addr(p, frag)} [{label}]"
-                      + (f" (was #{detail})" if kind == "moved" else "")
-                      + (load_hint(col, p) if p in col.specs else " [not in working collection]"))
-                affected.add((p, frag)); mapped.add(p)
-                if kind == "moved":
-                    affected.add((p, detail))
-    # A declared file reference is a reason to inspect its source, never a
-    # claim that filenames alone prove semantic impact or create review debt.
-    for c in collections:
-        for fp, link, tp, frag in c.edges():
-            if tp in changed_paths - spec_paths and link["src"]:
-                affected.add((fp, link["src"])); mapped.add(tp)
-    for p, frag in sorted(affected):
-        neighbors = set()
-        for c in collections:
-            neighbors.update((fp, l["src"]) for fp, l in c.inbound(p, frag))
-            s = c.specs.get(p)
-            if s and frag in s.elems:
-                for l in s.links_in(frag):
-                    tp, fr = resolve(p, l["href"])
-                    if (tp, fr) != (None, None):
-                        neighbors.add((tp or p, fr))
-        neighbors.discard((p, frag))
-        names = ", ".join(addr(*n) for n in sorted(neighbors, key=lambda n: addr(*n)))
-        print(f"  == {addr(p, frag)}; one-hop: {names or 'none declared'}"
-              + (load_hint(col, p) if p in col.specs else " [not in working collection]"))
-    if not affected:
-        print("  none mapped")
-    for p in sorted(changed_paths - mapped):
-        print(f"  UNMAPPED {rel(p)} — no changed parsed claim or declared reference")
-    print("  Mapping is partial: unanchored text, file modes and other changes may "
-          "remain unmapped even within listed files; filenames do not prove semantic impact.")
-    return changed_paths
+def print_checklist(col, ctx, items, receipt):
+    mech = [it for it in items if it["mech"]]
+    judged = [it for it in items if not it["mech"]]
+    open_j = [it for it in judged if it["status"] == "open"]
+    print(f"CHECKLIST — {ctx.subject!r}" if ctx.subject else "CHECKLIST — no subject yet")
+    print(f"  mechanical open: {len(mech)}   judgment open: {len(open_j)}   "
+          f"answered: {len(judged) - len(open_j)}")
+    for it in mech:
+        print(f"  OPEN [{it['kind']}] {it['title']}")
+        if it["detail"]:
+            print(f"      {it['detail']}")
+    if open_j:
+        kinds = {}
+        for it in open_j:
+            kinds[it["kind"]] = kinds.get(it["kind"], 0) + 1
+        print("  judgment items open: " + ", ".join(f"{k} {n}" for k, n in kinds.items())
+              + f" — one at a time: {command(col, 'reconcile', '--next')}")
+    for it in judged:
+        if it.get("stale"):
+            print(f"  REOPENED [{it['kind']}] {it['title']}: {it['stale']}")
+    for n in ctx.notes:
+        print(f"  note: {n}")
+    if receipt:
+        print("RECEIPT — issued for this staged state, subject and answers. Commit with "
+              "`git commit --no-edit`: the hooks write the subject and Reconciled: trailers. "
+              "If the user's OK is needed, pause and ask first; any change means rerunning reconcile.")
+    elif mech:
+        print("Fix the mechanical items in the files, restage, and rerun "
+              + command(col, "reconcile") + ".")
 
 
-def finish_reviews(col, collections, dirty_paths):
-    """Keep committed debt visible even when a pending edit removes its edge."""
-    owed = {}
-    for c in collections:
-        for r in owed_reviews(c, dirty_paths):
-            key = (r["dependent"], r["target"], r["kind"])
-            owed[key] = r
-    retirements = set()
-    for c in collections[1:]:
-        for fp, l, tp, fr in retired_dependencies(c):
-            retirements.add((fp, l["src"], tp, fr))
-    pending = [{"dependent": (fp, src), "target": (tp, fr),
-                "kind": "pending dependency retirement", "baseline": None,
-                "note": "requires a recorded review"}
-               for fp, src, tp, fr in sorted(retirements)]
-    print("\nOUTSTANDING REVIEW OBLIGATIONS — committed baselines and pending retirements")
-    print_owed([*owed.values(), *pending], col=col)
-
-
-# ======================================================== finish receipts
-
-def git_bytes(*args, cwd):
-    """Binary Git output preserves arbitrary filenames and blob contents."""
-    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
-                       env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"))
-    if r.returncode:
-        raise RuntimeError(r.stderr.decode(errors="replace").strip())
-    return r.stdout
-
-
-def file_sha256(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def manifest_sha256(records):
-    # JSON arrays delimit fields; ensure_ascii preserves surrogate-escaped paths.
-    data = json.dumps(records, ensure_ascii=True, separators=(",", ":"))
-    return hashlib.sha256(data.encode("ascii")).hexdigest()
-
-
-def finish_receipt_path():
-    # Each linked worktree has its own Git directory, and therefore its own receipt.
-    gitdir = git("rev-parse", "--absolute-git-dir").strip()
-    return os.path.join(gitdir, "lspec", "finish-receipt.json")
-
-
-def receipt_snapshot(main):
-    """Read content fingerprints without refreshing the index or writing objects.
-    Stat-cache timestamps are intentionally absent. Unsupported file kinds fail
-    closed: a directory/gitlink must never be fingerprinted as if it were empty.
-    """
-    root = canon(repo_root())
-    name = posix(os.path.relpath(canon(main), root))
-    if name == ".." or name.startswith("../"):
-        raise RuntimeError("receipt MAIN must be inside this working tree")
-    state = head_status()
-    if state == "broken":
-        raise HistoryUnavailable("cannot fingerprint unavailable HEAD")
-    head = git("rev-parse", "HEAD").strip() if state == "ok" else None
-    index, paths = [], set()
-    for entry in git_bytes("ls-files", "--stage", "--full-name", "-z", cwd=root).split(b"\0"):
-        if not entry:
-            continue
-        meta, path = entry.split(b"\t", 1)
-        mode, oid, stage = meta.decode("ascii").split()
-        if mode == "160000":
-            raise RuntimeError(f"cannot fingerprint submodule: {os.fsdecode(path)!r}")
-        index.append([os.fsdecode(path), mode, oid, stage])
-        paths.add(path)
-    if head:
-        for entry in git_bytes("ls-tree", "-r", "--full-tree", "-z", head, cwd=root).split(b"\0"):
-            if entry:
-                paths.add(entry.split(b"\t", 1)[1])
-    paths.update(p for p in git_bytes("ls-files", "--others", "--exclude-standard",
-                                     "--full-name", "-z", cwd=root).split(b"\0") if p)
-    metadata_dirs = [canon(git("rev-parse", "--absolute-git-dir").strip()),
-                     canon(git("rev-parse", "--path-format=absolute", "--git-common-dir").strip())]
-    selected_index = canon(git("rev-parse", "--path-format=absolute", "--git-path", "index").strip())
-    working = []
-    for path in sorted(paths):
-        relative = os.fsdecode(path)
-        absolute = os.path.abspath(os.path.join(root, relative))
-        if (any(absolute == d or absolute.startswith(d + os.sep) for d in metadata_dirs)
-                or absolute in (selected_index, selected_index + ".lock", os.path.join(root, ".git"))):
-            continue
-        if os.path.realpath(os.path.dirname(absolute)) != os.path.dirname(absolute):
-            raise RuntimeError(f"cannot fingerprint a path through a symlink directory: {relative!r}")
-        try:
-            mode = os.lstat(absolute).st_mode
-        except FileNotFoundError:
-            working.append([relative, "missing"])
-            continue
-        if stat.S_ISLNK(mode):
-            value = hashlib.sha256(os.fsencode(os.readlink(absolute))).hexdigest()
-            working.append([relative, "120000", value])
-        elif stat.S_ISREG(mode):
-            working.append([relative, "100755" if mode & stat.S_IXUSR else "100644",
-                            file_sha256(absolute)])
+def cmd_reconcile(args):
+    if args.tick and not args.answer:
+        print("lspec reconcile: --tick TOKEN takes its answer as --answer ANSWER, plus "
+              '--ref ID or --reason "TEXT" where the answer needs one; --next prints the '
+              "legal answers", file=sys.stderr)
+        return 2
+    if (args.answer or args.ref or args.reason) and not args.tick:
+        print("lspec reconcile: --answer, --ref and --reason need --tick TOKEN", file=sys.stderr)
+        return 2
+    if repo_root() is None:
+        print("lspec reconcile: not a git checkout", file=sys.stderr)
+        return 2
+    col = load(args, basis="staged")
+    print(stamp(staged=True)[0])
+    state = read_state("reconcile.json") or {}
+    if args.subject is not None:
+        state["subject"] = " ".join(args.subject.split())
+    if args.body is not None:
+        state["body"] = args.body
+    write_state("reconcile.json", state)
+    ctx, items, state = evaluate(col)
+    judged = [it for it in items if not it["mech"]]
+    if args.next:
+        open_j = [it for it in judged if it["status"] == "open"]
+        if not open_j:
+            print("no judgment items open")
         else:
-            raise RuntimeError(f"cannot fingerprint directory, submodule or special file: {relative!r}")
-    return {"format": 1, "main": name, "head": head,
-            "index_sha256": manifest_sha256(sorted(index)),
-            "worktree_sha256": manifest_sha256(working),
-            "checker_sha256": file_sha256(__file__)}
+            it = open_j[0]
+            done = len(judged) - len(open_j)
+            print(f"ITEM {done + 1} of {len(judged)} [{it['kind']}] {it['title']}")
+            if it.get("stale"):
+                print(f"  earlier answer no longer valid: {it['stale']}")
+            print("  evidence:")
+            for line in it["excerpt"].splitlines():
+                print("    " + line)
+            print("  question: " + it["question"])
+            tok = token(it)
+            print(f"  token: {tok}")
+            print("  answer with one of:")
+            for form in legal_forms(it["kind"]):
+                print("    " + command(col, "reconcile", "--tick", tok) + " " + form)
+            return 0
+    if args.tick:
+        tok = args.tick
+        given = {"answer": args.answer, "ref": args.ref, "reason": args.reason}
+        match = [it for it in judged if token(it) == tok]
+        if not match:
+            print(f"lspec reconcile: no current item has token {tok}; the item's evidence may "
+                  "have changed. Run " + command(col, "reconcile", "--next"), file=sys.stderr)
+            return 2
+        it = match[0]
+        if it["status"] == "answered":
+            print(f"already answered: [{it['kind']}] {it['title']}")
+        else:
+            others = {tick_reason(t) for k, t in state.get("ticks", {}).items()
+                      if k != it["key"] and tick_reason(t)}
+            try:
+                answer, _ = validate(it, given, ctx, others)
+            except ValueError as e:
+                print(f"lspec reconcile: {e}", file=sys.stderr)
+                return 1
+            state.setdefault("ticks", {})[it["key"]] = {
+                "evidence": it["evidence"], "answer": answer,
+                "given": {k: v for k, v in given.items() if v}, "at": now_iso()}
+            write_state("reconcile.json", state)
+            print(f"answered [{it['kind']}] {it['title']}: {' '.join(answer)}")
+            ctx, items, state = evaluate(col)
+    receipt = issue_or_clear(col, ctx, items, state)
+    print_checklist(col, ctx, items, receipt)
+    return 0 if receipt else 1
 
 
-def remove_finish_receipt(path):
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
+def cmd_hook(args):
+    """The installed hooks: confirm the commit matches the reconcile receipt.
+    Every check ran in reconcile, so a refusal means the candidate changed."""
+    hint = "rerun `python3 lspec.py reconcile` (it keeps answers whose evidence is unchanged)"
+    if args.which == "prepare-commit-msg":
+        receipt = read_state("receipt.json")
+        if receipt is None or receipt_problem():
+            return 0                      # pre-commit / commit-msg refuse with the reason
+        with open(args.msg, encoding="utf-8") as f:
+            provided = f.read()
+        first = next((l.strip() for l in provided.splitlines()
+                      if l.strip() and not l.startswith("#")), "")
+        if first and first != receipt["subject"]:
+            print(f"prepare-commit-msg: subject replaced by the reconciled subject "
+                  f"{receipt['subject']!r}")
+        with open(args.msg, "w", encoding="utf-8") as f:
+            f.write(compose_message(receipt, provided))
+        return 0
+    problem = receipt_problem()
+    if problem is None and args.which == "commit-msg":
+        with open(args.msg, encoding="utf-8") as f:
+            problem = message_problem(read_state("receipt.json"), f.read())
+    if problem:
+        print(f"{args.which}: commit refused — {problem}; {hint}.", file=sys.stderr)
+        return 1
+    return 0
 
 
-def write_finish_receipt(path, snapshot):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(path),
-                                         prefix=".finish-", delete=False) as f:
-            temporary = f.name
-            json.dump(dict(snapshot, issued_at=datetime.now(timezone.utc).isoformat()),
-                      f, sort_keys=True, indent=2)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temporary, path)
-    finally:
-        if temporary and os.path.exists(temporary):
-            os.unlink(temporary)
+def cmd_clean():
+    """check --clean: list files still staged, unstaged or untracked repo-wide;
+    print nothing and exit 0 when there are none. Read-only."""
+    root = repo_root()
+    if root is None:
+        print("lspec check --clean: not a git checkout", file=sys.stderr)
+        return 2
+    changes = working_changes(root)
+    if not changes:
+        return 0
+    print(f"UNCOMMITTED — {len(changes)} file(s) left after HEAD:")
+    for label in ("staged", "unstaged", "untracked"):
+        for kind, pth, _ in changes:
+            if kind == label:
+                print(f"  {label}: {pth}")
+    return 1
 
 
-def receipt_problem(main):
-    """None for a matching receipt; otherwise a specific blocking reason."""
-    try:
-        with open(finish_receipt_path(), encoding="utf-8") as f:
-            receipt = json.load(f)
-        fields = {"format", "main", "head", "index_sha256", "worktree_sha256",
-                  "checker_sha256", "issued_at"}
-        if not isinstance(receipt, dict) or set(receipt) != fields:
-            return "malformed receipt"
-        if type(receipt["format"]) is not int or receipt["format"] != 1:
-            return "unsupported receipt format"
-        if not isinstance(receipt["issued_at"], str):
-            return "malformed receipt timestamp"
-        if datetime.fromisoformat(receipt["issued_at"]).tzinfo is None:
-            return "receipt timestamp has no timezone"
-        current = receipt_snapshot(main)
-        labels = {"main": "MAIN", "head": "HEAD", "index_sha256": "staged state",
-                  "worktree_sha256": "working-file state", "checker_sha256": "checker"}
-        for field, label in labels.items():
-            if receipt[field] != current[field]:
-                return f"{label} differs from the last finish"
-    except FileNotFoundError:
-        return "no finish receipt (or a required file disappeared)"
-    except (OSError, ValueError, RuntimeError) as e:
-        return f"receipt unavailable or invalid: {e}"
+def spec_words(spec):
+    return len(norm(spec.raw).split()) if spec is not None else None
+
+
+def last_audit():
+    """Newest commit whose subject types audit:, or None."""
+    for line in git("log", "--format=%H%x00%s", check=False).splitlines():
+        sha, _, subject = line.partition("\x00")
+        if subject_type(subject, "audit") is not None:
+            return sha
     return None
 
 
-def receipt_gate(main, rc=0):
-    problem = receipt_problem(main)
-    if problem:
-        print(f"  [finish-receipt] Commit blocked: {problem}.")
-        print("  Stage the intended changes, run "
-              + command(SimpleNamespace(main=main), "finish") + ", then retry the commit.")
-        return 1
-    print("  PASS finish receipt matches MAIN, HEAD, index, working files and checker")
+def size_line(col):
+    now = spec_words(col.specs[col.main])
+    sha = last_audit() if repo_root() else None
+    if sha is None:
+        return f"{now} words (no audit: commit yet)"
+    try:
+        then = spec_words(file_at(sha, col.main))
+    except HistoryUnavailable:
+        then = None
+    if then is None:
+        return f"{now} words (main absent at audit {sha[:7]})"
+    return f"{now} words ({now - then:+d} since audit {sha[:7]})"
+
+
+def obligations_report(col, today=None):
+    """Obligations computed from files and git history, never from memory."""
+    today = today or datetime.now().date()
+    rc = report_structure(col)
+    if repo_root() is not None:
+        _, dirty = uncommitted([rel(x) for x in col.specs])
+        print_owed(owed_reviews(col, dirty), col=col)
+    else:
+        print_owed(owed_reviews(col), col=col)
+    print(watch_line(col))
+    for it in watch_items(col, today):
+        print(f"WATCH — {it['title']}" + (f": {it['detail']}" if it["detail"] else ""))
+    for p, s in col.specs.items():
+        if s.retired_changes:
+            print(f"  note: {rel(p)}: data-changes is retired and ignored; sealed changes are "
+                  "answered in reconcile as a decision change or a correction")
     return rc
 
 
-def cmd_finish(args):
-    """Report first, then issue a local receipt only for a stable successful run."""
-    if repo_root() is None:
-        rc = finish_report(args)
-        print("FINISH RECEIPT — unavailable outside Git; no receipt written")
-        return rc
-    path = finish_receipt_path()
-    try:
-        remove_finish_receipt(path)
-        # Still deliver the accounting prompt if fingerprinting cannot complete.
-        problem = None
+GATE_HOOKS = ("pre-commit", "prepare-commit-msg", "commit-msg")
+
+
+def missing_hooks():
+    """Gate hooks not installed, or installed from an older lspec."""
+    hooks = git("rev-parse", "--path-format=absolute", "--git-path", "hooks").strip()
+    out = []
+    for name in GATE_HOOKS:
         try:
-            before = receipt_snapshot(args.main or "live-spec.html")
-        except (OSError, RuntimeError) as e:
-            problem = e
-        rc = finish_report(args)
-        if problem:
-            raise RuntimeError(f"no finish receipt: {problem}")
-        if rc:
-            print("FINISH RECEIPT — not issued: structural checks failed")
-            return rc
-        after = receipt_snapshot(args.main or "live-spec.html")
-        if before != after:
-            raise RuntimeError("state changed during finish; no receipt issued. Rerun finish.")
-        sys.stdout.flush()  # A broken output pipe must not leave an issued receipt.
-        write_finish_receipt(path, after)
-        print("FINISH RECEIPT — recorded for this state; changes require another finish. "
-              "This records invocation, not semantic review.")
-        sys.stdout.flush()
-        return 0
-    except BaseException:
-        remove_finish_receipt(path)
-        raise
+            with open(os.path.join(hooks, name), encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            text = ""
+        if "hook " + name not in text:
+            out.append(name)
+    return out
 
 
-def finish_report(args):
-    # Git status may otherwise refresh the index even though it is a read
-    # command. Scope this to finish, including every helper it calls.
-    locks = os.environ.get("GIT_OPTIONAL_LOCKS")
-    os.environ["GIT_OPTIONAL_LOCKS"] = "0"
-    hint = SimpleNamespace(main=args.main or "live-spec.html")
-    try:
-        col = load(args)
-        hint = col
-        print(stamp()[0])
-        print("\nVALIDATION — working-tree structure")
-        rc = report_structure(col)
-        print("\nCOMMIT STATE — " + (git("rev-parse", "HEAD").strip()
-              if repo_root() and head_status() == "ok" else "no available HEAD commit"))
-        print("Session baseline unavailable: start records no session baseline; "
-              "committed session changes cannot be identified. HEAD is only the "
-              "basis for uncommitted evidence, not the session start.")
-        root = repo_root()
-        if root is None:
-            print("\nWORKING TREE — unavailable (not a git checkout)")
-            print("AFFECTED CLAIM CANDIDATES — unavailable without change evidence")
-            print_owed(owed_reviews(col), col=col)
-            return rc
-        state = head_status()
-        if state == "broken":
-            raise HistoryUnavailable("HEAD is unavailable; change/review evidence is incomplete")
-        head = (Collection(col.main, basis="HEAD") if state == "ok" else
-                SimpleNamespace(specs={}, depends_on_edges=lambda: [], edges=lambda: [],
-                                inbound=lambda p, f: []))
-        if state == "ok" and col.main not in head.specs:
-            old = renamed_from(root, col.main)
-            if old:
-                head = Collection(old, basis="HEAD")
-        staged = Collection(col.main, basis="staged")
-        if getattr(head, "fails", []):
-            raise HistoryUnavailable("; ".join(head.fails))
-        if staged.fails:
-            print("  note: index collection incomplete: " + "; ".join(staged.fails))
-        changes = working_changes(root)
-        dirty_paths = finish_changes(col, head, staged, changes, root)
-        finish_reviews(col, (head, staged, col), dirty_paths)
-        return rc
-    finally:
-        if locks is None:
-            os.environ.pop("GIT_OPTIONAL_LOCKS", None)
-        else:
-            os.environ["GIT_OPTIONAL_LOCKS"] = locks
-        print("\nSESSION ACCOUNTING (by hand)")
-        print("Review what changed or was learned during this session, including "
-              "decisions, findings, and changed assumptions. Update affected spec "
-              "claims and preserve consequential outcomes with their supporting "
-              "evidence. Record unresolved questions and unverified claims using "
-              "the existing open-items rules. Where there is a separate artifact, "
-              "reconcile it with the spec. Distinguish verification actually "
-              "performed from expected behavior. Address outstanding review "
-              "obligations and rerun `" + command(hint, "finish") + "` after making changes.")
-        print("\nHANDOFF — structural results, review obligations and Git state are "
-              "separate. Open/watch items may remain at handoff; they are not "
-              "mechanically outstanding review obligations. Report blockers or unfinished work.")
-        print("A clean tree does not prove the spec is current; uncommitted work "
-              "may be coherent. Passing checks does not certify semantic agreement, "
-              "adequate evidence, or completion of this review. Git changes are "
-              "evidence, not a complete account of session activity.")
+def resume_diff(col, commit):
+    """-> (printable lines, refusal or None) for start --resume."""
+    if not require_commit(commit):
+        return [], f"{commit!r} is not an available commit"
+    if subprocess.run(["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+                      capture_output=True, check=False).returncode:
+        return [], f"{commit[:12]} is not an ancestor of HEAD"
+    paths = [repo_rel(p) for p in col.specs]
+    root = repo_root()
+    diff = git("diff", "--unified=0", "--no-color", commit, "--", *paths, cwd=root)
+    changed = [l for l in diff.splitlines()
+               if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+    others = sorted(set(git("diff", "--name-only", commit, cwd=root).split()) - set(paths))
+    others += [f"{p} (untracked)" for p in
+               git("ls-files", "--others", "--exclude-standard", cwd=root).split()]
+    if len(changed) > RESUME_MAX_LINES:
+        return [], (f"{len(changed)} changed lines in the collection since {commit[:12]} "
+                    f"(> {RESUME_MAX_LINES})")
+    lines = []
+    if not changed:
+        lines.append(f"collection unchanged since {commit[:12]}")
+    else:
+        lines.append(f"collection changes since {commit[:12]} ({len(changed)} lines):")
+        lines += ["  " + l for l in diff.splitlines()]
+    if others:
+        lines.append("other files changed: " + ", ".join(others))
+    return lines, None
+
+
+RESUME_MAX_LINES = 120
 
 
 def cmd_start(args):
     col = load(args)
-    main = col.main
-    deliver(main, col.specs[main].raw)
-    for w in (args.with_ or []):
-        try:
-            wp, _ = col.parse_target(w)
-        except ValueError as e:
-            print(f"lspec start --with: {e}", file=sys.stderr); return 2
-        deliver(wp, col.specs[wp].raw)
-    print_graph(col)
-    sealed = [(p, eid) for p, spec in col.specs.items() for eid in spec.sealed]
-    print(f"sealed claims: {len(sealed)}")
-    for p, eid in sealed:
-        print("  " + addr(p, eid))
-    print("Parsed protection inventory: use these identifiers and counts in the seed "
-          "assessment. This does not establish that the selection is complete.")
-    print()
-    rc = cmd_check(argparse.Namespace(main=args.main, neighborhood=None, diff=None))
-    print()
-    rels = [rel(x) for x in col.specs]
-    _, dirty_paths = uncommitted(rels)
-    print_owed(owed_reviews(col, dirty_paths), col=col)
-    print("\nnext commands (MAIN is supplied on every invocation):")
-    for verb, operands in (("check", ("--diff", "HEAD")), ("show", ("--graph",)),
-                           ("finish", ())):
-        print("  " + command(col, verb, *operands))
-    print("\nverbs — read-only: " + " ".join(READ_ONLY) + "   mutating: " + " ".join(MUTATING))
-    for verb, operands in (("start", ()), ("finish", ()), ("show", ("FILE_OR_CLAIM",)),
-                           ("neighbors", ("CLAIM",)), ("impact", ("BASE",)),
-                           ("mv", ("OLD", "NEW")), ("review", ("CLAIM",))):
-        print("  " + command(col, verb, *operands))
+    in_git = repo_root() is not None
+    print(stamp()[0])
+    resume_lines, refusal = [], None
+    if in_git:
+        request = read_state("request.json")
+        if request and request.get("main") != repo_rel(col.main):
+            print(f"REQUEST — an open request belongs to {request.get('main')}; "
+                  f"ask the user before opening one for {rel(col.main)}")
+            return 2
+        if request:
+            print(f"REQUEST — already open since "
+                  f"{(request.get('start') or 'the first commit')[:12]} "
+                  f"(opened {request.get('opened_at')}); not reset")
+            print("  If this request was not opened in this conversation, ask the user whether "
+                  "to continue it before acting on it.")
+            changes = working_changes(repo_root())
+            for kind, path, _ in changes:
+                print(f"  uncommitted {kind}: {path}")
+            ticks = (read_state("reconcile.json") or {}).get("ticks", {})
+            if ticks:
+                print(f"  recorded answers: {len(ticks)} (kept while their evidence is unchanged)")
+            if args.resume:
+                print("  --resume ignored: a request is already open")
+        else:
+            if args.resume:
+                resume_lines, refusal = resume_diff(col, args.resume)
+            write_state("request.json", {"format": 1, "main": repo_rel(col.main),
+                                         "start": head_sha(), "opened_at": now_iso()})
+            remove_state("reconcile.json")
+            remove_state("receipt.json")
+            print(f"REQUEST — opened at {(head_sha() or 'the first commit')[:12]}")
+            for kind, path, _ in working_changes(repo_root()):
+                print(f"  uncommitted {kind} before this request: {path} — reconcile and commit "
+                      "it, or ask the user")
+    else:
+        print("REQUEST — not a git checkout: no request is recorded")
+    if args.resume and not refusal and resume_lines:
+        print("RESUME — the read still in your context plus these changes is the load:")
+        for line in resume_lines:
+            print("  " + line)
+    else:
+        if refusal:
+            print(f"RESUME REFUSED — {refusal}: read every governing spec in full.")
+        print("READ — before any authoritative action (a commit, live program state, networked "
+              "hardware), read whole every spec that governs it: every line, in sequential "
+              "pages. Skipped ranges and search in place of reading are not a read.")
+    for p in col.specs:
+        lines = len(col.specs[p].raw.splitlines())
+        if p == col.main:
+            print(f"  {rel(p)} (main) — {lines} lines, {size_line(col)}")
+        else:
+            par = col.parents.get(p)
+            print(f"  {rel(p)} — {lines} lines; split from {rel(par[0])} ({par[1]}); read it "
+                  "whole when work crosses into it")
+    sealed = [addr(p, eid) for p, spec in col.specs.items() for eid in spec.sealed]
+    deps = list(col.depends_on_edges())
+    print(f"SEALED ({len(sealed)}): " + (", ".join(sealed) or "none"))
+    print(f"DEPENDS-ON EDGES: {len(deps)}")
+    print("OBLIGATIONS")
+    rc = obligations_report(col)
+    missing = missing_hooks() if in_git else []
+    if missing:
+        print("HOOKS — not installed, or from an older lspec: " + ", ".join(missing)
+              + "; install: " + "; ".join(f"ln -sf ../../hooks/{h} .git/hooks/{h}" for h in missing))
+    print("SESSION — per commit: edit, stage, " + command(col, "reconcile", "--subject",
+          "type: one transition") + ", work the checklist, `git commit --no-edit`. "
+          "Hand off with " + command(col, "finish") + " on a clean tree.")
     return rc
+
+
+def cmd_finish(args):
+    col = load(args)
+    root = repo_root()
+    if root is None:
+        print("lspec finish: not a git checkout; there is no request to close", file=sys.stderr)
+        return 2
+    print(stamp()[0])
+    changes = working_changes(root)
+    if changes:
+        print("NOT HANDED OFF — finish requires a clean working tree:")
+        for kind, path, _ in changes:
+            print(f"  {kind}: {path}")
+        print("Reconcile and commit this work, or discard it. Asking the user whether to "
+              "commit is a pause partway through the request, not a handoff.")
+        return 1
+    request = read_state("request.json")
+    head = head_sha()
+    start = (request or {}).get("start")
+    if request is None:
+        print("REQUEST — none open (run start at the beginning of a request); nothing to close")
+        commits = []
+    else:
+        span = f"{start}..HEAD" if start else "HEAD"
+        commits = git("log", "--format=%h %s", span, check=False).splitlines() if head else []
+        print(f"REQUEST — since {(start or 'the first commit')[:12]}: {len(commits)} commit(s)")
+        for c in commits:
+            print("  " + c)
+    print("OBLIGATIONS")
+    obligations_report(col)
+    print("BEFORE YOU HAND OFF — answer each. Any yes means the request is not done: "
+          "reopen it with start --resume (below), record it, and finish again.")
+    if not commits:
+        print("  - This request committed nothing. Did it produce a finding, decision or doubt "
+              "that belongs in the spec?")
+    print("  - Was a decision made in conversation that has no decision row?")
+    print("  - Did you resolve an ambiguity by assumption without recording the alternative "
+          "as an open item?")
+    print("  - Did a failure appear for the first time without a watch entry carrying its "
+          "closing condition?")
+    print("  - Is anything above (REVIEW OWED, WATCH, FAIL) yours to clear now?")
+    if request is not None:
+        remove_state("request.json")
+        remove_state("reconcile.json")
+        remove_state("receipt.json")
+    sha = (head or "")[:12] or "none"
+    print(f"HANDOFF {sha} — request closed. A follow-up in this conversation, with the full "
+          f"read still in context: " + command(col, "start", "--resume", sha)
+          + "; anything else starts with a full read.")
+    return 0
 
 
 def cmd_mv(args):
@@ -2349,7 +2896,8 @@ def mv_file(col, old, new):
 
 def after_mv(main):
     print("Rename prepared; nothing committed.")
-    print("Reconcile next: " + command(SimpleNamespace(main=main), "check", "--diff", "HEAD"))
+    print("Inspect next: " + command(SimpleNamespace(main=main), "check", "--diff", "HEAD")
+          + "; then stage and reconcile")
     print()
     rc = cmd_check(argparse.Namespace(main=rel(main), neighborhood=None, diff=None))
     if rc:
@@ -2415,19 +2963,27 @@ def cmd_review(args):
     if stageable:
         git("add", "--", *stageable, cwd=root)
     subject = "review: " + ", ".join(names)
-    msg = subject + (f"\n\n{args.message}" if args.message else "")
-    # No side channel: the commit-msg hook reads this very subject, the same
-    # text history will read — exemption and clearance are one artifact.
-    r = subprocess.run(["git", "commit", "--allow-empty", "-q", "-m", msg],
-                       cwd=repo_root(), check=False)
+    # No side channel: the subject is the review record, gated like any commit.
+    state = read_state("reconcile.json") or {}
+    state.update(subject=subject, body=args.message or "")
+    write_state("reconcile.json", state)
+    staged = load(args, basis="staged")
+    ctx, items, state = evaluate(staged)
+    receipt = issue_or_clear(staged, ctx, items, state)
+    if receipt is None:
+        print_checklist(staged, ctx, items, None)
+        print("Review staged and subject set; work the checklist with "
+              + command(col, "reconcile", "--next") + ", then rerun this review "
+              "(or `git commit --no-edit`).")
+        return 1
+    r = subprocess.run(["git", "commit", "--allow-empty", "-q", "-F", "-"],
+                       input=compose_message(receipt), text=True, cwd=root, check=False)
     if r.returncode:
-        raise RuntimeError("git commit failed (hook red?). If the receipt is missing or stale, "
-                           "the review files are now staged; run " + command(col, "finish")
-                           + " and retry this review.")
+        raise RuntimeError("git commit failed; the review files remain staged. Rerun "
+                           + command(col, "reconcile") + " and retry this review.")
     sha = git("rev-parse", "--short", "HEAD").strip()
     print(f"{sha} {subject}")
-    print("Review committed. Rerun " + command(col, "finish") + " before handoff.")
-    print("Confirm cleanliness with: python3 lspec.py check --clean")
+    print("Review committed.")
     return 0
 
 
@@ -2442,30 +2998,36 @@ def main(argv):
     def add_main(sp):
         sp.add_argument("--main", default=argparse.SUPPRESS,
                         help="main spec (same as the global --main)")
-    s = sub.add_parser("start"); s.add_argument("main_pos", nargs="?"); add_main(s)
-    s.add_argument("--with", dest="with_", nargs="+", metavar="FILE", help="also deliver these supporting specs whole")
-    f = sub.add_parser("finish", help="session review, handoff and local commit receipt",
-                      description="Validate the working spec, report review obligations and "
-                      "available Git changes, and prompt session accounting. A successful "
-                      "stable run writes a state-bound receipt in Git metadata for the "
-                      "commit hooks; stage intended changes first and rerun after changes. "
-                      "Dirty state alone does not fail. No session baseline is recorded by start.")
+    s = sub.add_parser("start", help="open or report the request; list what to read")
+    s.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(s)
+    s.add_argument("--resume", metavar="COMMIT",
+                   help="follow-up in the same conversation: the handoff commit finish printed")
+    g = sub.add_parser("reconcile", help="the commit gate: checklist, answers, receipt")
+    g.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(g)
+    g.add_argument("--subject", help="the commit subject: one typed transition line")
+    g.add_argument("--body", help="commit body (review and seed assessments)")
+    g.add_argument("--next", action="store_true", help="show one open judgment item and its token")
+    g.add_argument("--tick", metavar="TOKEN", help="answer the item whose token this is")
+    g.add_argument("--answer", help="the answer (see --next for the legal answers)")
+    g.add_argument("--ref", metavar="ID", help="the row or watch entry the answer names")
+    g.add_argument("--reason", metavar="TEXT", help="the reason, quoted")
+    f = sub.add_parser("finish", help="hand off: clean tree, request summary, close the request")
     f.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(f)
-    c = sub.add_parser("check"); c.add_argument("main_pos", nargs="?"); add_main(c)
+    c = sub.add_parser("check", help="validator: structure, neighborhoods, --clean")
+    c.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(c)
     c.add_argument("--diff", metavar="BASE"); c.add_argument("--neighborhood", metavar="TARGET")
     c.add_argument("--template", action="store_true",
                    help="validate a template: skip the unresolved-marker gate "
                         "(instance readiness is the default)")
     c.add_argument("--staged", action="store_true",
                    help="evaluate the candidate commit (the index), not the working tree")
-    c.add_argument("--finish-receipt", action="store_true",
-                   help="require a matching finish receipt (with --staged; used by commit hooks)")
     c.add_argument("--clean", action="store_true",
-                   help="completion check: report staged/unstaged/untracked files "
-                        "repo-wide; nonzero while any remain (stands alone)")
-    c.add_argument("--commit-msg", dest="commit_msg", metavar="FILE",
-                   help="run the review gate with the candidate commit's subject "
-                        "read from FILE (the commit-msg hook)")
+                   help="list staged/unstaged/untracked files repo-wide; nonzero while any remain")
+    c.add_argument("--finish-receipt", action="store_true", help=argparse.SUPPRESS)
+    c.add_argument("--commit-msg", dest="commit_msg", help=argparse.SUPPRESS)
+    h = sub.add_parser("hook", help="run by the installed git hooks")
+    h.add_argument("which", choices=["pre-commit", "prepare-commit-msg", "commit-msg"])
+    h.add_argument("msg", nargs="?"); h.add_argument("source", nargs="*")
     sh = sub.add_parser("show"); sh.add_argument("target", nargs="?", help="path#id for an element; a bare path delivers the file whole; omit with --graph"); add_main(sh)
     sh.add_argument("--text", action="store_true"); sh.add_argument("--graph", action="store_true")
     n = sub.add_parser("neighbors"); n.add_argument("target"); add_main(n)
@@ -2479,15 +3041,16 @@ def main(argv):
     if args.verb is None:
         args.verb = "check"; args.main_pos = None; args.diff = None; args.neighborhood = None
         args.template = False; args.staged = False; args.commit_msg = None; args.clean = False
+        args.finish_receipt = False
     if getattr(args, "main_pos", None):
         args.main = args.main_pos
     try:
-        rc = {"start": cmd_start, "finish": cmd_finish, "check": cmd_check, "show": cmd_show,
-              "neighbors": cmd_neighbors, "impact": cmd_impact, "mv": cmd_mv,
-              "review": cmd_review}[args.verb](args)
+        rc = {"start": cmd_start, "reconcile": cmd_reconcile, "finish": cmd_finish,
+              "check": cmd_check, "show": cmd_show, "neighbors": cmd_neighbors,
+              "impact": cmd_impact, "mv": cmd_mv, "review": cmd_review,
+              "hook": cmd_hook}[args.verb](args)
         if args.verb in ("check", "show", "neighbors", "impact") and not (
-                getattr(args, "clean", False) or getattr(args, "staged", False)
-                or getattr(args, "commit_msg", None)):
+                getattr(args, "clean", False) or getattr(args, "staged", False)):
             unfinished_notice()
         sys.stdout.flush()   # surface EPIPE here, not at interpreter shutdown
         return rc

@@ -129,6 +129,92 @@ def edit(d, name, old, new):
     p = os.path.join(d, name); t = open(p).read(); assert old in t; open(p, "w").write(t.replace(old, new))
 
 
+def state_file(d, name):
+    return Path(sh("git", "rev-parse", "--absolute-git-dir", cwd=d).strip(), "lspec", name)
+
+
+def ensure_request(d):
+    if not state_file(d, "request.json").exists():
+        rc, out = cli(d, "start")
+        assert "REQUEST — opened" in out, out
+
+
+DEFAULT_ANSWERS = {
+    "read": lambda n: ["read-whole"],
+    "neighbor": lambda n: ["holds"],
+    "sealed": lambda n: ["correction", "fixture", "wording", "correction", f"n{n}"],
+    "removed": lambda n: ["retired", "nobody", "re-proposes", "it", f"n{n}"],
+}
+
+
+def given(words):
+    """['decision', 'dl-x'] or ['correction', 'some', 'reason'] -> validate's GIVEN."""
+    answer, rest = words[0], list(words[1:])
+    needs_ref, _ = next(v for k in lspec.ANSWERS.values() for a, v in k.items() if a == answer)
+    out = {"answer": answer}
+    if needs_ref and rest:
+        out["ref"] = rest.pop(0)
+    if rest:
+        out["reason"] = " ".join(rest)
+    return out
+
+
+def tick_argv(words):
+    g = given(words)
+    argv = ["--answer", g["answer"]]
+    if "ref" in g:
+        argv += ["--ref", g["ref"]]
+    if "reason" in g:
+        argv += ["--reason", g["reason"]]
+    return argv
+
+
+def answer_all(d, answers=None, limit=400):
+    """Answer every open judgment item one at a time, the way an agent does:
+    --next shows one item and its token, --tick answers that item."""
+    answers = answers or {}
+    log = ""
+    for n in range(limit):
+        rc, out = cli(d, "reconcile", "--next")
+        tok = re.search(r"token: (\w+)", out)
+        if not tok:
+            return log
+        kind = re.search(r"ITEM \d+ of \d+ \[(\w+)\]", out).group(1)
+        reply = answers.get(kind) or DEFAULT_ANSWERS[kind](n)
+        rc, out = cli(d, "reconcile", "--tick", tok.group(1), *tick_argv(reply))
+        assert "answered [" in out, out
+        log += out
+    raise AssertionError("checklist did not converge")
+
+
+def settle(d, subject, body=None, answers=None):
+    """Open a request if needed, reconcile SUBJECT and answer every item.
+    -> (rc, output); rc 0 means a receipt was issued."""
+    ensure_request(d)
+    rc, out = cli(d, "reconcile", "--subject", subject, *(["--body", body] if body else []))
+    answer_all(d, answers)
+    rc, more = cli(d, "reconcile")
+    return rc, out + more
+
+
+def do_review(d, *claims, message=None):
+    """lspec review prepares the review commit; once its checklist clears,
+    rerunning it commits."""
+    ensure_request(d)
+    argv = ["review", *claims] + (["-m", message] if message else [])
+    rc, out = cli(d, *argv)
+    if rc == 1:
+        answer_all(d)
+        rc, more = cli(d, *argv)
+        out += more
+    return rc, out
+
+
+def reconcile_out(d, subject):
+    """The checklist for SUBJECT against the staged candidate (no answers)."""
+    return cli(d, "reconcile", "--subject", subject)[1]
+
+
 class G(unittest.TestCase):
     def test_impact_content_change_names_dependent(self):
         d = repo(); edit(d, "motor.html", "120 kW", "105 kW")
@@ -140,7 +226,7 @@ class G(unittest.TestCase):
         d = repo(); edit(d, "motor.html", "120 kW", "105 kW"); commit(d, "docs: derate")
         rc, out = cli(d, "impact", "HEAD~1")
         self.assertIn("OUTSTANDING (against review baselines) OWED (1)", out)
-        rc, out = cli(d, "review", "main.html#claim", "-m", "still fine")
+        rc, out = do_review(d, "main.html#claim", message="still fine")
         self.assertEqual(rc, 0, out); self.assertIn("review: main.html#claim", out)
         log = sh("git", "log", "-1", "--format=%s", cwd=d).strip()
         self.assertEqual(log, "review: main.html#claim")
@@ -154,11 +240,11 @@ class G(unittest.TestCase):
 
     def test_review_refuses_red_tree(self):
         d = repo(); edit(d, "motor.html", 'href="main.html#claim"', 'href="main.html#nope"')
-        rc, out = cli(d, "review", "main.html#claim")
+        rc, out = do_review(d, "main.html#claim")
         self.assertEqual(rc, 2); self.assertIn("red", out)
 
     def test_review_refuses_non_dependent(self):
-        d = repo(); rc, out = cli(d, "review", "motor.html#power")
+        d = repo(); rc, out = do_review(d, "motor.html#power")
         self.assertEqual(rc, 2); self.assertIn("no depends-on link", out)
 
     def test_mv_anchor_rewrites_and_resets(self):
@@ -207,6 +293,47 @@ class G(unittest.TestCase):
         rc, out = cli(d, "show", "--graph", "main.html")
         self.assertIn("motor.html  <- main.html (dl-split-motor)", out)
         self.assertIn("main.html#claim -> motor.html#power", out)
+
+
+class Normalization(unittest.TestCase):
+    """Claim text separates block and cell boundaries; inline tags join."""
+
+    def text(self, body):
+        return lspec.Spec('x.html', f'<div id="c">{body}</div>').text('c')
+
+    def test_cell_boundary_collision(self):
+        self.assertNotEqual(self.text('<table><tr><td>1</td><td>23</td></tr></table>'),
+                            self.text('<table><tr><td>12</td><td>3</td></tr></table>'))
+
+    def test_paragraph_boundary_collision(self):
+        self.assertNotEqual(self.text('<p>a</p><p>b</p>'), self.text('<p>ab</p>'))
+
+    def test_inline_tags_stay_joined(self):
+        self.assertEqual(self.text('<p>a<em>b</em>c</p>'), 'abc')
+        self.assertEqual(self.text('<p>a<code>b</code> <a href="#x">c</a></p>'), 'ab c')
+        self.assertEqual(self.text('<p>a</p>\n<p>b</p>'), 'a b')
+
+    def test_moved_cell_boundary_owes_review(self):
+        d = repo()
+        edit(d, 'motor.html', '<p id="power">120 kW, see <a href="main.html#claim">main</a>.</p>',
+             '<table><tr id="power"><td>1</td><td>20 kW</td></tr></table>')
+        commit(d, 'docs: tabulate the rating')
+        self.assertEqual(do_review(d, 'main.html#claim')[0], 0)
+        edit(d, 'motor.html', '<td>1</td><td>20 kW</td>', '<td>12</td><td>0 kW</td>')
+        commit(d, 'docs: move the cell boundary')
+        rc, out = cli(d, 'impact', 'HEAD~1')
+        self.assertIn('CHANGED motor.html#power', out)
+        self.assertIn('REVIEW main.html#claim  depends-on motor.html#power  [content]', out)
+
+    def test_merged_paragraphs_owe_review(self):
+        d = repo()
+        edit(d, 'motor.html', '<p id="power">120 kW, see <a href="main.html#claim">main</a>.</p>',
+             '<section id="power"><p>120 kW</p><p>peak</p></section>')
+        commit(d, 'docs: split the rating')
+        self.assertEqual(do_review(d, 'main.html#claim')[0], 0)
+        edit(d, 'motor.html', '<p>120 kW</p><p>peak</p>', '<p>120 kWpeak</p>')
+        commit(d, 'docs: merge the paragraphs')
+        self.assertIn('[content]', cli(d, 'impact', 'HEAD')[1])
 
 
 class C(unittest.TestCase):
@@ -261,7 +388,7 @@ class W(unittest.TestCase):
         edit(d, os.path.join("sub", "motor.html"), "120 kW", "105 kW")
         commit(d, "docs: derate")
         with p1, p2:
-            rc, out = cli(d, "review", "main.html#claim")
+            rc, out = do_review(d, "main.html#claim")
         self.assertEqual(rc, 0, out); self.assertNotIn("\\", sh("git", "log", "-1", "--format=%s", cwd=d))
 
 
@@ -405,8 +532,7 @@ class N(unittest.TestCase):
 
     def test_review_names_match_exactly(self):
         d = self._two_claims()
-        rc, out = cli(d, "review", "main.html#claim2")
-        self.assertEqual(rc, 0, out)
+        commit(d, "review: main.html#claim2")    # the gate would also hold claim; recorded directly
         rc, out = cli(d, "impact", "HEAD")
         outstanding = out.split("OUTSTANDING")[1]
         self.assertIn("main.html#claim ", outstanding)   # trailing space: not claim2
@@ -425,8 +551,7 @@ class N(unittest.TestCase):
 
     def test_review_clears_only_the_reviewed_claim(self):
         d = self._two_claims()
-        rc, out = cli(d, "review", "main.html#claim", "-m", "checked")
-        self.assertEqual(rc, 0, out)
+        commit(d, "review: main.html#claim")     # recorded directly; claim2 stays owed
         out = cli(d, "impact", "HEAD")[1]
         outstanding = out.split("OUTSTANDING")[1]
         self.assertIn("main.html#claim2", outstanding)
@@ -447,14 +572,11 @@ class N(unittest.TestCase):
         # blocking assertion runs before the review is recorded
         edit(d, "main.html", "<h1 id=\"top\">Main</h1>", "<h1 id=\"top\">Main spec</h1>")
         sh("git", "add", "main.html", cwd=d)
-        msg = os.path.join(d, "msg")
-        open(msg, "w").write("docs: unrelated edit\n")
-        rc, out = cli(d, "check", "--staged", "--commit-msg", msg)
-        self.assertEqual(rc, 1, out)
-        self.assertIn("[review-gate] main.html#claim", out)
+        out = reconcile_out(d, "docs: unrelated edit")
+        self.assertIn("OPEN [review] REVIEW OWED main.html#claim", out)
         sh("git", "reset", "-q", cwd=d)
         sh("git", "checkout", "--", "main.html", cwd=d)
-        rc, out = cli(d, "review", "main.html#claim", "-m", "still fine")
+        rc, out = do_review(d, "main.html#claim", message="still fine")
         self.assertEqual(rc, 0, out)
         rc, out = cli(d, "impact", "HEAD")
         self.assertIn("OWED: none", out)
@@ -524,7 +646,7 @@ class N(unittest.TestCase):
         self.assertIn("main.html#claim", outstanding)
         self.assertIn("depends-on motor.html#rated", outstanding)
         self.assertNotIn("OWED: none", outstanding)
-        rc, out = cli(d, "review", "main.html#claim", "-m", "rename carries the debt")
+        rc, out = do_review(d, "main.html#claim", message="rename carries the debt")
         self.assertEqual(rc, 0, out)
         rc, out = cli(d, "impact", "HEAD")
         self.assertIn("OWED: none", out)
@@ -572,7 +694,7 @@ class N(unittest.TestCase):
         self.assertIn("rename vs re-point", out)
         self.assertNotIn("OWED: none", out)
         # an explicit review against committed state establishes the baseline
-        rc, out = cli(d, "review", "main.html#claim", "-m", "switched deliberately")
+        rc, out = do_review(d, "main.html#claim", message="switched deliberately")
         self.assertEqual(rc, 0, out)
         rc, out = cli(d, "impact", "HEAD")
         self.assertIn("OWED: none", out)
@@ -602,14 +724,14 @@ class N(unittest.TestCase):
         self.assertNotIn("OWED: none", outstanding)
 
     def test_review_refuses_when_nothing_owed(self):
-        d = repo(); rc, out = cli(d, "review", "main.html#claim")
+        d = repo(); rc, out = do_review(d, "main.html#claim")
         self.assertEqual(rc, 2); self.assertIn("nothing is owed", out)
 
     def test_review_refuses_unrelated_staged_changes(self):
         d = repo(); edit(d, "motor.html", "120 kW", "105 kW"); commit(d, "docs: derate")
         open(os.path.join(d, "notes.txt"), "w").write("x")
         sh("git", "add", "notes.txt", cwd=d)
-        rc, out = cli(d, "review", "main.html#claim")
+        rc, out = do_review(d, "main.html#claim")
         self.assertEqual(rc, 2); self.assertIn("unrelated", out)
 
     def test_invalid_base_exits_2(self):
@@ -646,7 +768,7 @@ class N(unittest.TestCase):
         rc, out = cli(d, "neighbors", "motor.html#power")
         self.assertEqual(rc, 0, out)
         self.assertIn("inbound (2):", out)
-        self.assertIn("sub.html#sclaim [depends-on]  (load whole: python3 lspec.py --main main.html show sub.html)", out)
+        self.assertIn("sub.html#sclaim [depends-on]  (read whole: sub.html)", out)
         rc, out = cli(d, "neighbors", "main.html#top")
         self.assertIn("inbound (0): none", out)
 
@@ -739,15 +861,19 @@ class L(unittest.TestCase):
         d = repo(); rc, out = cli(d, "show", "motor.html")
         self.assertIn("==== motor.html —", out); self.assertIn('id="power"', out); self.assertIn("==== end motor.html ====", out)
 
-    def test_start_with_delivers_supporting_specs(self):
-        d = repo(); rc, out = cli(d, "start", "--with", "motor.html")
-        self.assertIn("==== end main.html ====", out); self.assertIn("==== end motor.html ====", out)
+    def test_start_lists_files_without_printing_them(self):
+        d = repo(); rc, out = cli(d, "start")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('id="power"', out)                    # the agent reads the specs
+        self.assertIn("main.html (main) — 13 lines, 39 words", out)
+        self.assertIn("motor.html — 5 lines; split from main.html (dl-split-motor)", out)
+        self.assertLess(len(out.splitlines()), 25, out)        # short enough never to truncate
 
     def test_cross_file_outputs_carry_load_hint(self):
         d = repo(); edit(d, "motor.html", "120 kW", "105 kW")
         rc, out = cli(d, "impact", "HEAD")
-        self.assertIn("(load whole: python3 lspec.py --main main.html show motor.html)", out)   # the changed target is not main
-        self.assertNotIn("lspec show main.html", out)                 # main is already loaded
+        self.assertIn("(read whole: motor.html)", out)   # the changed target is not main
+        self.assertNotIn("(read whole: main.html)", out)  # main is always read
 
 
 # ---------------------------------------------------------------- critique regressions
@@ -854,7 +980,7 @@ class RevisionRegressions(unittest.TestCase):
 
     def test_explicit_review_can_establish_shallow_baseline(self):
         _, shallow = self.shallow_fixture()
-        rc, out = cli(shallow, 'review', 'main.html#claim')
+        rc, out = do_review(shallow, 'main.html#claim')
         self.assertEqual(rc, 0, out)
         out = cli(shallow, 'impact', 'HEAD')[1]
         self.assertIn('OWED: none', out)
@@ -911,7 +1037,7 @@ class RevisionRegressions(unittest.TestCase):
         d = self.fixture()
         Path(d, 'motor.html').write_text('<section id="power"><h4>Power</h4><p>120 kW</p></section>', encoding='utf-8')
         commit(d, 'fix: complete claim target')
-        self.assertEqual(cli(d, 'review', 'main.html#claim')[0], 0)
+        self.assertEqual(do_review(d, 'main.html#claim')[0], 0)
         edit(d, 'motor.html', '120 kW', '105 kW')
         commit(d, 'fix: motor rating')
         self.assertIn('[content]', cli(d, 'impact', 'HEAD')[1])
@@ -920,7 +1046,7 @@ class RevisionRegressions(unittest.TestCase):
         d = self.fixture()
         Path(d, 'motor.html').write_text('<h4 id="power">Power</h4><p>120 kW</p>', encoding='utf-8')
         commit(d, 'fix: heading target')
-        self.assertEqual(cli(d, 'review', 'main.html#claim')[0], 0)
+        self.assertEqual(do_review(d, 'main.html#claim')[0], 0)
         edit(d, 'motor.html', '120 kW', '105 kW')
         commit(d, 'fix: motor rating')
         self.assertIn('OWED: none', cli(d, 'impact', 'HEAD')[1])
@@ -951,10 +1077,9 @@ class RevisionRegressions(unittest.TestCase):
 <table><tr id="dl-cooling"><td>Liquid cooling</td><td>Air cooling</td><td>Meets the thermal requirement.</td></tr></table></main>''')
 
     def gate(self, d, subject):
-        """Run the commit-msg gate the way the hook does."""
-        msg = os.path.join(d, 'msg')
-        Path(msg).write_text(subject + '\n', encoding='utf-8')
-        return cli(d, 'check', '--staged', '--commit-msg', msg)
+        """The review gate inside reconcile: 1 when it holds the commit."""
+        out = reconcile_out(d, subject)
+        return int('OPEN [review]' in out), out
 
     def test_template_validation_is_explicit(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1002,7 +1127,7 @@ class RevisionRegressions(unittest.TestCase):
         d = repo(); edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
         rc, out = self.gate(d, 'docs: unrelated')
         self.assertEqual(rc, 1, out)
-        self.assertIn('[review-gate]', out)
+        self.assertIn('OPEN [review]', out)
         self.assertIn('main.html#claim', out)
         rc, out = self.gate(d, 'review: main.html#claim')
         self.assertEqual(rc, 0, out)          # a recorded review naming the claim clears it
@@ -1016,7 +1141,7 @@ class RevisionRegressions(unittest.TestCase):
 
     def test_review_commit_passes_staged_gate(self):
         d = repo(); edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
-        self.assertEqual(cli(d, 'review', 'main.html#claim', '-m', 'still fine')[0], 0)
+        self.assertEqual(do_review(d, 'main.html#claim', message='still fine')[0], 0)
         self.assertEqual(sh('git', 'log', '-1', '--format=%s', cwd=d).strip(),
                          'review: main.html#claim')
 
@@ -1057,10 +1182,10 @@ class RevisionRegressions(unittest.TestCase):
         sh('git', 'add', '-A', cwd=d)
         rc, out = self.gate(d, 'docs: drop dependency')
         self.assertEqual(rc, 1, out)
-        self.assertIn('dependency removed', out)
+        self.assertIn('removed or redirected', out)
         rc, out = self.gate(d, 'review: main.html#claim')
         self.assertEqual(rc, 0, out)
-        rc, out = cli(d, 'review', 'main.html#claim', '-m', 'independent of power now')
+        rc, out = do_review(d, 'main.html#claim', message='independent of power now')
         self.assertEqual(rc, 0, out)
 
     def test_disappearance_unverifiable_blocks(self):
@@ -1087,7 +1212,7 @@ class RevisionRegressions(unittest.TestCase):
         rc, out = self.gate(d, 'seed: fixtures')
         self.assertEqual(rc, 0, out)
         self.assertIn('first commit', out)
-        self.assertNotIn('[review-gate]', out)
+        self.assertNotIn('OPEN [review]', out)
 
     def test_head_status_states(self):
         scenarios = [
@@ -1128,7 +1253,7 @@ class RevisionRegressions(unittest.TestCase):
     def test_seed_floor_discards_stale_lineage(self):
         d = repo()
         edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
-        self.assertEqual(cli(d, 'review', 'main.html#claim')[0], 0)
+        self.assertEqual(do_review(d, 'main.html#claim')[0], 0)
         edit(d, 'motor.html', '105 kW', '90 kW'); commit(d, 'docs: derate again')
         rc, out = cli(d, 'impact', 'HEAD')
         self.assertIn('OWED (1)', out)   # the old lineage's review no longer covers 90 kW
@@ -1143,7 +1268,7 @@ class RevisionRegressions(unittest.TestCase):
     def test_body_line_cannot_type_a_seed_boundary(self):
         d = repo()
         edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
-        self.assertEqual(cli(d, 'review', 'main.html#claim')[0], 0)
+        self.assertEqual(do_review(d, 'main.html#claim')[0], 0)
         edit(d, 'motor.html', '105 kW', '90 kW'); commit(d, 'docs: derate again')
         edit(d, 'main.html', 'This design needs', 'The redesigned frame needs')
         commit(d, 'docs: rewrite\n\nseed: fake')   # a body line types nothing
@@ -1153,7 +1278,7 @@ class RevisionRegressions(unittest.TestCase):
     def test_seed_on_target_does_not_reset_dependent_debt(self):
         d = repo()
         edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
-        self.assertEqual(cli(d, 'review', 'main.html#claim')[0], 0)
+        self.assertEqual(do_review(d, 'main.html#claim')[0], 0)
         edit(d, 'motor.html', '105 kW', '90 kW'); commit(d, 'docs: derate again')
         edit(d, 'motor.html', '90 kW', '90 kW rated'); commit(d, 'seed: motor v2')
         rc, out = cli(d, 'impact', 'HEAD')
@@ -1257,6 +1382,7 @@ class RevisionRegressions(unittest.TestCase):
 
 class HookIntegration(unittest.TestCase):
     HOOKS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'hooks')
+    ALL = ('pre-commit', 'prepare-commit-msg', 'commit-msg')
 
     def setUp(self):
         self._cleanup = []
@@ -1280,34 +1406,36 @@ class HookIntegration(unittest.TestCase):
             os.symlink('../../hooks/' + n, dst)
 
     def hrepo(self, committed=True):
-        """A temp repo with lspec.py committed and both hooks installed."""
+        """A temp repo with lspec.py committed and the gate hooks installed."""
         d = self.track(tempfile.mkdtemp())
         shutil.copy(os.path.join(self.HOOKS, '..', 'lspec.py'), os.path.join(d, 'lspec.py'))
         open(os.path.join(d, 'main.html'), 'w').write(MAIN.format(extra=''))
         open(os.path.join(d, 'motor.html'), 'w').write(MOTOR.format(extra=''))
         sh('git', 'init', '-q', cwd=d)
-        self.install(d, 'pre-commit', 'commit-msg')
+        self.install(d, *self.ALL)
         if committed:
             sh('git', 'add', '-A', cwd=d)
             r = self.gcommit(d, 'seed: fixtures')
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return d
 
-    def gcommit(self, d, msg, add=None, finish=True):
-        """git commit with the hooks live; LSPEC_MAIN points at the fixture."""
+    def gcommit(self, d, msg, add=None, settle_=True):
+        """Reconcile MSG and answer the checklist (unless settle_ is False),
+        then `git commit` with the hooks live. stdout carries the reconcile
+        output followed by git's."""
         if add is not None:
             sh('git', 'add', '--', *add, cwd=d)
-        env = dict(os.environ, LSPEC_MAIN='main.html')
-        if finish:
-            subprocess.run([sys.executable, 'lspec.py', 'finish', 'main.html'],
-                           cwd=d, capture_output=True, text=True, env=env, check=False)
-        return subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t',
-                               'commit', '--allow-empty', '-m', msg],
-                              cwd=d, capture_output=True, text=True, env=env, check=False)
+        log = ''
+        if settle_:
+            log = settle(d, msg)[1]
+        r = subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t',
+                            'commit', '--allow-empty', '--no-edit', '-m', msg],
+                           cwd=d, capture_output=True, text=True, check=False)
+        return subprocess.CompletedProcess(r.args, r.returncode, log + r.stdout, r.stderr)
 
     def test_documented_install_preserves_executable_sources_and_blocks(self):
         d = self.hrepo()
-        for name in ('pre-commit', 'commit-msg'):
+        for name in self.ALL:
             hook = Path(d, '.git', 'hooks', name)
             self.assertEqual(os.readlink(hook), '../../hooks/' + name)
             self.assertTrue(os.access(hook, os.X_OK), name)
@@ -1316,9 +1444,19 @@ class HookIntegration(unittest.TestCase):
         self.assertEqual(self.gcommit(d, 'docs: vocabulary', add=['main.html']).returncode, 0)
         result = self.gcommit(d, 'chore: forbidden')
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('[commit-types]', result.stdout + result.stderr)
+        self.assertIn("OPEN [subject] type 'chore' is not declared", result.stdout)
+        self.assertIn('no reconcile receipt', result.stderr)
 
-    def test_post_commit_reports_leftovers_without_reversing_commit(self):
+    def test_commit_message_carries_reconciled_subject_and_trailers(self):
+        d = self.hrepo()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        r = self.gcommit(d, 'docs: derate', add=['motor.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        body = sh('git', 'log', '-1', '--format=%B', cwd=d)
+        self.assertEqual(body.splitlines()[0], 'docs: derate')
+        self.assertRegex(body, r'Reconciled: checklist [0-9a-f]{10} \(\d+ answered\)')
+
+    def test_post_commit_lists_leftovers_and_is_silent_when_clean(self):
         d = self.hrepo()
         self.install(d, 'post-commit')
         sh('git', 'add', 'hooks/post-commit', cwd=d)
@@ -1326,21 +1464,36 @@ class HookIntegration(unittest.TestCase):
         Path(d, 'unfinished.txt').write_text('draft')
         result = self.gcommit(d, 'docs: session event')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('untracked: unfinished.txt', result.stdout + result.stderr)
-        self.assertIn('commit succeeded', result.stdout + result.stderr)
+        self.assertIn('untracked: unfinished.txt', result.stderr)   # git routes hook output to stderr
         self.assertEqual(sh('git', 'log', '-1', '--format=%s', cwd=d).strip(), 'docs: session event')
         Path(d, 'unfinished.txt').unlink()
         result = self.gcommit(d, 'docs: clean event')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('post-commit: working tree clean', result.stdout + result.stderr)
+        self.assertEqual(result.stderr, '')                  # nothing left: the hook says nothing
 
-    def test_fix_subject_prints_one_nonblocking_recurrence_question(self):
+    def test_fix_without_a_watch_entry_gets_no_receipt(self):
+        """S4: an artifact fix with a decision row but no watch entry."""
         d = self.hrepo()
-        result = self.gcommit(d, 'fix: corrected implementation')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual((result.stdout + result.stderr).count('reminder [recurring-failure]'), 1)
-        result = self.gcommit(d, 'docs: no repair')
-        self.assertNotIn('reminder [recurring-failure]', result.stdout + result.stderr)
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        edit(d, 'main.html', '</table>', '<tr id="dl-derate"><td>Derate to 105 kW</td>'
+             '<td>Keep 120 kW</td><td>The bench run overheated.</td></tr></table>')
+        sh('git', 'add', '-A', cwd=d)
+        ensure_request(d)
+        cli(d, 'reconcile', '--subject', 'fix: derate the motor')
+        with self.assertRaises(AssertionError):                 # no watch entry to name
+            answer_all(d, {'cause': ['established', 'dl-derate', 'it is fixed']})
+        self.assertNotIn('RECEIPT', cli(d, 'reconcile')[1])
+        r = self.gcommit(d, 'fix: derate the motor', settle_=False)
+        self.assertNotEqual(r.returncode, 0)
+        edit(d, 'motor.html', '</main>', '<table><tr id="watch-heat"><td>Motor overheated on the bench '
+             'at 120 kW</td><td>2026-10-04</td><td>Derated to 105 kW; closes after ten bench runs '
+             'under 80 C</td></tr></table></main>')
+        sh('git', 'add', '-A', cwd=d)
+        answer_all(d, {'cause': ['established', 'watch-heat', 'thermocouple log shows it']})
+        r = self.gcommit(d, 'fix: derate the motor', settle_=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('Reconciled: cause established, watched at motor.html#watch-heat \u2014 '
+                      'thermocouple log shows it', sh('git', 'log', '-1', '--format=%B', cwd=d))
 
     def test_acceptance_sequence(self):
         d = self.hrepo()
@@ -1348,19 +1501,19 @@ class HookIntegration(unittest.TestCase):
         edit(d, 'motor.html', '120 kW', '105 kW')
         r = self.gcommit(d, 'docs: derate', add=['motor.html'])
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('this commit creates a review obligation', r.stdout + r.stderr)
-        # 2. a subsequent unrelated commit is blocked — with an unstaged
+        self.assertIn('this commit creates a review obligation', r.stdout)
+        # 2. a subsequent unrelated commit is held — with an unstaged
         #    worktree revert present, proving the gate reads the index
         edit(d, 'main.html', 'Main', 'Main heading')
         edit(d, 'motor.html', '105 kW', '120 kW')        # unstaged: worktree lies
         r = self.gcommit(d, 'docs: tweak main', add=['main.html'])
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('[review-gate]', r.stdout + r.stderr)
-        # 3. editing the indebted target again does not evade the block
+        self.assertIn('OPEN [review]', r.stdout)
+        # 3. editing the indebted target again does not evade the hold
         edit(d, 'motor.html', '120 kW', '95 kW')          # staged next
         r = self.gcommit(d, 'docs: derate more', add=['motor.html'])
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('[review-gate]', r.stdout + r.stderr)
+        self.assertIn('OPEN [review]', r.stdout)
         # 4. a correctly named review commit succeeds
         r = self.gcommit(d, 'review: main.html#claim', add=['motor.html'])
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1370,9 +1523,9 @@ class HookIntegration(unittest.TestCase):
         self.assertIn('OWED: none', out)
 
     def test_rename_repair_preserves_the_outstanding_review(self):
-        """Hook-level: rename the target and repair the link without reviewing.
-        The debt must survive: visible after the rename commit, blocking the
-        next non-review commit, cleared by review."""
+        """Rename the target and repair the link without reviewing. The debt
+        must survive: held at the rename, visible after an out-of-band
+        commit, holding the next non-review commit, cleared by review."""
         d = self.hrepo()
         edit(d, 'motor.html', '120 kW', '105 kW')
         r = self.gcommit(d, 'docs: derate', add=['motor.html'])
@@ -1381,52 +1534,44 @@ class HookIntegration(unittest.TestCase):
         edit(d, 'main.html', 'href="motor.html#power"', 'href="motor.html#rated"')
         r = self.gcommit(d, 'docs: rename power to rated', add=['motor.html', 'main.html'])
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('dependency removed or redirected', r.stdout + r.stderr)
+        self.assertIn('removed or redirected', r.stdout)
         # Bypass hooks to verify historical debt still survives an out-of-band rename.
         sh('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-m', 'docs: rename', cwd=d)
-        # the obligation is still owed after the rename — never OWED: none
         rc, out = cli(d, 'impact', 'HEAD')
         self.assertIn('depends-on motor.html#rated', out.split('OUTSTANDING')[1])
-        # and it blocks the next unrelated commit
         edit(d, 'main.html', 'Main', 'Main heading')
         r = self.gcommit(d, 'docs: unrelated tweak', add=['main.html'])
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('[review-gate]', r.stdout + r.stderr)
+        self.assertIn('OPEN [review]', r.stdout)
         sh('git', 'checkout', '--', 'main.html', cwd=d)
-        # a correctly named review commit succeeds and clears
+        sh('git', 'reset', '-q', cwd=d)
         r = self.gcommit(d, 'review: main.html#claim')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        rc, out = cli(d, 'impact', 'HEAD')
-        self.assertIn('OWED: none', out)
+        self.assertIn('OWED: none', cli(d, 'impact', 'HEAD')[1])
 
     def test_retirement_and_target_deletion_in_one_commit(self):
         d = self.hrepo()
         edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>',
              'an independently established rating')
         edit(d, 'motor.html', '<p id="power">120 kW, see <a href="main.html#claim">main</a>.</p>', '')
-        r = self.gcommit(d, 'fix: retire target', add=['main.html', 'motor.html'])
+        r = self.gcommit(d, 'docs: retire target', add=['main.html', 'motor.html'])
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('dependency removed or redirected', r.stdout + r.stderr)
-        env = dict(os.environ, LSPEC_MAIN='main.html')
-        r = subprocess.run([sys.executable, 'lspec.py', '--main', 'main.html',
-                            'review', 'main.html#claim', '-m', 'Independent rating verified'],
-                           cwd=d, env=env, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('removed or redirected', r.stdout)
+        rc, out = do_review(d, 'main.html#claim', message='Independent rating verified')
+        self.assertEqual(rc, 0, out)
         self.assertIn('OWED: none', cli(d, 'impact', 'HEAD')[1])
+        self.assertIn('Independent rating verified', sh('git', 'log', '-1', '--format=%B', cwd=d))
 
     def test_review_handles_already_staged_target_file_deletion(self):
         d = self.hrepo()
         edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>',
              'an independently established rating')
         edit(d, 'main.html', '<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
-        sh('git', 'rm', 'motor.html', cwd=d)
+        sh('git', 'rm', '-q', 'motor.html', cwd=d)
         r = self.gcommit(d, 'docs: retire motor', add=['main.html'])
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        env = dict(os.environ, LSPEC_MAIN='main.html')
-        r = subprocess.run([sys.executable, 'lspec.py', '--main', 'main.html',
-                            'review', 'main.html#claim', '-m', 'Independent rating verified'],
-                           cwd=d, env=env, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rc, out = do_review(d, 'main.html#claim', message='Independent rating verified')
+        self.assertEqual(rc, 0, out)
         self.assertIn('OWED: none', cli(d, 'impact', 'HEAD')[1])
 
     def test_redirect_requires_review_even_without_prior_debt(self):
@@ -1443,7 +1588,7 @@ class HookIntegration(unittest.TestCase):
     def test_deleting_dependent_claim_retires_without_review(self):
         d = self.hrepo()
         edit(d, 'motor.html', '120 kW', '105 kW')
-        self.assertEqual(self.gcommit(d, 'fix: derate', add=['motor.html']).returncode, 0)
+        self.assertEqual(self.gcommit(d, 'docs: derate', add=['motor.html']).returncode, 0)
         edit(d, 'main.html', '<p id="claim">This design needs '
              '<a rel="depends-on" href="motor.html#power">motor power</a>.</p>', '')
         edit(d, 'motor.html', ', see <a href="main.html#claim">main</a>', '')
@@ -1455,35 +1600,24 @@ class HookIntegration(unittest.TestCase):
         sh('git', 'add', '-A', cwd=d)
         r = self.gcommit(d, 'seed: fixtures')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('first commit', r.stdout + r.stderr)   # warned, not blocked
-        self.assertNotIn('[review-gate]', r.stdout + r.stderr)
+        self.assertIn('first commit', r.stdout)            # noted, not held
+        self.assertNotIn('OPEN [review]', r.stdout)
 
     def test_first_commit_of_unresolved_template_is_blocked(self):
         d = self.track(tempfile.mkdtemp())
-        shutil.copy(
-            os.path.join(self.HOOKS, '..', 'lspec.py'),
-            os.path.join(d, 'lspec.py'),
-        )
-        match = re.search(
-            r'<pre data-specimen="seed">(.*?)</pre>',
-            Path(lspec.__file__).with_name('live-spec.html').read_text(
-                encoding='utf-8'
-            ),
-            re.DOTALL,
-        )
+        shutil.copy(os.path.join(self.HOOKS, '..', 'lspec.py'), os.path.join(d, 'lspec.py'))
+        match = re.search(r'<pre data-specimen="seed">(.*?)</pre>',
+                          Path(lspec.__file__).with_name('live-spec.html').read_text(encoding='utf-8'),
+                          re.DOTALL)
         if match is None:
             self.fail('live-spec.html must contain the seed specimen')
-
-        Path(d, 'main.html').write_text(
-            html.unescape(match.group(1)),
-            encoding='utf-8',
-        )
+        Path(d, 'main.html').write_text(html.unescape(match.group(1)), encoding='utf-8')
         sh('git', 'init', '-q', cwd=d)
-        self.install(d, 'pre-commit', 'commit-msg')
+        self.install(d, *self.ALL)
         sh('git', 'add', '-A', cwd=d)
         r = self.gcommit(d, 'seed: raw template')
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('[adapt]', r.stdout + r.stderr)
+        self.assertIn('[adapt]', r.stdout)
 
     def test_shallow_clone_blocks_unknown_then_review_recovers(self):
         d = self.hrepo()
@@ -1492,18 +1626,13 @@ class HookIntegration(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         c = self.track(tempfile.mkdtemp())
         shutil.rmtree(c); sh('git', 'clone', '-q', '--depth', '1', f'file://{d}', c, cwd=os.path.dirname(c))
-        self.install(c, 'pre-commit', 'commit-msg')
-        # unknown history blocks, with the recovery named
+        self.install(c, *self.ALL)
         r = self.gcommit(c, 'docs: unrelated')
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('clearance cannot be established', r.stdout + r.stderr)
+        self.assertIn('clearance cannot be established', r.stdout)
         # recovery path 2: record an explicit review against committed state
-        env = dict(os.environ, LSPEC_MAIN='main.html')
-        r = subprocess.run(['python3', 'lspec.py', '--main', 'main.html', 'review',
-                            'main.html#claim', '-m', 'confirmed against committed state'],
-                           cwd=c, capture_output=True, text=True, env=env, check=False)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        # the resulting history reports clearance
+        rc, out = do_review(c, 'main.html#claim', message='confirmed against committed state')
+        self.assertEqual(rc, 0, out)
         rc, out = cli(c, 'impact', 'HEAD')
         self.assertEqual(rc, 0, out)
         self.assertIn('OWED: none', out)
@@ -1515,17 +1644,23 @@ class HookIntegration(unittest.TestCase):
         edit(d, 'motor.html', 'id="torque"', 'id="power"')       # worktree: repaired
         r = self.gcommit(d, 'docs: broken candidate')
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('anchor', r.stdout + r.stderr)
+        self.assertIn('[anchor]', r.stdout)
 
-    def test_hook_requires_successful_finish_even_with_valid_staged_tree(self):
+    def test_commit_without_reconcile_or_after_restaging_is_refused(self):
         d = self.hrepo()
         edit(d, 'motor.html', '120 kW', '105 kW')
-        sh('git', 'add', '-A', cwd=d)                            # staged: valid
-        edit(d, 'motor.html', 'id="power"', 'id="torque"')       # worktree: broken
-        r = self.gcommit(d, 'docs: derate')
-        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('[finish-receipt]', r.stdout + r.stderr)
-        self.assertEqual(cli(d, 'check', '--staged')[0], 0)
+        sh('git', 'add', '-A', cwd=d)
+        r = self.gcommit(d, 'docs: derate', settle_=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('no reconcile receipt', r.stderr)
+        self.assertEqual(settle(d, 'docs: derate')[0], 0)
+        edit(d, 'motor.html', '105 kW', '100 kW')
+        sh('git', 'add', '-A', cwd=d)                            # restaged after reconcile
+        r = self.gcommit(d, 'docs: derate', settle_=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('the staged state changed since reconcile', r.stderr)
+        r = self.gcommit(d, 'docs: derate')                      # rerun keeps unchanged answers
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_hook_enforces_declared_vocabulary(self):
         d = self.hrepo()
@@ -1536,7 +1671,7 @@ class HookIntegration(unittest.TestCase):
         edit(d, 'motor.html', '120 kW', '105 kW')
         r = self.gcommit(d, 'chore: derate', add=['motor.html'])
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("'chore'", r.stdout + r.stderr)
+        self.assertIn("'chore'", r.stdout)
         r = self.gcommit(d, 'docs: derate', add=['motor.html'])
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
@@ -1545,22 +1680,25 @@ class HookIntegration(unittest.TestCase):
         edit(d, 'motor.html', '120 kW', '105 kW')
         r = self.gcommit(d, 'untyped-ish: derate', add=['motor.html'])
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('commit vocabulary not enforced', r.stdout + r.stderr)
+        self.assertIn('commit vocabulary not enforced', r.stdout)
 
-    def test_hook_seal_gate_blocks_unauthorized_sealed_edit(self):
+    def test_sealed_edit_needs_a_decision_or_correction(self):
         d = self.hrepo()
         edit(d, 'main.html', '<table>', '<p id="req" data-sealed>The pair rule holds.</p><table>')
         r = self.gcommit(d, 'docs: lock the pair rule', add=['main.html'])
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
-        r = self.gcommit(d, 'docs: bend the rule', add=['main.html'])
-        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('[sealed] main.html#req', r.stdout + r.stderr)
         edit(d, 'main.html', '</table>\n</main></body></html>',
-             '<tr id="dl-req" data-changes="main.html#req"><td>Bend it</td>'
-             '<td>Keep rigid</td><td>New evidence.</td></tr></table>\n</main></body></html>')
-        r = self.gcommit(d, 'docs: bend the rule', add=['main.html'])
+             '<tr id="dl-req"><td>Bend it</td><td>Keep rigid</td><td>New evidence.</td></tr>'
+             '</table>\n</main></body></html>')
+        sh('git', 'add', 'main.html', cwd=d)
+        ensure_request(d)
+        cli(d, 'reconcile', '--subject', 'docs: bend the rule')
+        answer_all(d, {'sealed': ['decision', 'dl-req']})
+        r = self.gcommit(d, 'docs: bend the rule', settle_=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('Reconciled: decision main.html#req by dl-req',
+                      sh('git', 'log', '-1', '--format=%B', cwd=d))
 
     def test_shallow_clone_recovers_by_unshallowing(self):
         d = self.hrepo()
@@ -1569,16 +1707,16 @@ class HookIntegration(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         c = self.track(tempfile.mkdtemp())
         shutil.rmtree(c); sh('git', 'clone', '-q', '--depth', '1', f'file://{d}', c, cwd=os.path.dirname(c))
-        self.install(c, 'pre-commit', 'commit-msg')
+        self.install(c, *self.ALL)
         r = self.gcommit(c, 'docs: unrelated')
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         # recovery path 1: fetch sufficient history — the debt becomes visible
-        # content owed against a real baseline, and blocks until reviewed
+        # content owed against a real baseline, and holds until reviewed
         sh('git', 'fetch', '--unshallow', '-q', 'origin', cwd=c)
         r = self.gcommit(c, 'docs: unrelated')
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('was already owed at HEAD', r.stdout + r.stderr)
-        self.assertNotIn('clearance cannot be established', r.stdout + r.stderr)
+        self.assertIn('REVIEW OWED main.html#claim', r.stdout)
+        self.assertNotIn('clearance cannot be established', r.stdout.split('CHECKLIST')[-1])
         r = self.gcommit(c, 'review: main.html#claim')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
@@ -1626,9 +1764,8 @@ class CommitTypes(unittest.TestCase):
         return d
 
     def gate(self, d, subject):
-        msg = os.path.join(d, 'msg')
-        Path(msg).write_text(subject + '\n', encoding='utf-8')
-        return cli(d, 'check', '--staged', '--commit-msg', msg)
+        out = reconcile_out(d, subject)
+        return int('OPEN [subject]' in out or 'OPEN [review]' in out), out
 
     def test_declaration_validation(self):
         ok = '</table><p>' + DECL.format('docs fix seed audit review') + '</p><table>'
@@ -1664,6 +1801,16 @@ class CommitTypes(unittest.TestCase):
         rc, out = self.gate(d, 'no prefix here')
         self.assertEqual(rc, 1); self.assertIn('no `type:` prefix', out)
 
+    def test_subject_shape(self):
+        d = self.drepo()
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        rc, out = self.gate(d, 'docs: ' + 'x' * 70)
+        self.assertEqual(rc, 1); self.assertIn('76 characters (> 72)', out)
+        rc, out = self.gate(d, 'docs: derate; and rename the table')
+        self.assertEqual(rc, 1); self.assertIn("chains clauses with ';'", out)
+        rc, out = self.gate(d, 'review: ' + ', '.join(['main.html#claim'] * 6))
+        self.assertNotIn('characters', out)      # review subjects list their claims
+
     def test_gate_honors_custom_vocabulary(self):
         d = self.drepo(DECL.format('docs fix seed audit review wip'))
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
@@ -1697,221 +1844,154 @@ def lrepo():
     sh('git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'docs: seed', cwd=d)
     return d
 
-def authorize(d, row_id, changes, where='main.html'):
-    """Add a dl- row carrying data-changes to WHERE's table."""
+def decision_row(d, row_id, where='main.html', cells=('s', 'r', 'w')):
+    """Add a dl- row to WHERE's table."""
     edit(d, where, '</table>\n</main></body></html>',
-         f'<tr id="{row_id}" data-changes="{changes}"><td>s</td><td>r</td><td>w</td></tr>'
+         f'<tr id="{row_id}">' + ''.join(f'<td>{c}</td>' for c in cells) + '</tr>'
          '</table>\n</main></body></html>')
 
-class SealGate(unittest.TestCase):
-    def staged(self, d):
-        sh('git', 'add', '-A', cwd=d)
-        return cli(d, 'check', '--staged')
 
-    def test_protected_edit_blocked_then_authorized(self):
+def evaluate_in(d, subject='docs: x', main='main.html', today=None):
+    cwd = os.getcwd(); os.chdir(d)
+    try:
+        col = lspec.Collection(main, basis='staged')
+        return lspec.evaluate(col, subject, today=today)
+    finally:
+        os.chdir(cwd)
+
+
+class SealGate(unittest.TestCase):
+    """A sealed change is a decision change or a correction, answered in reconcile."""
+
+    def sealed(self, d, subject='docs: x', main='main.html'):
+        sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, subject, main)
+        return ctx, {it['key']: it for it in items if it['kind'] == 'sealed'}, items
+
+    def answer(self, d, words, main='main.html'):
+        ctx, sealed, _ = self.sealed(d, main=main)
+        it = next(iter(sealed.values()))
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            return lspec.validate(it, given(words), ctx, set())
+        finally:
+            os.chdir(cwd)
+
+    def test_content_change_needs_an_answer(self):
         d = lrepo()
         edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)
-        self.assertIn('[sealed] main.html#req: content changed', out)
-        authorize(d, 'dl-req', 'main.html#req')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 0, out)
+        _, sealed, _ = self.sealed(d)
+        self.assertEqual(list(sealed), ['sealed:main.html#req'])
+        self.assertIn('content changed', sealed['sealed:main.html#req']['title'])
+        self.assertIn('was: The pair rule holds.', sealed['sealed:main.html#req']['excerpt'])
 
-    def test_existing_rationale_can_newly_authorize_claim(self):
+    def test_evidence_shows_where_a_long_claim_changed(self):
         d = lrepo()
-        authorize(d, 'dl-req', 'main.html#top')
+        long = 'The pair rule holds. ' + 'Context words fill this claim. ' * 20
+        edit(d, 'main.html', 'The pair rule holds.', long + 'Last clause stays.')
+        commit(d, 'docs: lengthen')
+        edit(d, 'main.html', 'Last clause stays.', 'Last clause bends.')
+        _, sealed, _ = self.sealed(d)
+        excerpt = sealed['sealed:main.html#req']['excerpt']
+        self.assertIn('Last clause stays.', excerpt)
+        self.assertIn('Last clause bends.', excerpt)
+
+    def test_decision_answer_requires_a_row_changed_in_this_commit(self):
+        d = lrepo()
+        decision_row(d, 'dl-old')
         commit(d, 'docs: existing rationale')
         edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
-        edit(d, 'main.html', 'data-changes="main.html#top"',
-             'data-changes="main.html#top main.html#req"')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 0, out)
+        with self.assertRaisesRegex(ValueError, 'not added or changed in this commit'):
+            self.answer(d, ['decision', 'dl-old'])
+        with self.assertRaisesRegex(ValueError, 'no decision row'):
+            self.answer(d, ['decision', 'dl-missing'])
+        edit(d, 'main.html', '<td>w</td>', '<td>New evidence permits bending.</td>')
+        answer, trailer = self.answer(d, ['decision', 'dl-old'])
+        self.assertEqual(trailer, 'Reconciled: decision main.html#req by dl-old')
+        decision_row(d, 'dl-new')
+        answer, trailer = self.answer(d, ['decision', 'main.html#dl-new'])
+        self.assertEqual(answer, ['decision', 'dl-new'])
 
-    def test_equivalent_address_does_not_renew_authorization(self):
+    def test_cosmetic_row_edit_is_not_a_decision(self):
         d = lrepo()
-        authorize(d, 'dl-req', 'main.html#req')
-        commit(d, 'docs: existing authorization')
-        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
-        edit(d, 'main.html', 'data-changes="main.html#req"',
-             'data-changes="./main.html#req"')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)
-        self.assertIn('[sealed] main.html#req', out)
-
-    def test_marker_removal_blocked(self):
-        d = lrepo()
-        edit(d, 'main.html', ' data-sealed', '')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)
-        self.assertIn('marker removed', out)
-
-    def test_claim_deletion_blocked(self):
-        d = lrepo()
-        edit(d, 'main.html', '<p id="req" data-sealed>The pair rule holds.</p>', '')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)
-        self.assertIn('claim deleted or id changed', out)
-
-    def test_id_rename_is_authorized_by_old_address(self):
-        d = lrepo()
-        edit(d, 'main.html', 'id="req"', 'id="rule"')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)
-        authorize(d, 'dl-req', 'main.html#req')   # historical id, resolved at HEAD
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 0, out)
-
-    def test_file_deletion_blocked(self):
-        d = lrepo()
-        edit(d, 'motor.html', '<h1 id="top">Motor</h1>',
-             '<h1 id="top">Motor</h1><p id="mreq" data-sealed>Motor mount is locked.</p>')
-        edit(d, 'main.html', 'motor power</a>.', 'motor power</a> and <a href="motor.html#mreq">mount</a>.')
-        commit(d, 'docs: lock the mount')
-        sh('git', 'rm', '-q', 'motor.html', cwd=d)
-        edit(d, 'main.html', '<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
-        edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>', 'motor power')
-        edit(d, 'main.html', ' and <a href="motor.html#mreq">mount</a>', '')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)
-        self.assertIn('[sealed] motor.html#mreq: file deleted', out)
-
-    def test_split_row_removal_blocked(self):
-        d = lrepo()
-        edit(d, 'motor.html', '<h1 id="top">Motor</h1>',
-             '<h1 id="top">Motor</h1><p id="mreq" data-sealed>Motor mount is locked.</p>')
-        commit(d, 'docs: lock the mount')
-        edit(d, 'main.html', '<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)
-        self.assertIn('leaves the collection', out)
-
-    def test_unrelated_or_unchanged_rows_authorize_nothing(self):
-        d = lrepo()
-        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
-        authorize(d, 'dl-other', 'main.html#top')   # names a different (unlocked) claim
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)
-        self.assertIn('[sealed] main.html#req', out)
-
-    def test_stale_authorization_row_authorizes_nothing(self):
-        d = lrepo()
-        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
-        authorize(d, 'dl-req', 'main.html#req')
-        commit(d, 'docs: bend the rule')         # the authorized change landed
-        edit(d, 'main.html', 'The pair rule bends.', 'The pair rule breaks.')
-        # a new change with only the old, unchanged row present must still block
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)
-        self.assertIn('[sealed] main.html#req', out)
-
-    def test_whitespace_only_row_edit_authorizes_nothing(self):
-        d = lrepo()
-        authorize(d, 'dl-req', 'main.html#req')
+        decision_row(d, 'dl-req')
         commit(d, 'docs: authorize once')
         edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
-        edit(d, 'main.html', '<td>s</td><td>r</td><td>w</td></tr>',
-             '<td>s</td> <td>r</td><td>w</td></tr>')   # whitespace only
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)
-        self.assertIn('[sealed] main.html#req', out)
+        edit(d, 'main.html', '<tr id="dl-req">', '<tr id="dl-req" class="pretty">')
+        edit(d, 'main.html', '<td>s</td><td>r</td>', '<td>s</td> <td>r</td>')
+        with self.assertRaisesRegex(ValueError, 'not added or changed'):
+            self.answer(d, ['decision', 'dl-req'])
 
-    def test_bad_data_changes_address_is_red(self):
+    def test_correction_carries_its_reason(self):
         d = lrepo()
-        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
-        authorize(d, 'dl-req', 'main.html#nosuchid')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)
-        self.assertIn('does not resolve at HEAD', out)
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule holds firm.')
+        with self.assertRaisesRegex(ValueError, 'at least three words'):
+            self.answer(d, ['correction', 'typo'])
+        answer, trailer = self.answer(d, ['correction', 'restores', 'the', 'agreed', 'wording'])
+        self.assertEqual(trailer, 'Reconciled: correction main.html#req — restores the agreed wording')
 
-    def test_unborn_head_validates_without_obligation(self):
+    def test_marker_removal_deletion_and_rename_are_sealed_changes(self):
+        for old, new, cause in [(' data-sealed', '', 'marker removed'),
+                                ('<p id="req" data-sealed>The pair rule holds.</p>', '', 'claim deleted'),
+                                ('id="req"', 'id="rule"', 'claim deleted or id changed')]:
+            with self.subTest(cause=cause):
+                d = lrepo()
+                edit(d, 'main.html', old, new)
+                _, sealed, _ = self.sealed(d)
+                self.assertIn(cause, sealed['sealed:main.html#req']['title'])
+
+    def test_file_deletion_and_split_row_removal(self):
+        d = lrepo()
+        edit(d, 'motor.html', '<h1 id="top">Motor</h1>',
+             '<h1 id="top">Motor</h1><p id="mreq" data-sealed>Motor mount is locked.</p>')
+        commit(d, 'docs: lock the mount')
+        edit(d, 'main.html', '<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
+        _, sealed, _ = self.sealed(d)
+        self.assertIn('leaves the collection', sealed['sealed:motor.html#mreq']['title'])
+        sh('git', 'rm', '-q', 'motor.html', cwd=d)
+        _, sealed, _ = self.sealed(d)
+        self.assertIn('file deleted', sealed['sealed:motor.html#mreq']['title'])
+
+    def test_unchanged_seal_asks_nothing(self):
+        d = lrepo()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        _, sealed, _ = self.sealed(d)
+        self.assertEqual(sealed, {})
+
+    def test_unborn_head_has_no_prior_seal(self):
         d = tempfile.mkdtemp()
         open(os.path.join(d, 'main.html'), 'w').write(MAIN.format(extra=LOCKED))
         open(os.path.join(d, 'motor.html'), 'w').write(MOTOR.format(extra=''))
         sh('git', 'init', '-q', cwd=d)
-        sh('git', 'add', '-A', cwd=d)
-        rc, out = cli(d, 'check', '--staged')
-        self.assertEqual(rc, 0, out)
-        self.assertNotIn('[sealed]', out)
+        _, sealed, items = self.sealed(d)
+        self.assertEqual(sealed, {})
+        self.assertFalse([it for it in items if it['kind'] == 'baseline'])
 
-    def test_unavailable_baseline_fails_never_clears(self):
+    def test_unavailable_baseline_holds_never_clears(self):
         d = lrepo()
         edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
         sh('git', 'add', '-A', cwd=d)
-        cwd = os.getcwd(); os.chdir(d)
-        try:
-            col = lspec.Collection('main.html', basis='staged')
-            with mock.patch.object(lspec, 'file_at',
-                                   side_effect=lspec.HistoryUnavailable('object unavailable')):
-                rc = lspec.seal_gate(col, 0)
-        finally:
-            os.chdir(cwd)
-        self.assertEqual(rc, 1)
+        with mock.patch.object(lspec, 'file_at',
+                               side_effect=lspec.HistoryUnavailable('object unavailable')):
+            _, items, _ = evaluate_in(d)
+        baseline = [it for it in items if it['kind'] == 'baseline']
+        self.assertTrue(baseline and baseline[0]['mech'], items)
+        self.assertIn('object unavailable', baseline[0]['title'])
+
+    def test_main_rename_recovers_baseline_collection(self):
+        d = lrepo()
+        Path(d, 'sub').mkdir()
+        sh('git', 'mv', 'main.html', 'sub/main.html', cwd=d)
+        edit(d, 'sub/main.html', 'href="motor.html', 'href="../motor.html')
+        edit(d, 'sub/main.html', 'The pair rule holds.', 'The pair rule bends.')
+        edit(d, 'sub/main.html', ' data-sealed', '')
+        _, sealed, _ = self.sealed(d, main='sub/main.html')
+        self.assertIn('sealed:main.html#req', sealed)          # old address named
 
     def test_data_sealed_without_id_is_structural_red(self):
         rc, out = run(main_extra='</table><p data-sealed>x</p><table>')
         self.assertEqual(rc, 1)
         self.assertIn('data-sealed on an element with no id', out)
-
-    def run_main(self, d, main, *argv):
-        cwd = os.getcwd(); os.chdir(d)
-        out, err = io.StringIO(), io.StringIO()
-        try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                rc = lspec.main(['lspec', '--main', main, *argv])
-        finally:
-            os.chdir(cwd)
-        return rc, out.getvalue() + err.getvalue()
-
-    def test_main_rename_recovers_baseline_collection(self):
-        d = lrepo()
-        Path(d, 'sub').mkdir()
-        sh('git', 'mv', 'main.html', 'sub/main.html', cwd=d)   # staged rename
-        edit(d, 'sub/main.html', 'The pair rule holds.', 'The pair rule bends.')
-        edit(d, 'sub/main.html', ' data-sealed', '')           # seal removed too
-        sh('git', 'add', '-A', cwd=d)
-        rc, out = self.run_main(d, 'sub/main.html', 'check', '--staged')
-        self.assertEqual(rc, 1, out)
-        self.assertIn('[sealed] main.html#req', out)           # old address named
-
-    def test_incomplete_baseline_fails_never_clears(self):
-        d = lrepo()
-        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
-        sh('git', 'add', '-A', cwd=d)
-        cwd = os.getcwd(); os.chdir(d)
-        try:
-            col = lspec.Collection('main.html', basis='staged')
-            fake = lambda *a, **k: argparse.Namespace(
-                main=col.main, specs={col.main: lspec.file_at('HEAD', col.main)},
-                fails=['[collection] cannot read motor.html at HEAD: object unavailable'])
-            with mock.patch.object(lspec, 'Collection', side_effect=fake):
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out):
-                    rc = lspec.seal_gate(col, 0)
-        finally:
-            os.chdir(cwd)
-        self.assertEqual(rc, 1)
-        self.assertIn('baseline incomplete', out.getvalue())
-
-    def test_cosmetic_row_edit_revives_no_authorization(self):
-        d = lrepo()
-        authorize(d, 'dl-req', 'main.html#req')
-        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
-        commit(d, 'docs: bend the rule')                       # authorized, landed
-        edit(d, 'main.html', 'The pair rule bends.', 'The pair rule breaks.')
-        edit(d, 'main.html', '<tr id="dl-req" data-changes="main.html#req">',
-             '<tr id="dl-req" class="pretty" data-changes="main.html#req">')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)          # class= is not a substantive update
-        self.assertIn('[sealed] main.html#req', out)
-        # An unrelated address must not renew the req authorization.
-        edit(d, 'main.html', 'class="pretty" data-changes="main.html#req"',
-             'data-changes="main.html#req main.html#top"')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 1, out)
-        edit(d, 'main.html', '<td>w</td>', '<td>New evidence permits this change.</td>')
-        rc, out = self.staged(d)
-        self.assertEqual(rc, 0, out)
 
 
 # ------------------------------------------- staged link-target isolation
@@ -1985,7 +2065,7 @@ class CleanCheck(unittest.TestCase):
     def test_clean_dirty_states(self):
         d = repo()
         rc, out = cli(d, 'check', '--clean')
-        self.assertEqual(rc, 0, out); self.assertIn('CLEAN', out)
+        self.assertEqual((rc, out), (0, ''))          # nothing left: nothing said
         edit(d, 'motor.html', '120 kW', '105 kW')     # unstaged
         rc, out = cli(d, 'check', '--clean')
         self.assertEqual(rc, 1); self.assertIn('unstaged: motor.html', out)
@@ -1993,9 +2073,10 @@ class CleanCheck(unittest.TestCase):
         rc, out = cli(d, 'check', '--clean')
         self.assertEqual(rc, 1); self.assertIn('staged: motor.html', out)
         self.assertNotIn('unstaged: motor.html', out)
+        self.assertIn('UNCOMMITTED — 1 file(s) left after HEAD', out)
         commit(d, 'docs: derate')
         rc, out = cli(d, 'check', '--clean')
-        self.assertEqual(rc, 0, out)
+        self.assertEqual((rc, out), (0, ''))
 
     def test_untracked_and_non_spec_files_reported(self):
         d = repo()
@@ -2029,19 +2110,11 @@ class CliArgs(unittest.TestCase):
         d = repo()
         rc, out = cli(d, 'start')
         self.assertEqual(rc, 0, out)
-        commands = out.split('next commands (MAIN is supplied on every invocation):')[1].split('verbs')[0]
-        cwd = os.getcwd()
-        try:
-            os.chdir(d)
-            for line in commands.strip().splitlines():
-                argv = shlex.split(line)
-                with contextlib.redirect_stdout(io.StringIO()):
-                    self.assertEqual(lspec.main(['lspec', *argv[2:]]), 0)
-            col = argparse.Namespace(main=lspec.canon('a b.html'))
-            argv = shlex.split(lspec.command(col, 'review', 'a b.html#claim'))
-            self.assertEqual(argv, ['python3', 'lspec.py', '--main', 'a b.html', 'review', 'a b.html#claim'])
-        finally:
-            os.chdir(cwd)
+        self.assertIn("python3 lspec.py --main main.html reconcile --subject 'type: one transition'", out)
+        self.assertIn('python3 lspec.py --main main.html finish', out)
+        col = argparse.Namespace(main=lspec.canon('a b.html'))
+        argv = shlex.split(lspec.command(col, 'review', 'a b.html#claim'))
+        self.assertEqual(argv, ['python3', 'lspec.py', '--main', 'a b.html', 'review', 'a b.html#claim'])
 
     def test_main_flag_after_subcommand(self):
         d = repo()
@@ -2104,61 +2177,55 @@ class ChangeFeedback(unittest.TestCase):
         commit(d, 'docs: decision')
         return row
 
-    def test_removed_decision_warns_without_failing(self):
-        d = self.fixture()
-        row = self.add_decision(d)
-        edit(d, 'main.html', row, '')
-        rc, out = cli(d, 'check', '--diff', 'HEAD')
-        self.assertEqual(rc, 0, out)
-        self.assertIn('reminder [decision-removed] main.html#dl-old', out)
-        sh('git', 'add', 'main.html', cwd=d)
-        rc, out = cli(d, 'check', '--staged')
-        self.assertEqual(rc, 0, out)
-        self.assertIn('reminder [decision-removed]', out)
+    def removed_items(self, d, main='main.html'):
+        _, items, _ = evaluate_in(d, 'docs: x', main)
+        return [it for it in items if it['kind'] == 'removed']
 
-    def test_staged_reminders_ignore_unstaged_row_deletion(self):
+    def test_removed_decision_is_a_judgment_item(self):
         d = self.fixture()
         row = self.add_decision(d)
         edit(d, 'main.html', row, '')
-        rc, out = cli(d, 'check', '--staged')
-        self.assertEqual(rc, 0, out)
-        self.assertNotIn('reminder [decision-removed]', out)
+        sh('git', 'add', 'main.html', cwd=d)
+        items = self.removed_items(d)
+        self.assertEqual([it['key'] for it in items], ['removed:main.html#dl-old'])
+        self.assertIn('Chosen Rejected Because', items[0]['excerpt'])
+        self.assertEqual(cli(d, 'check', '--staged')[0], 0)    # the validator stays structural
+
+    def test_unstaged_row_deletion_is_not_in_the_candidate(self):
+        d = self.fixture()
+        row = self.add_decision(d)
+        edit(d, 'main.html', row, '')
+        self.assertEqual(self.removed_items(d), [])
 
     def test_file_rename_does_not_report_removed_decisions(self):
         d = self.fixture()
         self.add_decision(d)
         rc, out = cli(d, 'mv', 'main.html', 'renamed.html')
         self.assertEqual(rc, 0, out)
-        cwd = os.getcwd()
+        self.assertEqual(self.removed_items(d, 'renamed.html'), [])
+
+    def test_replaced_answer_names_a_changed_row(self):
+        d = self.fixture()
+        row = self.add_decision(d)
+        edit(d, 'main.html', row, '<tr id="dl-new"><td>New</td><td>Chosen</td><td>Better</td></tr>')
+        sh('git', 'add', 'main.html', cwd=d)
+        ctx, items, _ = evaluate_in(d)
+        it = next(i for i in items if i['kind'] == 'removed')
+        cwd = os.getcwd(); os.chdir(d)
         try:
-            os.chdir(d)
-            stream = io.StringIO()
-            with contextlib.redirect_stdout(stream):
-                rc = lspec.main(['lspec', '--main', 'renamed.html', 'check', '--staged'])
+            self.assertEqual(lspec.validate(it, given(['replaced', 'dl-new']), ctx, set())[1],
+                             'Reconciled: main.html#dl-old replaced by dl-new')
+            with self.assertRaises(ValueError):
+                lspec.validate(it, given(['replaced', 'dl-split-motor']), ctx, set())
         finally:
             os.chdir(cwd)
-        self.assertEqual(rc, 0, stream.getvalue())
-        self.assertNotIn('reminder [decision-removed]', stream.getvalue())
-
-    def test_existing_diagnostic_register_change_prompts_once(self):
-        d = self.fixture()
-        edit(d, 'motor.html', '</main>',
-             '<h2 id="diagnostic">Diagnostic register</h2><p id="failure">Symptom and fix</p></main>')
-        commit(d, 'docs: diagnosis')
-        edit(d, 'motor.html', 'Symptom and fix', 'Symptom, tell and fix')
-        rc, out = cli(d, 'check', '--diff', 'HEAD')
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(out.count('reminder [recurring-failure]'), 1)
-        self.assertIn('If this fixes', out)
 
     def test_start_lists_actual_seals(self):
         d = self.fixture()
         edit(d, 'motor.html', 'id="power"', 'id="power" data-sealed')
         rc, out = cli(d, 'start')
-        self.assertIn('sealed claims: 1', out)
-        self.assertIn('  motor.html#power', out)
-        self.assertIn('depends-on edges: 1', out)
-        self.assertIn('does not establish that the selection is complete', out)
+        self.assertIn('SEALED (1): motor.html#power', out)
+        self.assertIn('DEPENDS-ON EDGES: 1', out)
 
     def test_mv_and_review_print_next_steps(self):
         d = self.fixture()
@@ -2166,237 +2233,477 @@ class ChangeFeedback(unittest.TestCase):
         self.assertIn('Rename prepared; nothing committed', out)
         self.assertIn('python3 lspec.py --main main.html check --diff HEAD', out)
         commit(d, 'docs: renamed')
-        rc, out = cli(d, 'review', 'main.html#claim')
+        rc, out = do_review(d, 'main.html#claim')
         self.assertEqual(rc, 0, out)
-        self.assertIn('Review committed. Rerun', out)
-        self.assertIn('python3 lspec.py check --clean', out)
+        self.assertIn('Review committed.', out)
 
 
-class Finish(unittest.TestCase):
+def request(d):
+    p = state_file(d, 'request.json')
+    return lspec.json.loads(p.read_text()) if p.exists() else None
+
+
+def head(d):
+    return sh('git', 'rev-parse', 'HEAD', cwd=d).strip()
+
+
+class Requests(unittest.TestCase):
+    """start opens a request at a recorded start commit; finish closes it."""
+
     def fixture(self):
         d = repo()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         return d
 
-    def snapshot(self, d):
-        # Only the local receipt may change: include index, refs, objects,
-        # reflogs and every working-tree file, with contents/modes/timestamps.
-        return {str(p.relative_to(d)): (p.read_bytes(), p.stat().st_mode,
-                                       p.stat().st_mtime_ns)
-                for p in Path(d).rglob('*') if p.is_file()
-                and p != Path(d, '.git', 'lspec', 'finish-receipt.json')}
-
-    def test_clean_prompt_baseline_and_only_receipt_written(self):
+    def test_start_opens_a_request_at_head(self):
         d = self.fixture()
-        before = self.snapshot(d)
-        rc, out = cli(d, 'finish')
+        rc, out = cli(d, 'start')
         self.assertEqual(rc, 0, out)
-        self.assertEqual(before, self.snapshot(d))
-        self.assertIn('PASS', out)
-        self.assertIn('WORKING TREE — CLEAN', out)
-        self.assertIn('REVIEW OWED: none', out)
-        self.assertIn('Review what changed or was learned during this session', out)
-        self.assertIn('including decisions, findings, and changed assumptions.', out)
-        self.assertIn('Distinguish verification actually performed from expected behavior.', out)
-        self.assertIn('rerun `python3 lspec.py --main main.html finish`', out)
-        self.assertIn('start records no session baseline', out)
-        self.assertIn('committed session changes cannot be identified', out)
-        self.assertIn('Open/watch items may remain at handoff', out)
-        self.assertIn('does not certify semantic agreement', out)
+        self.assertIn('REQUEST — opened at ' + head(d)[:12], out)
+        self.assertEqual(request(d)['start'], head(d))
+        self.assertEqual(request(d)['main'], 'main.html')
 
-    def test_dirty_inventory_mapping_and_only_receipt_written(self):
+    def test_start_reports_an_open_request_instead_of_resetting_it(self):
         d = self.fixture()
-        edit(d, 'motor.html', '120 kW', '105 kW')
-        sh('git', 'add', 'motor.html', cwd=d)
-        edit(d, 'motor.html', '105 kW', '120 kW')  # hide staged edit from HEAD/worktree diff
-        Path(d, 'notes.txt').write_text('finding')
-        before = self.snapshot(d)
-        rc, out = cli(d, 'finish')
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(before, self.snapshot(d))
-        self.assertIn('staged: motor.html [spec]', out)
-        self.assertIn('unstaged: motor.html [spec]', out)
-        self.assertIn('untracked: notes.txt [other]', out)
-        self.assertIn('CHANGED motor.html#power [staged]', out)
-        self.assertIn('CHANGED motor.html#power [unstaged/untracked]', out)
-        self.assertIn('== motor.html#power; one-hop: main.html#claim', out)
-        self.assertIn('UNMAPPED notes.txt', out)
-        self.assertIn('[uncommitted]', out)
-        self.assertEqual(cli(d, 'check', '--clean')[0], 1)
-
-    def test_committed_debt_survives_finish_and_pending_edge_removal(self):
-        d = self.fixture()
-        edit(d, 'motor.html', '120 kW', '105 kW')
+        cli(d, 'start')
+        first = request(d)
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        cli(d, 'reconcile', '--subject', 'docs: derate')
+        answer_all(d)
         commit(d, 'docs: derate')
-        rc, out = cli(d, 'finish')
-        self.assertEqual(rc, 0, out)
-        self.assertIn('[content]', out)
-        self.assertIn('WORKING TREE — CLEAN', out)
-        edit(d, 'main.html', 'rel="depends-on"', '')
-        sh('git', 'add', 'main.html', cwd=d)
-        before = self.snapshot(d)
-        rc, out = cli(d, 'finish')
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(before, self.snapshot(d))
-        self.assertIn('[content]', out)
-        self.assertIn('[pending dependency retirement]', out)
-        self.assertIn('MARKUP main.html#claim', out)
-        self.assertEqual(cli(d, 'finish'), (rc, out))
-        self.assertEqual(before, self.snapshot(d))
+        edit(d, 'main.html', 'Main', 'Main heading')
+        rc, out = cli(d, 'start')                                 # after compaction
+        self.assertIn('REQUEST — already open since ' + first['start'][:12], out)
+        self.assertIn('not reset', out)
+        self.assertIn('ask the user whether to continue it', out)
+        self.assertIn('uncommitted unstaged: main.html', out)
+        self.assertIn('recorded answers:', out)
+        self.assertEqual(request(d), first)
 
-    def test_invalid_spec_fails_but_still_prompts(self):
+    def test_start_refuses_a_request_open_for_another_main(self):
         d = self.fixture()
-        edit(d, 'motor.html', 'id="power"', 'id="gone"')
+        cli(d, 'start')
+        rc, out = cli(d, '--main', 'motor.html', 'start')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('belongs to main.html', out)
+
+    def test_reconcile_without_a_request_is_held(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        out = reconcile_out(d, 'docs: derate')
+        self.assertIn('OPEN [request] no open request for main.html', out)
+        answer_all(d)
+        self.assertNotIn('RECEIPT', cli(d, 'reconcile')[1])
+
+    def test_finish_requires_a_clean_tree(self):
+        d = self.fixture()
+        cli(d, 'start')
+        Path(d, 'notes.txt').write_text('draft')
         rc, out = cli(d, 'finish')
         self.assertEqual(rc, 1, out)
-        self.assertIn("no id 'power'", out)
-        self.assertIn('SESSION ACCOUNTING', out)
-        self.assertIn('MOVED motor.html#gone', out)
-        self.assertIn('one-hop: main.html#claim', out)
-        edit(d, 'motor.html', 'id="gone"', 'id="power"')
-        edit(d, 'motor.html', '120 kW', '[ADAPT]')
-        self.assertEqual(cli(d, 'finish')[0], cli(d, 'check')[0])
-        self.assertIn('[adapt]', cli(d, 'finish')[1])
+        self.assertIn('untracked: notes.txt', out)
+        self.assertIn('a pause partway through the request, not a handoff', out)
+        self.assertIsNotNone(request(d))
 
-    def test_untracked_supporting_spec(self):
+    def test_finish_summarizes_the_request_and_closes_it(self):
         d = self.fixture()
-        Path(d, 'topic').mkdir()
-        Path(d, 'topic', 'extra.html').write_text('<p id="new">New finding</p>')
-        edit(d, 'main.html', '</table>',
-             '<tr id="dl-split-extra"><td><a href="topic/extra.html">extra</a></td>'
-             '<td>keep here</td><td>Own topic</td></tr></table>')
+        cli(d, 'start')
+        start = head(d)
+        edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
+        edit(d, 'main.html', 'Main', 'Main heading'); commit(d, 'docs: retitle')
         rc, out = cli(d, 'finish')
         self.assertEqual(rc, 0, out)
-        self.assertIn('untracked: topic/extra.html [spec]', out)
-        self.assertIn('ADDED topic/extra.html#new', out)
-
-    def test_worktree_validation_does_not_run_staged_or_clean_gates(self):
-        d = self.fixture()
-        edit(d, 'motor.html', 'id="power"', 'id="gone"')
-        sh('git', 'add', 'motor.html', cwd=d)
-        edit(d, 'motor.html', 'id="gone"', 'id="power"')
-        rc, out = cli(d, 'finish')
-        self.assertEqual(rc, 0, out)
-        self.assertIn('MOVED motor.html#gone [staged]', out)
-        self.assertEqual(cli(d, 'check', '--staged')[0], 1)
-
-    def test_one_hop_only_and_ignored_files_excluded(self):
-        d = self.fixture()
-        edit(d, 'main.html', '</main>',
-             '<p id="distant">See <a href="#claim">design</a>.</p></main>')
-        Path(d, '.gitignore').write_text('ignored.txt\n')
-        commit(d, 'docs: references')
-        Path(d, 'ignored.txt').write_text('cache')
-        edit(d, 'motor.html', '120 kW', '105 kW')
-        rc, out = cli(d, 'finish')
-        self.assertEqual(rc, 0, out)
-        self.assertIn('== motor.html#power; one-hop: main.html#claim', out)
-        self.assertNotIn('main.html#distant', out)
-        self.assertNotIn('ignored.txt', out)
-
-    def test_main_rename_keeps_committed_debt(self):
-        d = self.fixture()
-        edit(d, 'motor.html', '120 kW', '105 kW')
-        commit(d, 'docs: derate')
-        cli(d, 'mv', 'main.html', 'renamed.html')
-        before = self.snapshot(d)
-        rc, out = cli(d, 'finish', 'renamed.html')
-        self.assertEqual(rc, 0, out)
-        self.assertIn('staged: renamed.html (from main.html) [spec]', out)
+        self.assertIn(f'REQUEST — since {start[:12]}: 2 commit(s)', out)
+        self.assertIn('docs: derate', out); self.assertIn('docs: retitle', out)
         self.assertIn('main.html#claim  depends-on motor.html#power  [content]', out)
-        self.assertEqual(before, self.snapshot(d))
+        self.assertIn('Was a decision made in conversation that has no decision row?', out)
+        self.assertIn(f'HANDOFF {head(d)[:12]} — request closed', out)
+        self.assertIn(f'start --resume {head(d)[:12]}', out)
+        self.assertIsNone(request(d))
+        self.assertFalse(state_file(d, 'reconcile.json').exists())
 
-    def test_non_spec_declared_reference_and_unmapped_spec_edit(self):
+    def test_finish_with_no_commits_asks_about_findings(self):
         d = self.fixture()
-        Path(d, 'script.py').write_text('old')
-        edit(d, 'main.html', '</main>',
-             '<p id="implementation">See <a href="script.py">script</a>.</p></main>')
-        commit(d, 'docs: reference')
-        Path(d, 'script.py').write_text('new')
-        edit(d, 'motor.html', '</main>', '<p>Unanchored finding</p></main>')
+        cli(d, 'start')
+        out = cli(d, 'finish')[1]
+        self.assertIn('0 commit(s)', out)
+        self.assertIn('This request committed nothing', out)
+
+    def test_finish_without_a_request_or_outside_git(self):
+        d = self.fixture()
         rc, out = cli(d, 'finish')
         self.assertEqual(rc, 0, out)
-        self.assertIn('unstaged: script.py [other]', out)
-        self.assertIn('== main.html#implementation; one-hop: script.py', out)
-        self.assertIn('UNMAPPED motor.html', out)
-        self.assertNotIn('UNMAPPED script.py', out)
-        self.assertIn('REVIEW OWED: none', out)  # plain link never manufactures debt
+        self.assertIn('none open', out)
+        e = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, e, ignore_errors=True)
+        Path(e, 'main.html').write_text('<p id="claim">Finding</p>')
+        self.assertEqual(cli(e, 'finish')[0], 2)
 
-    def test_deleted_supporting_spec_uses_old_neighbors(self):
+    def test_resume_shows_changes_since_the_handoff(self):
         d = self.fixture()
-        Path(d, 'motor.html').unlink()
-        edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>',
-             'reconsideration')
-        p = Path(d, 'main.html')
-        p.write_text(re.sub(r'<tr id="dl-split-motor">.*?</tr>', '', p.read_text()))
+        cli(d, 'start')
+        handoff = re.search(r'HANDOFF (\w+)', cli(d, 'finish')[1]).group(1)
+        rc, out = cli(d, 'start', '--resume', handoff)
+        self.assertIn(f'collection unchanged since {handoff}', out)
+        self.assertNotIn('READ — before any', out)
+        cli(d, 'finish')
+        edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
+        Path(d, 'notes.txt').write_text('x')
+        rc, out = cli(d, 'start', '--resume', handoff)
+        self.assertIn('-<p id="power">120 kW', out)
+        self.assertIn('+<p id="power">105 kW', out)
+        self.assertIn('notes.txt (untracked)', out)
+        self.assertEqual(request(d)['start'], head(d))
+
+    def test_resume_refuses_unrelated_or_large_changes(self):
+        d = self.fixture()
+        sh('git', 'checkout', '-q', '-b', 'side', cwd=d)
+        commit(d, 'docs: side')
+        side = head(d)
+        sh('git', 'checkout', '-q', '-', cwd=d)
+        rc, out = cli(d, 'start', '--resume', side)
+        self.assertIn('RESUME REFUSED', out); self.assertIn('not an ancestor of HEAD', out)
+        self.assertIn('READ — before any', out)
+        cli(d, 'finish')
+        base = head(d)
+        edit(d, 'motor.html', '</main>', '\n'.join(f'<p id="n{i}">{i}</p>' for i in range(200)) + '</main>')
+        commit(d, 'docs: grow')
+        rc, out = cli(d, 'start', '--resume', base)
+        self.assertIn('RESUME REFUSED', out); self.assertIn('changed lines', out)
+
+    def test_resume_is_ignored_while_a_request_is_open(self):
+        d = self.fixture()
+        cli(d, 'start')
+        rc, out = cli(d, 'start', '--resume', head(d))
+        self.assertIn('--resume ignored: a request is already open', out)
+
+    def test_expired_watch_entries_come_back(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>',
+             '<table><tr id="watch-fan" data-watch-until="2020-01-01"><td>fan</td><td>2019-12-01</td>'
+             '<td>closes 2020-01-01</td></tr></table></main>')
+        commit(d, 'docs: watch the fan')
+        for argv in (['start'], ['finish']):
+            self.assertIn('WATCH — watch entry motor.html#watch-fan expired 2020-01-01',
+                          cli(d, *argv)[1])
+
+
+class StartHooks(unittest.TestCase):
+    def test_start_reports_missing_or_old_hooks(self):
+        d = repo()
+        out = cli(d, 'start')[1]
+        self.assertIn('HOOKS — not installed, or from an older lspec: pre-commit, '
+                      'prepare-commit-msg, commit-msg', out)
+        hooks = Path(d, '.git', 'hooks')
+        Path(hooks, 'pre-commit').write_text('#!/bin/sh\npython3 lspec.py check --staged --finish-receipt\n')
+        for name in ('prepare-commit-msg', 'commit-msg'):
+            shutil.copy(os.path.join(HookIntegration.HOOKS, name), hooks / name)
+        out = cli(d, 'start')[1]
+        self.assertIn('older lspec: pre-commit;', out)
+        shutil.copy(os.path.join(HookIntegration.HOOKS, 'pre-commit'), hooks / 'pre-commit')
+        self.assertNotIn('HOOKS', cli(d, 'start')[1])
+
+    def test_hooks_path_and_linked_worktrees_count_as_installed(self):
+        d = repo()
+        shutil.copytree(HookIntegration.HOOKS, os.path.join(d, 'hooks'))
+        sh('git', 'add', 'hooks', cwd=d); commit(d, 'docs: hooks')
+        sh('git', 'config', 'core.hooksPath', 'hooks', cwd=d)
+        self.assertNotIn('HOOKS', cli(d, 'start')[1])
+        w = tempfile.mkdtemp(); shutil.rmtree(w)
+        sh('git', 'worktree', 'add', '-q', w, cwd=d)
+        self.assertNotIn('HOOKS', cli(w, 'start')[1])
+
+
+class Checklist(unittest.TestCase):
+    """reconcile: mechanical items clear with the files; judgment items are
+    answered one at a time with a token shown only beside their evidence."""
+
+    def fixture(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        ensure_request(d)
+        return d
+
+    def items(self, d, subject='docs: x', today=None):
         sh('git', 'add', '-A', cwd=d)
-        rc, out = cli(d, 'finish')
-        self.assertEqual(rc, 0, out)
-        self.assertIn('staged: motor.html [spec]', out)
-        self.assertIn('REMOVED motor.html#power', out)
-        self.assertIn('== motor.html#power; one-hop: main.html#claim', out)
-        self.assertIn('[pending dependency retirement]', out)
+        return evaluate_in(d, subject, today=today)[1]
 
-    def test_main_options_subdirectory_and_rename_inventory(self):
+    def keys(self, d, kind, subject='docs: x'):
+        return [it['key'] for it in self.items(d, subject) if it['kind'] == kind]
+
+    def test_tokens_appear_only_beside_one_item(self):
         d = self.fixture()
-        cli(d, 'mv', 'motor.html', 'drive unit.html')
-        Path(d, 'sub').mkdir()
-        cwd = os.getcwd()
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        out = reconcile_out(d, 'docs: derate')
+        self.assertNotIn('token', out)
+        self.assertIn('judgment items open: read 2, neighbor 1', out)
+        out = cli(d, 'reconcile', '--next')[1]
+        self.assertEqual(out.count('token:'), 1)
+        self.assertIn('ITEM 1 of 3 [read]', out)
+        self.assertIn('--tick ' + re.search(r'token: (\w+)', out).group(1) + ' --answer read-whole', out)
+        rc, out = cli(d, 'reconcile', '--tick', 'deadbeef', '--answer', 'read-whole')
+        self.assertEqual(rc, 2); self.assertIn('no current item has token', out)
+
+    def test_ticks_follow_their_evidence(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        cli(d, 'reconcile', '--subject', 'docs: derate')
+        answer_all(d)
+        self.assertIn('answered: 3', cli(d, 'reconcile')[1])
+        edit(d, 'main.html', 'Main', 'Main heading'); sh('git', 'add', '-A', cwd=d)
+        out = cli(d, 'reconcile')[1]
+        self.assertIn('answered: 3', out)            # unrelated change: answers kept
+        edit(d, 'motor.html', '105 kW', '100 kW'); sh('git', 'add', '-A', cwd=d)
+        out = cli(d, 'reconcile')[1]
+        self.assertIn('judgment open: 1', out)       # only the neighbor of the changed claim returns
+        self.assertIn('neighbor 1', out)
+
+    def test_reasons_cannot_repeat(self):
+        d = self.fixture()
+        edit(d, 'main.html', '<table>', '<p id="a" data-sealed>A rule.</p><p id="b" data-sealed>B rule.</p><table>')
+        commit(d, 'docs: seal two')
+        edit(d, 'main.html', 'A rule.', 'A rule, reworded.'); edit(d, 'main.html', 'B rule.', 'B rule, reworded.')
+        sh('git', 'add', '-A', cwd=d)
+        cli(d, 'reconcile', '--subject', 'docs: reword')
+        same = ['correction', 'restores', 'the', 'agreed', 'text']
+        results = []
+        while True:
+            out = cli(d, 'reconcile', '--next')[1]
+            tok = re.search(r'token: (\w+)', out)
+            if not tok or results[-1:] == ['refused']:
+                break
+            kind = re.search(r'\[(\w+)\]', out).group(1)
+            reply = same if kind == 'sealed' else DEFAULT_ANSWERS[kind](0)
+            rc, out = cli(d, 'reconcile', '--tick', tok.group(1), *tick_argv(reply))
+            if kind == 'sealed':
+                results.append('refused' if 'already recorded for another item' in out else 'ok')
+        self.assertEqual(results, ['ok', 'refused'])
+
+    def test_placeholders_and_empty_elements(self):
+        d = self.fixture()
+        edit(d, 'main.html', '<table>', '<p id="note"></p><table>'
+             '<tr id="TMPDUNST"><td>TMPDUNST</td><td></td><td></td></tr>')
+        keys = [it['key'] for it in self.items(d) if it['mech']]
+        self.assertIn('empty:main.html#note', keys)
+        self.assertIn('placeholder:main.html#TMPDUNST', keys)
+        self.assertIn('empty:main.html#TMPDUNST cell', keys)
+        rc, out = run(main_extra='<tr id="TMPDUNST"><td>x</td><td>y</td><td>z</td></tr>')
+        self.assertEqual(rc, 0, out)                 # the validator stays structural
+
+    def test_provisional_values_and_inline_caveats(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<p id="rpm">3000 rpm, provisional(bench)</p>'
+             '<p id="torque">80 Nm, provisional(bench), closes with <a href="#top">the dyno</a></p>'
+             '<p id="temp">40 C, confirmed as of 2026-09-01</p>'
+             '<p id="fan">Fan [WATCH]</p><p id="fan2">Fan <a href="#watch-fan">[WATCH]</a></p>'
+             '<p id="fan3">Fan <a href="#top">[WATCH]</a></p>'
+             '<table><tr id="watch-fan"><td>fan noise</td><td>2026-10-04</td><td>closes when quiet a week</td></tr></table></main>')
+        keys = [it['key'] for it in self.items(d) if it['mech']]
+        self.assertIn('provisional:motor.html#rpm', keys)
+        self.assertNotIn('provisional:motor.html#torque', keys)
+        self.assertIn('caveat:motor.html#temp', keys)
+        self.assertIn('caveat:motor.html#fan watch', keys)
+        self.assertNotIn('caveat:motor.html#fan2 watch', keys)
+        self.assertIn('caveat:motor.html#fan3 watch', keys)          # links, but not to a watch entry
+
+    def test_bare_provisional_status_in_a_row_needs_a_link(self):
+        # A table row's status cell uses the bare vocabulary word; prose about
+        # provisional values (P6 itself) does not, so only rows take the broad rule.
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<table>'
+             '<tr id="kp-a"><td>Timeout</td><td>30 s</td><td>provisional · bench</td></tr>'
+             '<tr id="kp-b"><td>Retry</td><td>3</td><td>provisional · <a href="#top">open item</a></td></tr>'
+             '<tr id="kp-c"><td>Rate</td><td>5</td><td>confirmed · bench</td></tr>'
+             '</table><p id="prose">P6 says a provisional value is flagged and linked.</p></main>')
+        keys = [it['key'] for it in self.items(d) if it['mech']]
+        self.assertIn('provisional:motor.html#kp-a', keys)
+        self.assertNotIn('provisional:motor.html#kp-b', keys)
+        self.assertNotIn('provisional:motor.html#kp-c', keys)
+        self.assertNotIn('provisional:motor.html#prose', keys)
+
+    def test_watch_entry_dates(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<table><tr id="watch-w" data-watch-until="2026-10-01">'
+             '<td>fan noise</td><td>2026-09-01</td><td>closes 2026-10-01</td></tr></table></main>')
+        today = lspec.datetime(2026, 10, 4).date()
+        self.assertIn('watch:motor.html#watch-w', [it['key'] for it in self.items(d, today=today)])
+        edit(d, 'motor.html', '2026-10-01">', '2026-11-01">')
+        self.assertNotIn('watch:motor.html#watch-w', [it['key'] for it in self.items(d, today=today)])
+        edit(d, 'motor.html', '2026-11-01">', 'soon">')
+        self.assertIn('watch:motor.html#watch-w date', [it['key'] for it in self.items(d, today=today)])
+
+    def test_neighbors_are_one_hop_and_unchanged(self):
+        d = self.fixture()
+        edit(d, 'main.html', '<table>', '<p id="far">See <a href="#claim">the claim</a>.</p><table>')
+        commit(d, 'docs: far reference')
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        self.assertEqual(self.keys(d, 'neighbor'), ['neighbor:main.html#claim'])
+        edit(d, 'main.html', 'This design needs', 'This design still needs')
+        self.assertEqual(self.keys(d, 'neighbor'), ['neighbor:main.html#far'])   # claim changed too
+
+    def test_container_only_change_has_no_neighbors_of_its_own(self):
+        d = self.fixture()
+        edit(d, 'main.html', '<table>', '<section id="box"><p id="inner">Inner.</p></section>'
+             '<p id="ref">See <a href="#box">box</a>.</p><table>')
+        commit(d, 'docs: box')
+        edit(d, 'main.html', 'Inner.', 'Inner, revised.')
+        self.assertEqual(self.keys(d, 'neighbor'), [])       # #ref cites the box, not #inner
+        ctx = evaluate_in(d)[0]
+        changed = {eid for (_, eid) in ctx.changed}
+        self.assertIn('inner', changed); self.assertNotIn('box', changed)
+
+    def test_text_outside_claims_checks_only_what_it_links(self):
+        d = self.fixture()
+        edit(d, 'main.html', '<p>Four cornerstones', '<p>Still four cornerstones')
+        self.assertEqual(self.keys(d, 'neighbor'), [])            # no link: nothing to trace
+        edit(d, 'main.html', 'the five differences.</p>',
+             'the five differences, as <a href="#claim">the claim</a> needs.</p>')
+        items = [it for it in self.items(d) if it['kind'] == 'neighbor']
+        self.assertEqual([it['key'] for it in items], ['neighbor:main.html#claim'])
+        self.assertIn('cited by text added outside any claim in main.html', items[0]['excerpt'])
+        commit(d, 'docs: cite the claim')
+        edit(d, 'main.html', ', as <a href="#claim">the claim</a> needs.</p>', '.</p>')
+        self.assertEqual(self.keys(d, 'neighbor'), ['neighbor:main.html#claim'])  # removal too
+        self.assertNotIn('unanchored', [it['kind'] for it in self.items(d)])
+
+    def test_read_items_cover_edited_and_dependency_files(self):
+        d = self.fixture()
+        edit(d, 'main.html', 'This design needs', 'This design still needs')
+        self.assertEqual(self.keys(d, 'read'), ['read:main.html', 'read:motor.html'])
+        sh('git', 'reset', '-q', '--hard', cwd=d)
+        Path(d, 'README').write_text('x')
+        self.assertEqual(self.keys(d, 'read'), ['read:main.html'])
+
+    def test_fix_asks_whether_the_cause_is_established(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<table><tr id="watch-noise"><td>noise</td><td>2026-10-04</td>'
+             '<td>closes after a week quiet</td></tr></table></main>')
+        edit(d, 'main.html', '</table>', '<tr id="dl-quiet"><td>Quiet fan</td><td>Loud fan</td>'
+             '<td>Noise complaints.</td></tr></table>')
+        items = self.items(d, 'fix: quiet the fan')
+        it = next(i for i in items if i['kind'] == 'cause')
+        ctx = evaluate_in(d, 'fix: quiet the fan')[0]
+        cwd = os.getcwd(); os.chdir(d)
+        V = lambda *words: lspec.validate(it, given(list(words)), ctx, set())
         try:
-            os.chdir(Path(d, 'sub'))
-            for tail in (['../main.html'], ['--main', '../main.html']):
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out):
-                    rc = lspec.main(['lspec', 'finish', *tail])
-                self.assertEqual(rc, 0, out.getvalue())
-                self.assertIn('staged: drive unit.html (from motor.html) [spec]', out.getvalue())
-                self.assertIn('--main ../main.html finish', out.getvalue())
+            with self.assertRaisesRegex(ValueError, 'needs --ref WATCH'):
+                lspec.validate(it, {'answer': 'established', 'reason': 'it is fixed'}, ctx, set())
+            with self.assertRaisesRegex(ValueError, 'no watch entry'):
+                V('unverified', 'watch-missing')
+            with self.assertRaisesRegex(ValueError, 'not a watch entry: a watch entry is a row whose id starts with watch-'):
+                V('unverified', 'dl-quiet')
+            with self.assertRaisesRegex(ValueError, 'not a table row'):
+                V('unverified', 'top')
+            with self.assertRaisesRegex(ValueError, 'needs --reason'):
+                V('established', 'watch-noise')
+            self.assertEqual(V('unverified', 'watch-noise')[1],
+                             'Reconciled: cause unverified, watched at motor.html#watch-noise')
+            self.assertEqual(V('established', 'watch-noise', 'bearing', 'replaced', 'and', 'quiet')[1],
+                             'Reconciled: cause established, watched at motor.html#watch-noise '
+                             '\u2014 bearing replaced and quiet')
+        finally:
+            os.chdir(cwd)
+        commit(d, 'docs: watch the noise')
+        edit(d, 'main.html', 'Noise complaints.', 'Noise complaints persist.')
+        it = next(i for i in self.items(d, 'fix: quiet the fan') if i['kind'] == 'cause')
+        ctx = evaluate_in(d, 'fix: quiet the fan')[0]
+        os.chdir(d)
+        try:
+            with self.assertRaisesRegex(ValueError, 'not added or changed in this commit'):
+                lspec.validate(it, given(['unverified', 'watch-noise']), ctx, set())
+        finally:
+            os.chdir(cwd)
+        self.assertNotIn('cause', [i['kind'] for i in self.items(d, 'docs: note the noise')])
+
+    def test_rewriting_the_watch_entry_reopens_the_cause_answer(self):
+        """A cause answer cannot outlive a rewrite of the record it names."""
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<table><tr id="watch-noise"><td>noise</td>'
+             '<td>2026-10-04</td><td>closes after a week quiet</td></tr></table></main>')
+        sh('git', 'add', '-A', cwd=d)
+        cli(d, 'reconcile', '--subject', 'fix: quiet the fan')
+        answer_all(d, {'cause': ['established', 'watch-noise', 'bearing was worn out']})
+        self.assertIn('judgment open: 0', cli(d, 'reconcile')[1])
+        edit(d, 'motor.html', 'closes after a week quiet', 'unverified: diagnosis unconfirmed')
+        sh('git', 'add', '-A', cwd=d)
+        out = cli(d, 'reconcile')[1]
+        self.assertIn('judgment open: 1', out)
+        self.assertIn('cause 1', out)
+        self.assertIn('watch entry motor.html#watch-noise (added): noise 2026-10-04 unverified',
+                      cli(d, 'reconcile', '--next')[1])
+
+    def test_watch_entries_are_rows_with_the_watch_prefix(self):
+        rc, out = run(motor_extra='<table><tr id="w-fan" data-watch-until="2026-11-04">'
+                                  '<td>a</td><td>b</td><td>c</td></tr></table>')
+        self.assertEqual(rc, 1); self.assertIn('[watch] motor.html: data-watch-until on #w-fan', out)
+        rc, out = run(motor_extra='<p id="watch-x" data-watch-until="2026-11-04">x</p>')
+        self.assertEqual(rc, 1); self.assertIn('it belongs on a watch entry', out)
+        rc, out = run(motor_extra='<table><tr id="watch-fan" data-watch-until="2026-11-04">'
+                                  '<td>a</td><td>b</td><td>c</td></tr></table>')
+        self.assertEqual(rc, 0, out)
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<table><tr id="watch-a" data-watch-until="2026-11-04">'
+             '<td>a</td><td>b</td><td>c</td></tr><tr id="watch-b"><td>a</td><td>b</td><td>c</td>'
+             '</tr></table></main>')
+        commit(d, 'docs: two watches')
+        line = 'WATCH ENTRIES (2): motor.html#watch-a (until 2026-11-04), motor.html#watch-b'
+        self.assertIn(line, cli(d, 'start')[1])
+        self.assertIn(line, cli(d, 'finish')[1])
+
+    def test_recurrence_names_a_diagnostic_register_row(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<h2 id="diagnostic">Diagnostic register</h2><table>'
+             '<tr id="diag-heat"><td>Overheat</td><td>Fan stalls</td><td>Clean intake</td></tr>'
+             '</table><h2>Other</h2><table><tr id="w-x"><td>x</td><td>y</td><td>z</td></tr>'
+             '</table></main>')
+        it = next(i for i in self.items(d, 'fix: clean the intake') if i['kind'] == 'cause')
+        ctx = evaluate_in(d, 'fix: clean the intake')[0]
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            self.assertEqual(lspec.validate(it, given(['recurrence', 'diag-heat']), ctx, set())[1],
+                             'Reconciled: recurrence recorded at motor.html#diag-heat')
+            with self.assertRaisesRegex(ValueError, 'not inside a diagnostic register'):
+                lspec.validate(it, given(['recurrence', 'w-x']), ctx, set())
         finally:
             os.chdir(cwd)
 
-    def test_unknown_history_is_reported_not_cleared(self):
+    def test_tick_flags_never_swallow_main(self):
         d = self.fixture()
-        before = self.snapshot(d)
-        with mock.patch.object(lspec, 'review_baseline', side_effect=lspec.HistoryUnavailable('shallow')):
-            rc, out = cli(d, 'finish')
-        self.assertEqual(rc, 0, out)  # same read-only report semantics as start/impact
-        self.assertIn('CLEARANCE UNKNOWN', out)
-        self.assertIn('git fetch --unshallow', out)
-        self.assertEqual(before, self.snapshot(d))
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        cli(d, 'reconcile', '--subject', 'docs: derate')
+        out = cli(d, 'reconcile', '--next')[1]
+        self.assertIn('--answer read-whole', out)
+        tok = re.search(r'token: (\w+)', out).group(1)
+        rc, out = cli(d, 'reconcile', '--tick', tok, 'read-whole')
+        self.assertEqual(rc, 2); self.assertIn('takes its answer as --answer', out)
+        rc, out = cli(d, 'reconcile', '--tick', tok, '--answer', 'read-whole', 'main.html')
+        self.assertIn('answered [read]', out)
+        rc, out = cli(d, 'reconcile', '--answer', 'holds')
+        self.assertEqual(rc, 2); self.assertIn('need --tick', out)
 
-    def test_unborn_and_non_git(self):
-        d = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
-        Path(d, 'main.html').write_text('<p id="claim">Finding</p>')
-        rc, out = cli(d, 'finish')
-        self.assertEqual(rc, 0, out)
-        self.assertIn('unavailable (not a git checkout)', out)
-        self.assertIn('SESSION ACCOUNTING', out)
-        sh('git', 'init', '-q', cwd=d)
-        before = self.snapshot(d)
-        rc, out = cli(d, 'finish')
-        self.assertEqual(rc, 0, out)
-        self.assertIn('no available HEAD commit', out)
-        self.assertIn('ADDED main.html#claim', out)
-        self.assertEqual(before, self.snapshot(d))
-
-    def test_input_and_git_errors_still_prompt_and_restore_environment(self):
+    def test_receipt_only_when_everything_is_clear(self):
         d = self.fixture()
-        with mock.patch.dict(os.environ, {'GIT_OPTIONAL_LOCKS': '1'}):
-            with mock.patch.object(lspec, 'working_changes', side_effect=RuntimeError('unavailable index')):
-                rc, out = cli(d, 'finish')
-            self.assertEqual(rc, 2, out)
-            self.assertIn('SESSION ACCOUNTING', out)
-            self.assertEqual(os.environ['GIT_OPTIONAL_LOCKS'], '1')
-            # load() uses SystemExit for missing MAIN on all existing verbs.
-            with self.assertRaises(SystemExit) as err:
-                cli(d, 'finish', 'missing.html')
-            self.assertEqual(err.exception.code, 2)
-            self.assertEqual(os.environ['GIT_OPTIONAL_LOCKS'], '1')
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'reconcile', '--subject', 'docs: derate')
+        self.assertEqual(rc, 1, out)
+        self.assertFalse(state_file(d, 'receipt.json').exists())
+        rc, out = settle(d, 'docs: derate')
+        self.assertEqual(rc, 0, out)
+        receipt = lspec.json.loads(state_file(d, 'receipt.json').read_text())
+        self.assertEqual(set(receipt), {'format', 'main', 'head', 'index_sha256', 'checker_sha256',
+                                        'subject', 'body', 'trailers', 'issued_at'})
+        self.assertEqual(receipt['head'], head(d))
+        self.assertEqual(receipt['subject'], 'docs: derate')
+        edit(d, 'main.html', '<h1 id="top">Main</h1>', '<h1 id="top"></h1>'); sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'reconcile')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('OPEN [empty] main.html#top is empty', out)
+        self.assertFalse(state_file(d, 'receipt.json').exists())
 
-class FinishReceipt(unittest.TestCase):
-    # Reuse real-hook fixtures without inheriting and rerunning their test cases.
+
+class Receipts(unittest.TestCase):
+    """The hooks only confirm that the commit matches the reconcile receipt."""
     HOOKS = HookIntegration.HOOKS
+    ALL = HookIntegration.ALL
     setUp = HookIntegration.setUp
     tearDown = HookIntegration.tearDown
     track = HookIntegration.track
@@ -2404,368 +2711,125 @@ class FinishReceipt(unittest.TestCase):
     hrepo = HookIntegration.hrepo
     gcommit = HookIntegration.gcommit
 
-    def receipt(self, d):
-        gitdir = sh('git', 'rev-parse', '--absolute-git-dir', cwd=d).strip()
-        return Path(gitdir, 'lspec', 'finish-receipt.json')
-
-    def tool(self, d, *args, env=None):
-        return subprocess.run([sys.executable, 'lspec.py', *args], cwd=d,
-                              env=dict(os.environ, LSPEC_MAIN='main.html', **(env or {})),
-                              capture_output=True, text=True)
-
-    def finish(self, d, env=None):
-        r = self.tool(d, 'finish', 'main.html', env=env)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        return r
-
-    def gate(self, d, env=None):
-        return self.tool(d, 'check', '--staged', '--finish-receipt', 'main.html', env=env)
-
-    def test_missing_receipt_blocks_and_finish_allows_commit(self):
-        d = self.hrepo()
-        self.receipt(d).unlink()
-        head = sh('git', 'rev-parse', 'HEAD', cwd=d)
-        r = self.gcommit(d, 'docs: event', finish=False)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('no finish receipt', r.stdout + r.stderr)
-        self.assertEqual(sh('git', 'rev-parse', 'HEAD', cwd=d), head)
-        self.finish(d)
-        receipt = self.receipt(d).read_bytes()
-        r = self.gcommit(d, 'docs: event', finish=False)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self.receipt(d).read_bytes(), receipt)
-        self.assertIn('HEAD differs', self.gate(d).stdout)
-        self.finish(d)
-        self.assertEqual(self.gate(d).returncode, 0)
-
-    def test_exact_receipt_schema_and_no_other_writes(self):
-        d = self.hrepo()
-        before = Finish.snapshot(self, d)
-        self.finish(d)
-        self.assertEqual(before, Finish.snapshot(self, d))
-        receipt = lspec.json.loads(self.receipt(d).read_text())
-        self.assertEqual(set(receipt), {'format', 'main', 'head', 'index_sha256',
-                                      'worktree_sha256', 'checker_sha256', 'issued_at'})
-        self.assertEqual(receipt['format'], 1)
-        self.assertEqual(receipt['main'], 'main.html')
-        self.assertEqual(receipt['head'], sh('git', 'rev-parse', 'HEAD', cwd=d).strip())
-        self.assertEqual(receipt['checker_sha256'], lspec.file_sha256(Path(d, 'lspec.py')))
-        for key in ('index_sha256', 'worktree_sha256', 'checker_sha256'):
-            self.assertRegex(receipt[key], r'^[0-9a-f]{64}$')
-        self.assertEqual(list(self.receipt(d).parent.iterdir()), [self.receipt(d)])
-        before = Finish.snapshot(self, d), self.receipt(d).read_bytes()
-        self.assertEqual(self.gate(d).returncode, 0)
-        self.assertEqual(before, (Finish.snapshot(self, d), self.receipt(d).read_bytes()))
-
-    def test_staged_unstaged_and_untracked_changes_invalidate(self):
-        for kind in ('staged', 'unstaged', 'untracked'):
-            with self.subTest(kind=kind):
-                d = self.hrepo()
-                self.finish(d)
-                if kind == 'untracked':
-                    Path(d, 'nested').mkdir()
-                    Path(d, 'nested', 'new file.txt').write_text('finding')
-                else:
-                    edit(d, 'motor.html', '120 kW', '105 kW')
-                    if kind == 'staged':
-                        sh('git', 'add', 'motor.html', cwd=d)
-                        edit(d, 'motor.html', '105 kW', '120 kW')
-                r = self.gate(d)
-                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn('staged state' if kind == 'staged' else 'working-file state', r.stdout)
-                self.finish(d)
-                self.assertEqual(self.gate(d).returncode, 0)
-
-    def test_staging_after_finish_invalidates_but_stat_refresh_does_not(self):
-        d = self.hrepo()
-        edit(d, 'motor.html', '120 kW', '105 kW')
-        self.finish(d)
-        sh('git', 'add', 'motor.html', cwd=d)
-        self.assertIn('staged state differs', self.gate(d).stdout)
-        self.finish(d)
-        os.utime(Path(d, 'motor.html'), (1000000000, 1000000000))
-        sh('git', 'update-index', '--refresh', cwd=d)
-        self.assertEqual(self.gate(d).returncode, 0)
-
-    def test_deletion_mode_symlink_and_ignored_paths(self):
-        d = self.hrepo()
-        Path(d, '.gitignore').write_text('cache\ntracked.txt\n')
-        Path(d, 'tracked.txt').write_text('tracked')
-        Path(d, 'link').symlink_to('main.html')
-        sh('git', 'add', '.gitignore', 'link', cwd=d)
-        sh('git', 'add', '-f', 'tracked.txt', cwd=d)
-        self.finish(d)
-        Path(d, 'cache').write_text('ignored')
-        self.assertEqual(self.gate(d).returncode, 0)
-        for kind in ('mode', 'symlink', 'tracked-ignored', 'deletion'):
-            with self.subTest(kind=kind):
-                if kind == 'mode':
-                    Path(d, 'tracked.txt').chmod(0o755)
-                elif kind == 'symlink':
-                    Path(d, 'link').unlink()
-                    Path(d, 'link').symlink_to('motor.html')
-                elif kind == 'tracked-ignored':
-                    Path(d, 'tracked.txt').write_text('changed')
-                else:
-                    Path(d, 'tracked.txt').unlink()
-                self.assertIn('working-file state differs', self.gate(d).stdout)
-                self.finish(d)
-                self.assertEqual(self.gate(d).returncode, 0)
-
-    def test_staged_deletion_remaining_on_disk_is_bound(self):
-        d = self.hrepo()
-        Path(d, 'notes.txt').write_text('keep locally')
-        self.assertEqual(self.gcommit(d, 'docs: notes', add=['notes.txt']).returncode, 0)
-        sh('git', 'rm', '--cached', 'notes.txt', cwd=d)
-        Path(d, '.git', 'info', 'exclude').write_text('notes.txt\n')
-        self.finish(d)
-        Path(d, 'notes.txt').write_text('changed after finish')
-        self.assertIn('working-file state differs', self.gate(d).stdout)
-
-    def test_malformed_receipts_fail_closed(self):
-        d = self.hrepo()
-        self.finish(d)
-        good = lspec.json.loads(self.receipt(d).read_text())
-        bad = ['{', '[]', '{}', lspec.json.dumps(dict(good, format=True)),
-               lspec.json.dumps(dict(good, format=2)),
-               lspec.json.dumps(dict(good, issued_at='yesterday')),
-               lspec.json.dumps(dict(good, issued_at='2026-10-03T00:00:00')),
-               lspec.json.dumps(dict(good, index_sha256=None))]
-        for text in bad:
-            with self.subTest(text=text):
-                self.receipt(d).write_text(text)
-                r = self.gate(d)
-                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn('[finish-receipt]', r.stdout)
-        self.finish(d)
-        self.assertEqual(self.gate(d).returncode, 0)
-
-    def test_main_and_checker_must_match(self):
-        d = self.hrepo()
-        Path(d, 'other.html').write_text('<p id="other">Other instance</p>')
-        sh('git', 'add', 'other.html', cwd=d)
-        r = self.tool(d, 'finish', 'other.html')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('MAIN differs', self.gate(d).stdout)
-        self.finish(d)
-        receipt = lspec.json.loads(self.receipt(d).read_text())
-        receipt['checker_sha256'] = '0' * 64
-        self.receipt(d).write_text(lspec.json.dumps(receipt))
-        self.assertIn('checker differs', self.gate(d).stdout)
-
-    def test_staged_checker_must_match_running_finish(self):
+    def test_staged_checker_must_match_the_one_that_reconciled(self):
         d = self.hrepo()
         with Path(d, 'lspec.py').open('a') as f:
             f.write('\n# new checker revision\n')
-        self.finish(d)
-        r = self.gcommit(d, 'docs: event', finish=False)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('checker differs', r.stdout + r.stderr)
         sh('git', 'add', 'lspec.py', cwd=d)
-        self.finish(d)
-        r = self.gcommit(d, 'docs: checker', finish=False)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        settle(d, 'docs: checker')                # runs the repository's own lspec.py
+        r = self.gcommit(d, 'docs: checker', settle_=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('checker being committed differs', r.stderr)
 
-    def test_failed_finish_removes_old_receipt_and_still_prompts(self):
+    def test_commit_a_and_partial_commits_cannot_substitute_the_candidate(self):
         d = self.hrepo()
-        self.finish(d)
-        edit(d, 'motor.html', 'id="power"', 'id="broken"')
-        r = self.tool(d, 'finish', 'main.html')
-        self.assertEqual(r.returncode, 1)
-        self.assertIn('SESSION ACCOUNTING', r.stdout)
-        self.assertFalse(self.receipt(d).exists())
-        edit(d, 'motor.html', 'id="broken"', 'id="power"')
-        self.finish(d)
-        r = self.tool(d, 'finish', 'missing.html')
-        self.assertEqual(r.returncode, 2)
-        self.assertFalse(self.receipt(d).exists())
-
-    def test_concurrent_change_during_report_prevents_receipt(self):
-        d = self.hrepo()
-        self.finish(d)
-        original = lspec.finish_report
-        def change_after_report(args):
-            rc = original(args)
-            Path(d, 'concurrent.txt').write_text('changed')
-            return rc
-        with mock.patch.object(lspec, 'finish_report', side_effect=change_after_report):
-            rc, out = cli(d, 'finish')
-        self.assertEqual(rc, 2, out)
-        self.assertIn('state changed during finish', out)
-        self.assertFalse(self.receipt(d).exists())
-
-    def test_failed_atomic_write_removes_old_receipt_and_temporary(self):
-        d = self.hrepo()
-        self.finish(d)
-        with mock.patch.object(lspec.os, 'replace', side_effect=OSError('disk error')):
-            rc, out = cli(d, 'finish')
-        self.assertEqual(rc, 2, out)
-        self.assertIn('disk error', out)
-        self.assertFalse(self.receipt(d).exists())
-        self.assertEqual(list(self.receipt(d).parent.iterdir()), [])
-
-    def test_special_files_fail_closed_without_blocking_read(self):
-        d = self.hrepo()
-        # Git omits untracked FIFOs entirely; replace a tracked ordinary file.
-        Path(d, 'pipe').write_text('ordinary')
-        sh('git', 'add', 'pipe', cwd=d)
-        Path(d, 'pipe').unlink()
-        os.mkfifo(Path(d, 'pipe'))
-        r = self.tool(d, 'finish', 'main.html')
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn('special file', r.stderr)
-        self.assertIn('SESSION ACCOUNTING', r.stdout)
-        self.assertFalse(self.receipt(d).exists())
-
-    def test_submodule_fails_closed_even_when_not_checked_out(self):
-        d = self.hrepo()
-        head = sh('git', 'rev-parse', 'HEAD', cwd=d).strip()
-        sh('git', 'update-index', '--add', '--cacheinfo', '160000', head, 'submodule', cwd=d)
-        r = self.tool(d, 'finish', 'main.html')
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn('cannot fingerprint submodule', r.stderr)
-        self.assertFalse(self.receipt(d).exists())
-
-    def test_conflict_stages_are_part_of_index_fingerprint(self):
-        d = self.hrepo()
-        oid = sh('git', 'rev-parse', 'HEAD:main.html', cwd=d).strip()
-        def conflict(stage):
-            data = '0 ' + '0' * len(oid) + '\tconflict.txt\n'
-            data += f'100644 {oid} {stage}\tconflict.txt\n'
-            subprocess.run(['git', 'update-index', '--index-info'], input=data,
-                           text=True, cwd=d, check=True)
-        conflict(1)
-        self.finish(d)
-        conflict(2)
-        self.assertIn('staged state differs', self.gate(d).stdout)
-
-    def test_unborn_and_non_git_receipts(self):
-        d = self.hrepo(committed=False)
-        self.finish(d)
-        self.assertIsNone(lspec.json.loads(self.receipt(d).read_text())['head'])
+        edit(d, 'main.html', 'Main', 'Main heading')
         sh('git', 'add', '-A', cwd=d)
-        self.assertIn('staged state differs', self.gate(d).stdout)
-        self.finish(d)
-        self.assertEqual(self.gcommit(d, 'seed: new', finish=False).returncode, 0)
-        shutil.rmtree(Path(d, '.git'))
-        r = self.finish(d)
-        self.assertIn('unavailable outside Git; no receipt written', r.stdout)
-        self.assertFalse(Path(d, '.git').exists())
+        self.assertEqual(settle(d, 'docs: retitle')[0], 0)
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        for argv in (['commit', '-a', '--no-edit', '-m', 'docs: retitle'],
+                     ['commit', '--no-edit', '-m', 'docs: retitle', '--', 'motor.html']):
+            r = subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', *argv],
+                               cwd=d, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn('staged state changed since reconcile', r.stderr)
 
-    def test_receipt_flag_is_opt_in_and_requires_staged(self):
+    def test_message_must_carry_the_reconciled_subject_and_trailers(self):
         d = self.hrepo()
-        self.receipt(d).unlink()
-        self.assertEqual(self.tool(d, 'check', '--staged', 'main.html').returncode, 0)
-        for flags in (['--finish-receipt'], ['--finish-receipt', '--staged', '--clean']):
-            r = self.tool(d, 'check', 'main.html', *flags)
-            self.assertEqual(r.returncode, 2)
-            self.assertIn('--finish-receipt requires --staged', r.stderr)
+        self.assertEqual(settle(d, 'docs: event')[0], 0)
+        msg = Path(d, '.git', 'MSG')
+        for text, why in [('docs: other\n', 'not the reconciled subject'),
+                          ('docs: event\n\nReconciled: forged\n', 'trailers do not match')]:
+            msg.write_text(text)
+            rc, out = cli(d, 'hook', 'commit-msg', str(msg))
+            self.assertEqual(rc, 1); self.assertIn(why, out)
+        msg.write_text('anything\n\nCo-Authored-By: A <a@b>\n')
+        self.assertEqual(cli(d, 'hook', 'prepare-commit-msg', str(msg), 'message')[0], 0)
+        text = msg.read_text()
+        self.assertTrue(text.startswith('docs: event\n'))
+        self.assertIn('Co-Authored-By: A <a@b>\nReconciled: checklist', text)
+        self.assertEqual(cli(d, 'hook', 'commit-msg', str(msg))[0], 0)
 
-    def test_failed_commit_can_reuse_receipt(self):
-        d = self.hrepo()
-        edit(d, 'main.html', '<table>',
-             '<code data-commit-types>docs fix seed audit review</code><table>')
-        sh('git', 'add', 'main.html', cwd=d)
-        self.finish(d)
-        before = self.receipt(d).read_bytes()
-        r = self.gcommit(d, 'chore: forbidden', finish=False)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('[commit-types]', r.stdout + r.stderr)
-        self.assertEqual(before, self.receipt(d).read_bytes())
-        r = self.gcommit(d, 'docs: vocabulary', finish=False)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-
-    def test_message_hook_rechecks_after_prepare_commit_msg_mutation(self):
-        d = self.hrepo()
-        self.finish(d)
-        hook = Path(d, '.git', 'hooks', 'prepare-commit-msg')
-        hook.write_text('#!/bin/sh\nprintf changed > late-file.txt\n')
-        hook.chmod(0o755)
-        r = self.gcommit(d, 'docs: event', finish=False)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('commit-msg: lspec gates failed', r.stdout + r.stderr)
-        self.assertIn('working-file state differs', r.stdout + r.stderr)
-
-    def test_review_staging_requires_explicit_finish_retry(self):
+    def test_review_commits_through_the_gate(self):
         d = self.hrepo()
         edit(d, 'motor.html', '120 kW', '105 kW')
         self.assertEqual(self.gcommit(d, 'docs: derate', add=['motor.html']).returncode, 0)
-        edit(d, 'main.html', 'This design needs', 'This revised design needs')
-        self.finish(d)  # before review has staged its edit
-        r = self.tool(d, 'review', '--main', 'main.html', 'main.html#claim')
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn('the review files are now staged', r.stderr)
-        self.assertIn('staged state differs', r.stdout + r.stderr)
-        self.assertIn('main.html', sh('git', 'diff', '--cached', '--name-only', cwd=d))
-        self.finish(d)
-        r = self.tool(d, 'review', '--main', 'main.html', 'main.html#claim')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('Review committed. Rerun', r.stdout)
-        self.assertIn('HEAD differs', self.gate(d).stdout)
-        self.assertIn('REVIEW OWED: none', self.finish(d).stdout)
+        # The reads answered for the derate commit carry over within the request.
+        rc, out = cli(d, 'review', 'main.html#claim', '-m', 'Rating change checked')
+        self.assertEqual(rc, 0, out)
+        body = sh('git', 'log', '-1', '--format=%B', cwd=d)
+        self.assertTrue(body.startswith('review: main.html#claim\n\nRating change checked\n'))
+        self.assertIn('Reconciled: checklist', body)
+        self.assertEqual(sh('git', 'diff', 'HEAD^', 'HEAD', '--stat', cwd=d), '')   # empty review
+        self.assertIn('OWED: none', cli(d, 'impact', 'HEAD')[1])
 
-    def test_empty_review_commit_and_outstanding_gate_remain(self):
-        d = self.hrepo()
-        edit(d, 'motor.html', '120 kW', '105 kW')
-        self.assertEqual(self.gcommit(d, 'docs: derate', add=['motor.html']).returncode, 0)
-        r = self.finish(d)
-        self.assertIn('REVIEW OWED (1)', r.stdout)
-        r = self.gcommit(d, 'docs: unrelated', finish=False)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('[review-gate]', r.stdout + r.stderr)
-        r = self.tool(d, 'review', '--main', 'main.html', 'main.html#claim')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(sh('git', 'diff', 'HEAD^', 'HEAD', '--stat', cwd=d), '')
-
-    def test_linked_worktree_has_independent_receipt_and_working_hooks(self):
+    def test_linked_worktree_has_its_own_request_and_receipt(self):
         d = self.hrepo()
         w = self.track(tempfile.mkdtemp())
         sh('git', 'worktree', 'add', '-q', '-b', 'linked', w, cwd=d)
-        original = self.receipt(d).read_bytes()
-        self.assertFalse(self.receipt(w).exists())
-        self.finish(w)
-        r = self.gcommit(w, 'docs: linked event', finish=False)
+        self.assertIsNone(request(w))
+        r = self.gcommit(w, 'docs: linked event')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(original, self.receipt(d).read_bytes())
-        self.assertNotEqual(self.receipt(d), self.receipt(w))
+        self.assertNotEqual(state_file(d, 'request.json'), state_file(w, 'request.json'))
+        self.assertIsNotNone(request(w))
 
-    def test_alternate_index_is_respected_and_default_untouched(self):
+    def test_alternate_index_is_respected(self):
         d = self.hrepo()
         default = Path(d, '.git', 'index').read_bytes()
         alternate = Path(d, '.git', 'alternate-index')
         alternate.write_bytes(default)
-        env = dict(os.environ, GIT_INDEX_FILE=str(alternate), LSPEC_MAIN='main.html')
         Path(d, 'candidate.txt').write_text('alternate candidate')
+        env = dict(os.environ, GIT_INDEX_FILE=str(alternate))
         subprocess.run(['git', 'add', 'candidate.txt'], cwd=d, env=env, check=True)
-        self.finish(d, env={'GIT_INDEX_FILE': str(alternate)})
-        r = subprocess.run(['git', 'commit', '-m', 'docs: alternate candidate'],
-                           cwd=d, env=env, text=True, capture_output=True)
+        ensure_request(d)
+        tool = lambda *a: subprocess.run([sys.executable, 'lspec.py', '--main', 'main.html', *a],
+                                         cwd=d, env=env, capture_output=True, text=True)
+        tool('reconcile', '--subject', 'docs: alternate candidate')
+        for _ in range(5):
+            tok = re.search(r'token: (\w+)', tool('reconcile', '--next').stdout)
+            if not tok:
+                break
+            tool('reconcile', '--tick', tok.group(1), 'read-whole')
+        r = subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit',
+                            '--no-edit', '-m', 'x'], cwd=d, env=env, text=True, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(default, Path(d, '.git', 'index').read_bytes())
         self.assertEqual(sh('git', 'show', 'HEAD:candidate.txt', cwd=d), 'alternate candidate')
 
-    def test_commit_a_cannot_smuggle_changes_after_finish(self):
-        d = self.hrepo()
-        self.finish(d)
-        edit(d, 'motor.html', '120 kW', '105 kW')
-        r = subprocess.run(['git', 'commit', '-am', 'docs: derate'], cwd=d,
-                           env=dict(os.environ, LSPEC_MAIN='main.html'),
-                           capture_output=True, text=True)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('staged state differs', r.stdout + r.stderr)
 
-    def test_partial_commit_cannot_substitute_a_different_index(self):
-        d = self.hrepo()
-        edit(d, 'main.html', 'Main', 'Main heading')
-        edit(d, 'motor.html', '120 kW', '105 kW')
+class OldInstances(unittest.TestCase):
+    """The new tool reads instances seeded from older versions."""
+
+    def test_data_changes_is_reported_retired_not_failed(self):
+        rc, out = run(main_extra='<tr id="dl-x" data-changes="main.html#claim"><td>s</td><td>r</td><td>w</td></tr>')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('data-changes is retired', out)
+        d = lrepo()
+        authorize = '<tr id="dl-req" data-changes="main.html#req"><td>s</td><td>r</td><td>w</td></tr>'
+        edit(d, 'main.html', '</table>\n</main></body></html>', authorize + '</table>\n</main></body></html>')
+        edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
+        ensure_request(d)
         sh('git', 'add', '-A', cwd=d)
-        self.finish(d)
-        r = subprocess.run(['git', 'commit', '-m', 'docs: partial', '--', 'motor.html'],
-                           cwd=d, env=dict(os.environ, LSPEC_MAIN='main.html'),
-                           capture_output=True, text=True)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('staged state differs', r.stdout + r.stderr)
+        out = reconcile_out(d, 'docs: bend')
+        self.assertIn('data-changes is retired', out)
+        self.assertIn('sealed 1', out)                  # still answered in the gate
 
+    def test_old_receipts_are_ignored(self):
+        d = repo()
+        ensure_request(d)
+        old = state_file(d, 'finish-receipt.json')
+        old.write_text('{"format": 1}')
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        self.assertEqual(settle(d, 'docs: derate')[0], 0)
+        self.assertTrue(old.exists())
+
+    def test_old_hooks_get_an_upgrade_message(self):
+        d = repo()
+        sh('git', 'add', '-A', cwd=d)
+        for argv in (['check', '--staged', '--finish-receipt'], ['check', '--staged', '--commit-msg', 'x']):
+            rc, out = cli(d, *argv)
+            self.assertEqual(rc, 1, out)
+            self.assertIn('this hook comes from an older lspec', out)
 
 
 if __name__ == "__main__":

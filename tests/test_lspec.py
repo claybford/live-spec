@@ -2505,6 +2505,17 @@ class Checklist(unittest.TestCase):
         self.assertNotIn('caveat:motor.html#fan2 watch', keys)
         self.assertIn('caveat:motor.html#fan3 watch', keys)          # links, but not to a watch entry
 
+    def test_status_vocabulary_in_code_is_a_mention_not_a_value(self):
+        # The seed's conventions line names provisional(source) as a token inside
+        # <code>; a fresh instance must be able to make its seed commit with it.
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<p id="conv">Status tokens: <code>confirmed(source) / '
+             'provisional(source) / locked / open / WATCH</code>.</p>'
+             '<p id="val">Torque 80 Nm, provisional(bench)</p></main>')
+        keys = [it['key'] for it in self.items(d) if it['mech']]
+        self.assertNotIn('provisional:motor.html#conv', keys)
+        self.assertIn('provisional:motor.html#val', keys)
+
     def test_bare_provisional_status_in_a_row_needs_a_link(self):
         # A table row's status cell uses the bare vocabulary word; prose about
         # provisional values (P6 itself) does not, so only rows take the broad rule.

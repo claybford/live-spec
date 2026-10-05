@@ -1335,7 +1335,10 @@ def own_parts(spec, eid):
         pos = b
     pieces.append(spec.raw[pos:e])
     links = sorted((l["href"], l["rel"] or "") for l in spec.links if l["src"] == eid)
-    return claim_text(" ".join(pieces)), links
+    # <code> is a mention, not a stated value: the seed's status line names the
+    # provisional token without stating a provisional value.
+    own = re.sub(r"<code\b[^>]*>.*?</code>", " ", " ".join(pieces), flags=re.S)
+    return claim_text(own), links
 
 
 def changed_claims(head_specs, staged_specs):
@@ -1917,6 +1920,11 @@ def token(it):
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
+
+
+def short(sha):
+    """A 12-char commit prefix, or the unborn-HEAD phrase whole."""
+    return sha[:12] if sha else "the first commit"
 
 def head_sha():
     return git("rev-parse", "HEAD").strip() if head_status() == "ok" else None
@@ -2682,7 +2690,7 @@ def cmd_start(args):
             return 2
         if request:
             print(f"REQUEST — already open since "
-                  f"{(request.get('start') or 'the first commit')[:12]} "
+                  f"{short(request.get('start'))} "
                   f"(opened {request.get('opened_at')}); not reset")
             print("  If this request was not opened in this conversation, ask the user whether "
                   "to continue it before acting on it.")
@@ -2701,7 +2709,7 @@ def cmd_start(args):
                                          "start": head_sha(), "opened_at": now_iso()})
             remove_state("reconcile.json")
             remove_state("receipt.json")
-            print(f"REQUEST — opened at {(head_sha() or 'the first commit')[:12]}")
+            print(f"REQUEST — opened at {short(head_sha())}")
             for kind, path, _ in working_changes(repo_root()):
                 print(f"  uncommitted {kind} before this request: {path} — reconcile and commit "
                       "it, or ask the user")
@@ -2765,7 +2773,7 @@ def cmd_finish(args):
     else:
         span = f"{start}..HEAD" if start else "HEAD"
         commits = git("log", "--format=%h %s", span, check=False).splitlines() if head else []
-        print(f"REQUEST — since {(start or 'the first commit')[:12]}: {len(commits)} commit(s)")
+        print(f"REQUEST — since {short(start)}: {len(commits)} commit(s)")
         for c in commits:
             print("  " + c)
     print("OBLIGATIONS")

@@ -87,7 +87,7 @@
   Every value lives once in Key Parameters or is indexed from its authority:
   artifacts establish actual behavior, approved requirements and decisions
   establish required behavior, verification evidence establishes conformance.
-  Status tokens: [ADAPT &mdash; confirmed(source) / provisional(source) / locked / open / WATCH].
+  Status tokens: &lt;code&gt;[ADAPT &mdash; confirmed(source) / provisional(source) / locked / open / WATCH]&lt;/code&gt;.
   Git holds history; body text states current conditions and links to rationale.&lt;/p&gt;
 
 &lt;p&gt;Decisions: use dl- row ids and keep each cell &le; [ADAPT: 40] words.
@@ -513,6 +513,7 @@
 <table>
 <thead><tr><th>Item</th><th>Gates</th><th>Resolves when</th></tr></thead>
 <tbody>
+<tr id="watch-seedcommit" data-watch-until="2026-12-04"><td><a href="#watch-seedcommit">[WATCH]</a> 2026-10-04: a fresh instance could not make its <code>seed:</code> commit; the gate read the seed&rsquo;s own status-token line as an unlinked provisional value. Fix: the line is a <code>&lt;code&gt;</code> mention and the gate skips code.</td><td>Seeding any new spec</td><td>One real instance seeded from this branch commits cleanly, or 2026-12-04</td></tr>
 <tr id="open-gate"><td>The <a href="#dl-reconcile">reconcile gate</a> is unmeasured</td><td>Keeping <a href="#dl-reconcile">dl-reconcile</a> enforced</td><td>Behavioral runs with a weak model at low effort, each scenario run enforced and advisory, show the gate measurably cuts obligations missed at handoff, and that free-text corrections do not clear substantive sealed changes; otherwise it turns advisory, or that answer narrows</td></tr>
 </tbody>
 </table>

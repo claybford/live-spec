@@ -9,13 +9,16 @@ Treat **the document as the program's state and the AI as a stateless function o
 ## The spec: `live-spec.html`
 
 `live-spec.html` is the artifact that matters. It is the full methodology spec — four
-cornerstones, nineteen principles, the session protocol, and how the pattern maps across
-hardware, software, process, agentic, and project work, in both the forward-design and
-live-system regimes.
+cornerstones, nineteen principles, the session protocol, the seed, and its own decision
+log — in both the forward-design and live-system regimes. `background.html` is its one
+supporting spec, split off by the row `dl-split-background`: how the pattern maps across
+hardware, software, process, agentic and project work, the anti-patterns, and why the
+format is load-bearing. Read it when adapting the pattern to a new domain.
 
 It also *is* its own example: a live-system-regime spec applying the pattern to
-itself, with its git history as the indexed external artifact. Reading it shows the
-pattern operating, not just described.
+itself, with its git history as the indexed external artifact, three live dependency
+edges, and a two-file collection. Reading it shows the pattern operating, not just
+described.
 
 Open it in any browser, or read the raw HTML — single file, one water.css link, degrades
 to plain semantic markup with no network.
@@ -72,11 +75,13 @@ python3 lspec.py finish                      # clean tree: summary, request clos
 On a tree with no open request, `start` opens one and records its start commit in
 Git metadata. With a request already open (after context compaction, or in a new
 conversation) it reports that request instead of resetting it: its start commit,
-any uncommitted work and how many answers are recorded. If the request was not
+any uncommitted work and how many answers are recorded. Opening a request keeps
+a subject and body already set with `reconcile`, and drops recorded answers. If the request was not
 opened in this conversation, ask the user before continuing it.
 
 The output lists every file in the collection with its line count, main's word
-count and its change since the last `audit:` commit (size is shown, not capped),
+count and its change since the last `audit:` commit and since its first commit
+(size is shown, not capped; the second delta is the one an audit cannot zero),
 the sealed claims, and the open obligations: structural failures, `REVIEW OWED`,
 every watch entry with its date, expired ones flagged, and gate hooks that are
 missing or from an older lspec. `finish` shows the same obligations.
@@ -111,10 +116,10 @@ judgment items are counted without tokens.
 | `request` | No request is open for MAIN (run `start`). |
 | `structure` | Any `check` failure in the staged collection. |
 | `subject` | No subject; a type outside main's `data-commit-types`; more than 72 characters (except `review:`); `;` chaining clauses. |
-| `review` | Debt already outstanding at HEAD, unknown history, or a removed/redirected dependency of a surviving claim, unless the subject is a `review:` naming the claim or a `seed:` boundary for its file. |
-| `empty`, `placeholder` | An added or changed claim, or a decision cell, is empty or a placeholder such as `TODO`, `TBD`, `TMP…` or `…`. |
+| `review` | Debt already outstanding at HEAD, unknown history, or a removed/redirected dependency of a surviving claim, unless the subject is a `review:` naming the claim or a `seed:` boundary for its file. A `review:` subject whose staged changes touch a claim it does not name (nested claims and the deleted target of a retired edge excepted). |
+| `empty` (cell) | A cell of an added or changed row is empty or a placeholder (`TODO`, `…`, `--`; a lone `—` means none). |
 | `provisional` | An added or changed claim states `provisional(…)`, or a table row carries the bare status word, without linking the item that closes it. |
-| `caveat` | An inline temporal caveat (`as of <date>`), or a `[WATCH]` marker that does not link a `watch-` entry. |
+| `caveat` (watch) | A `[WATCH]` marker that does not link a `watch-` entry, or a `watch-…` name in prose that no watch entry carries. |
 | `watch` | A `data-watch-until` date has passed, or is not `YYYY-MM-DD`. |
 | `baseline` | HEAD or the baseline collection cannot be read; nothing clears on missing evidence. |
 
@@ -128,10 +133,24 @@ never mistaken for one.
 | Item | Asked for | Legal answers |
 |---|---|---|
 | `read` | main, every collection file the commit edits, and files holding targets of their dependencies | `read-whole` |
+| `caveat` | an added or changed claim with an inline `as of <date>` | fix the file · `quoted --reason` (a source's words in provenance or a quotation) · `historical --reason` (the date is part of what the claim states) |
+| `placeholder` | an added or changed claim whose id or text looks like a placeholder | fix the file · `literal --reason` (a real value that happens to match) |
+| `empty` | an added or changed block element with no text | fix the file · `structural --reason` (an anchor, a table the seed ships without rows) |
 | `sealed` | each `data-sealed` claim the commit changes, deletes, renames, unmarks or drops from the collection | `decision --ref ROW` (a `dl-` row added or changed in this commit) · `correction --reason` |
 | `removed` | each decision row the commit removes | `replaced --ref ROW` (added or changed in this commit) · `retired --reason` |
 | `cause` | every `fix:` commit | `established --ref WATCH --reason` · `unverified --ref WATCH` · `recurrence --ref ROW` |
+| `watched` | every commit except a `review:` or a `fix:` (whose cause item asks it): did the work surface anything to watch? | `watched --ref WATCH` (a `watch-` row added or changed in this commit) · `none` |
+| `decided` | every commit except a `review:`: did the work decide anything, in the files or in conversation? | `decided --ref ROW` (a `dl-` row added or changed in this commit) · `none` |
 | `neighbor` | each unchanged claim one hop from a changed claim (cites it or is cited by it), and each claim linked from changed text outside every id'd element | `holds` (if not, fix it in the files) |
+
+The first three are waivers: a check that infers a defect from a surface form
+can be wrong about the claim, so it takes an answer, recorded as
+`Reconciled: waived caveat PATH#ID (quoted) — reason`. A grep of history then
+gives each check its false-positive rate. Where the form is the defect — an
+empty cell, an unlinked `[WATCH]`, a provisional value with no link — there is
+nothing to waive. `watched` and `decided` are asked of every commit afresh; `none` is recorded in the
+trailers (`Reconciled: nothing watched`), so a lineage whose first `fix:` names a
+failure older than its seed is a seed that answered wrongly, and that is greppable.
 
 A failure seen once gets a watch entry, so both `established` and `unverified`
 name one: a `watch-` row added or changed in this commit, recording symptom,
@@ -157,7 +176,8 @@ keeps every answer whose evidence is unchanged. Exit status is 0 with a receipt
 and 1 while anything is open.
 
 The commit carries `Reconciled:` trailers: a checklist digest with the number of
-answers, plus one line per decision, correction, replacement, retirement or cause.
+answers, plus one line per decision, correction, replacement, retirement, cause,
+waiver, and what the commit watched and decided (or that it did neither).
 
 ### Hooks
 
@@ -178,7 +198,8 @@ so a refusal always means the candidate changed after it.
   and are refused.
 - `prepare-commit-msg` writes the reconciled subject, body and `Reconciled:` trailers.
   Other trailer lines you pass (for example `Co-Authored-By:`) are kept; other text
-  is replaced. Commit with `git commit --no-edit`.
+  is replaced. Commit with `git commit --no-edit`. It refuses `--amend`, `-c` and
+  `-C`: a reconciled commit is not rewritten; make a new one.
 - `commit-msg` refuses a message whose subject or `Reconciled:` lines differ from
   the receipt, and rechecks the receipt after message preparation.
 - `post-commit` lists files still uncommitted after the commit and prints nothing
@@ -203,15 +224,20 @@ questions, closes the request and prints the handoff commit and the
   index; `--template` skips the unresolved `[ADAPT]`/`[PROJECT]` gate;
   `--diff BASE` and `--neighborhood TARGET` print neighborhoods; `--clean` lists
   staged, unstaged and untracked files repo-wide (silent and 0 when there are none).
-- `review CLAIM… [-m TEXT]` stages the named dependent claims and their targets,
-  sets the subject `review: CLAIM, …`, and commits once the checklist is clear;
-  otherwise it prints the checklist (exit 1) and committing it later works the same.
+- `review CLAIM… [-m TEXT]` stages the named dependent claims' files and their
+  targets', sets the subject `review: CLAIM, …`, and commits once the checklist
+  is clear; otherwise it prints the checklist (exit 1) and committing it later
+  works the same. It refuses (exit 2) when those files hold a change to any
+  claim it does not name: a review commit carries only the claims it names, so
+  other work is committed first under its own type.
 - `show FILE_OR_CLAIM`, `show --graph`, `neighbors CLAIM`, `impact [BASE]` inspect
   the collection; `mv OLD NEW` renames a file or anchor and repairs references.
+  A renamed anchor that is a dependency target owes a review: the edge's
+  baseline is unknown until a `review:` commit names the dependent claim.
 
-Review baselines, the lineage floor (`seed:` subjects), rename tracing and
-collection rules are unchanged; the module docstring records their mechanics.
-Claim text is compared with block and cell boundaries as separators.
+Review baselines, the lineage floor (`seed:` subjects) and collection rules
+are unchanged; the module docstring records their mechanics. Claim text is
+compared with block and cell boundaries as separators.
 
 ### State and limits
 
@@ -223,7 +249,7 @@ worktrees have their own. Old `finish-receipt.json` files are ignored.
 This is a cooperative local gate, not a signature. An agent with a shell can forge
 a token or bypass hooks; that is deliberate circumvention, outside the gate. Green
 means the checks ran and the questions were answered, not that the answers are
-right. `git commit --amend` and merges are not reconciled.
+right. `git commit --amend` is refused by the hooks; merges are not reconciled.
 
 ### Upgrading an instance
 

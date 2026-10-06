@@ -144,6 +144,8 @@ DEFAULT_ANSWERS = {
     "neighbor": lambda n: ["holds"],
     "sealed": lambda n: ["correction", "fixture", "wording", "correction", f"n{n}"],
     "removed": lambda n: ["retired", "nobody", "re-proposes", "it", f"n{n}"],
+    "watched": lambda n: ["none"],
+    "decided": lambda n: ["none"],
 }
 
 
@@ -275,6 +277,17 @@ class G(unittest.TestCase):
              '<p id="claim">This design.</p><p id="other">Needs <a rel="depends-on" href="motor.html#power">motor power</a>.</p>')
         rc, out = cli(d, "impact", "HEAD")
         self.assertIn("SOURCE-MOVED main.html#other  (was #claim)", out)
+
+    def test_plain_link_is_not_a_moved_source(self):
+        """A new edge whose href already appears as a plain link (or in text
+        outside any claim) is a birth, not a source that moved from #None."""
+        d = repo()
+        edit(d, "main.html", "<table>", '<p>See <a href="#top">top</a>.</p>\n<table>')
+        commit(d, "docs: plain link outside any claim")
+        edit(d, "main.html", "<table>", '<p id="dep">Needs <a rel="depends-on" href="#top">top</a>.</p>\n<table>')
+        rc, out = cli(d, "impact", "HEAD")
+        self.assertNotIn("SOURCE-MOVED", out)
+        self.assertIn("ADDED   main.html#dep", out)
 
     def test_removed_target(self):
         d = repo(); edit(d, "motor.html", 'id="power"', 'id="gone"'); edit(d, "motor.html", "120 kW", "0 kW")
@@ -631,17 +644,17 @@ class N(unittest.TestCase):
 
     def test_rename_does_not_erase_outstanding_review(self):
         """A rename repaired in one commit (same source, same target text, new
-        address) is not a birth: the edge traces through the old address and
-        the outstanding review survives."""
+        address) is neither a birth nor traced: the baseline is unknown, the
+        debt is not cleared, and a review records the new baseline."""
         d = repo()
-        first = sh("git", "log", "--format=%H", "--reverse", cwd=d).split()[0][:7]
         edit(d, "motor.html", "120 kW", "105 kW")
         commit(d, "docs: derate")                       # obligation outstanding
         edit(d, "motor.html", 'id="power"', 'id="rated"')
         edit(d, "main.html", 'href="motor.html#power"', 'href="motor.html#rated"')
         commit(d, "docs: rename power to rated")        # no review recorded
         rc, out = cli(d, "impact", "HEAD")
-        self.assertIn(f"baseline {first} (introduced)", out)
+        self.assertIn("[unknown]", out)
+        self.assertIn("address changed under identical text", out)
         outstanding = out.split("OUTSTANDING")[1]
         self.assertIn("main.html#claim", outstanding)
         self.assertIn("depends-on motor.html#rated", outstanding)
@@ -691,7 +704,7 @@ class N(unittest.TestCase):
         rc, out = cli(d, "impact", "HEAD")
         self.assertIn("[unknown]", out)
         self.assertIn("CLEARANCE UNKNOWN", out)
-        self.assertIn("rename vs re-point", out)
+        self.assertIn("rename or re-point", out)
         self.assertNotIn("OWED: none", out)
         # an explicit review against committed state establishes the baseline
         rc, out = do_review(d, "main.html#claim", message="switched deliberately")
@@ -699,10 +712,9 @@ class N(unittest.TestCase):
         rc, out = cli(d, "impact", "HEAD")
         self.assertIn("OWED: none", out)
 
-    def test_rename_traces_back_to_a_seed_baseline(self):
-        """A rename after a real seed: initialization traces to the seed tree,
-        not to unknown history — the floor..HEAD walk excludes the seed, so
-        the rewind must recheck the seed tree against the expanded addresses."""
+    def test_rename_after_a_seed_is_unknown_until_reviewed(self):
+        """A rename after a real seed is not traced back to the seed tree
+        either: unknown, then an explicit review establishes the baseline."""
         d = tempfile.mkdtemp()
         open(os.path.join(d, "main.html"), "w").write(MAIN.format(extra=""))
         open(os.path.join(d, "motor.html"), "w").write(MOTOR.format(extra=""))
@@ -710,18 +722,18 @@ class N(unittest.TestCase):
         sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A", cwd=d)
         sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
            "-m", "seed: fixtures", cwd=d)
-        seed = sh("git", "rev-parse", "HEAD", cwd=d).strip()[:7]
         edit(d, "motor.html", "120 kW", "105 kW")
         commit(d, "docs: derate")                       # obligation outstanding
         edit(d, "motor.html", 'id="power"', 'id="rated"')
         edit(d, "main.html", 'href="motor.html#power"', 'href="motor.html#rated"')
         commit(d, "docs: rename power to rated")
         rc, out = cli(d, "impact", "HEAD")
-        self.assertIn(f"baseline {seed} (introduced)", out)
-        self.assertNotIn("[unknown]", out)
+        self.assertIn("[unknown]", out)
         outstanding = out.split("OUTSTANDING")[1]
         self.assertIn("depends-on motor.html#rated", outstanding)
         self.assertNotIn("OWED: none", outstanding)
+        self.assertEqual(do_review(d, "main.html#claim", message="renamed on purpose")[0], 0)
+        self.assertIn("OWED: none", cli(d, "impact", "HEAD")[1])
 
     def test_review_refuses_when_nothing_owed(self):
         d = repo(); rc, out = do_review(d, "main.html#claim")
@@ -1155,7 +1167,16 @@ class RevisionRegressions(unittest.TestCase):
         self.assertEqual(rc, 1, out)          # carried over from main.html#claim
         self.assertIn('main.html#claim2', out)
         rc, out = self.gate(d, 'review: main.html#claim2')
-        self.assertEqual(rc, 0, out)          # a review names the claim as it now stands
+        self.assertEqual(rc, 1, out)          # nor can the rename ride a review: commit
+        self.assertIn('review commit changes main.html#claim (removed)', out)
+        # the order that works: clear the debt first, then rename under docs:
+        sh('git', 'reset', '-q', '--hard', cwd=d)
+        self.assertEqual(do_review(d, 'main.html#claim')[0], 0)
+        edit(d, 'main.html', 'id="claim"', 'id="claim2"')
+        edit(d, 'motor.html', 'href="main.html#claim"', 'href="main.html#claim2"')
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = self.gate(d, 'docs: rename claim')
+        self.assertEqual(rc, 0, out)
 
     def test_disappearance_content_reverted_is_reported_not_blocked(self):
         d = repo(); edit(d, 'motor.html', '120 kW', '105 kW'); commit(d, 'docs: derate')
@@ -1514,18 +1535,29 @@ class HookIntegration(unittest.TestCase):
         r = self.gcommit(d, 'docs: derate more', add=['motor.html'])
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn('OPEN [review]', r.stdout)
-        # 4. a correctly named review commit succeeds
-        r = self.gcommit(d, 'review: main.html#claim', add=['motor.html'])
+        # 4. nor does carrying that target change inside the review commit:
+        #    a review changes only the claims it names
+        r = self.gcommit(d, 'review: main.html#claim')
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('review commit changes motor.html#power (changed)', r.stdout)
+        # 5. the review alone succeeds; the further derate follows under its own type
+        sh('git', 'reset', '-q', cwd=d); sh('git', 'checkout', '--', 'main.html', cwd=d)
+        sh('git', 'stash', '-q', cwd=d)
+        r = self.gcommit(d, 'review: main.html#claim')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        # 5. the resulting history reports clearance
-        rc, out = cli(d, 'impact', 'HEAD')
+        sh('git', 'stash', 'pop', '-q', cwd=d)
+        r = self.gcommit(d, 'docs: derate more', add=['motor.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('this commit creates a review obligation', r.stdout)
+        # 6. the resulting history reports the new debt against the review baseline
+        rc, out = cli(d, 'impact', 'HEAD~1')
         self.assertEqual(rc, 0, out)
-        self.assertIn('OWED: none', out)
+        self.assertIn('[content]', out)
 
     def test_rename_repair_preserves_the_outstanding_review(self):
         """Rename the target and repair the link without reviewing. The debt
-        must survive: held at the rename, visible after an out-of-band
-        commit, holding the next non-review commit, cleared by review."""
+        must survive: held at the rename, unknown after an out-of-band commit,
+        holding the next non-review commit, cleared by review."""
         d = self.hrepo()
         edit(d, 'motor.html', '120 kW', '105 kW')
         r = self.gcommit(d, 'docs: derate', add=['motor.html'])
@@ -1539,10 +1571,12 @@ class HookIntegration(unittest.TestCase):
         sh('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-m', 'docs: rename', cwd=d)
         rc, out = cli(d, 'impact', 'HEAD')
         self.assertIn('depends-on motor.html#rated', out.split('OUTSTANDING')[1])
+        self.assertIn('[unknown]', out)
         edit(d, 'main.html', 'Main', 'Main heading')
         r = self.gcommit(d, 'docs: unrelated tweak', add=['main.html'])
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn('OPEN [review]', r.stdout)
+        self.assertIn('clearance cannot be established', r.stdout)
         sh('git', 'checkout', '--', 'main.html', cwd=d)
         sh('git', 'reset', '-q', cwd=d)
         r = self.gcommit(d, 'review: main.html#claim')
@@ -1562,17 +1596,93 @@ class HookIntegration(unittest.TestCase):
         self.assertIn('OWED: none', cli(d, 'impact', 'HEAD')[1])
         self.assertIn('Independent rating verified', sh('git', 'log', '-1', '--format=%B', cwd=d))
 
-    def test_review_handles_already_staged_target_file_deletion(self):
+    def test_review_refuses_to_carry_a_split_row_removal(self):
+        """Retiring the edge and deleting the whole supporting file in one
+        review: the split row's removal is a change the review does not name,
+        so the verb refuses; retire first, then remove the file under docs:."""
         d = self.hrepo()
         edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>',
              'an independently established rating')
         edit(d, 'main.html', '<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
         sh('git', 'rm', '-q', 'motor.html', cwd=d)
-        r = self.gcommit(d, 'docs: retire motor', add=['main.html'])
-        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        rc, out = do_review(d, 'main.html#claim', message='Independent rating verified')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('main.html#dl-split-motor (removed)', out)
+        sh('git', 'reset', '-q', '--hard', cwd=d)
+        edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>',
+             'an independently established rating')
         rc, out = do_review(d, 'main.html#claim', message='Independent rating verified')
         self.assertEqual(rc, 0, out)
+        edit(d, 'main.html', '<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
+        sh('git', 'rm', '-q', 'motor.html', cwd=d)
+        r = self.gcommit(d, 'docs: retire motor', add=['main.html'])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn('OWED: none', cli(d, 'impact', 'HEAD')[1])
+
+    def test_review_commit_changes_only_the_claims_it_names(self):
+        """The bench's smuggling path: an unrelated claim edited in the named
+        file rides into the review: commit. The verb refuses before staging,
+        and a hand-typed review: subject is held by reconcile."""
+        d = self.hrepo()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        self.assertEqual(self.gcommit(d, 'docs: derate', add=['motor.html']).returncode, 0)
+        edit(d, 'main.html', 'This design needs', 'This design (checked) needs')
+        edit(d, 'main.html', '<h1 id="top">Main</h1>', '<h1 id="top">Main, rewritten</h1>')
+        rc, out = do_review(d, 'main.html#claim', message='looks fine')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('main.html#top (changed)', out)
+        self.assertEqual(sh('git', 'diff', '--cached', '--name-only', cwd=d), '')   # nothing staged
+        sh('git', 'add', '-A', cwd=d)
+        out = reconcile_out(d, 'review: main.html#claim')
+        self.assertIn('OPEN [review] review commit changes main.html#top (changed)', out)
+        self.assertNotIn('main.html#claim (changed)', out)
+        sh('git', 'reset', '-q', cwd=d); sh('git', 'checkout', '--', 'main.html', cwd=d)
+        edit(d, 'main.html', 'This design needs', 'This design (checked) needs')
+        rc, out = do_review(d, 'main.html#claim', message='looks fine')
+        self.assertEqual(rc, 0, out)
+
+    def test_review_must_name_the_dependent_claim_not_a_container(self):
+        """Naming a section around the dependent would exempt every claim
+        nested in it; a review names the id that holds the edge."""
+        d = self.hrepo()
+        edit(d, 'main.html', '<p id="claim">This design needs <a rel="depends-on" href="motor.html#power">motor power</a>.</p>',
+             '<section id="box"><p id="other">Unrelated.</p><p id="claim">This design needs '
+             '<a rel="depends-on" href="motor.html#power">motor power</a>.</p></section>')
+        self.assertEqual(self.gcommit(d, 'docs: box', add=['main.html']).returncode, 0)
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        self.assertEqual(self.gcommit(d, 'docs: derate', add=['motor.html']).returncode, 0)
+        edit(d, 'main.html', 'Unrelated.', 'Unrelated, rewritten.')
+        rc, out = do_review(d, 'main.html#box', message='smuggle')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('no depends-on link', out)
+        sh('git', 'add', '-A', cwd=d)
+        out = reconcile_out(d, 'review: main.html#box')
+        self.assertIn('review commit names main.html#box, which carries no depends-on link', out)
+
+    def test_second_edge_to_a_twin_target_is_a_birth(self):
+        """A new edge whose target text equals an existing target's is a
+        birth, not a rename: the existing edge survives."""
+        d = self.hrepo()
+        edit(d, 'motor.html', '</main>', '<p id="alt">120 kW, see <a href="main.html#claim">main</a>.</p></main>')
+        self.assertEqual(self.gcommit(d, 'docs: twin', add=['motor.html']).returncode, 0)
+        edit(d, 'main.html', 'motor power</a>.</p>',
+             'motor power</a>.</p><p id="claim2">Also <a rel="depends-on" href="motor.html#alt">alt</a>.</p>')
+        self.assertEqual(self.gcommit(d, 'docs: second edge', add=['main.html']).returncode, 0)
+        out = cli(d, 'impact', 'HEAD')[1]
+        self.assertNotIn('[unknown]', out)
+        self.assertIn('OWED: none', out)
+
+    def test_review_allows_nested_claims_and_retired_targets(self):
+        d = self.hrepo()
+        edit(d, 'main.html', '<p id="claim">This design needs <a rel="depends-on" href="motor.html#power">motor power</a>.</p>',
+             '<section id="claim"><p id="claim-why">Because.</p><p>This design needs '
+             '<a rel="depends-on" href="motor.html#power">motor power</a>.</p></section>')
+        self.assertEqual(self.gcommit(d, 'docs: nest', add=['main.html']).returncode, 0)
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        self.assertEqual(self.gcommit(d, 'docs: derate', add=['motor.html']).returncode, 0)
+        edit(d, 'main.html', 'Because.', 'Because the rating changed.')     # nested in the named claim
+        rc, out = do_review(d, 'main.html#claim', message='nested fix')
+        self.assertEqual(rc, 0, out)
 
     def test_redirect_requires_review_even_without_prior_debt(self):
         d = self.hrepo()
@@ -2280,6 +2390,30 @@ class Requests(unittest.TestCase):
         self.assertIn('recorded answers:', out)
         self.assertEqual(request(d), first)
 
+    def test_start_keeps_a_subject_set_before_it(self):
+        """reconcile --subject, then obeying its 'run start' item, must not
+        silently lose the subject."""
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        cli(d, 'reconcile', '--subject', 'docs: derate', '--body', 'why')
+        rc, out = cli(d, 'start')
+        self.assertIn("subject kept: 'docs: derate'", out)
+        state = lspec.json.loads(state_file(d, 'reconcile.json').read_text())
+        self.assertEqual((state['subject'], state['body']), ('docs: derate', 'why'))
+        self.assertNotIn('ticks', state)
+        self.assertIn("CHECKLIST — 'docs: derate'", cli(d, 'reconcile')[1])
+
+    def test_size_line_shows_both_baselines(self):
+        d = self.fixture()
+        first = head(d)[:7]
+        edit(d, 'main.html', '<h1 id="top">Main</h1>', '<h1 id="top">Main heading</h1>')
+        commit(d, 'docs: grow')
+        edit(d, 'main.html', 'Main heading', 'Main heading, padded with four extra words')
+        commit(d, 'audit: sweep that adds words')     # zeroes the audit delta
+        audit = head(d)[:7]
+        out = cli(d, 'start')[1]
+        self.assertIn(f'+0 since audit {audit}; +6 since first commit {first}', out)
+
     def test_start_refuses_a_request_open_for_another_main(self):
         d = self.fixture()
         cli(d, 'start')
@@ -2435,10 +2569,10 @@ class Checklist(unittest.TestCase):
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
         out = reconcile_out(d, 'docs: derate')
         self.assertNotIn('token', out)
-        self.assertIn('judgment items open: read 2, neighbor 1', out)
+        self.assertIn('judgment items open: read 2, watched 1, decided 1, neighbor 1', out)
         out = cli(d, 'reconcile', '--next')[1]
         self.assertEqual(out.count('token:'), 1)
-        self.assertIn('ITEM 1 of 3 [read]', out)
+        self.assertIn('ITEM 1 of 5 [read]', out)
         self.assertIn('--tick ' + re.search(r'token: (\w+)', out).group(1) + ' --answer read-whole', out)
         rc, out = cli(d, 'reconcile', '--tick', 'deadbeef', '--answer', 'read-whole')
         self.assertEqual(rc, 2); self.assertIn('no current item has token', out)
@@ -2448,10 +2582,10 @@ class Checklist(unittest.TestCase):
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
         cli(d, 'reconcile', '--subject', 'docs: derate')
         answer_all(d)
-        self.assertIn('answered: 3', cli(d, 'reconcile')[1])
+        self.assertIn('answered: 5', cli(d, 'reconcile')[1])
         edit(d, 'main.html', 'Main', 'Main heading'); sh('git', 'add', '-A', cwd=d)
         out = cli(d, 'reconcile')[1]
-        self.assertIn('answered: 3', out)            # unrelated change: answers kept
+        self.assertIn('answered: 5', out)            # unrelated change: answers kept
         edit(d, 'motor.html', '105 kW', '100 kW'); sh('git', 'add', '-A', cwd=d)
         out = cli(d, 'reconcile')[1]
         self.assertIn('judgment open: 1', out)       # only the neighbor of the changed claim returns
@@ -2482,12 +2616,81 @@ class Checklist(unittest.TestCase):
         d = self.fixture()
         edit(d, 'main.html', '<table>', '<p id="note"></p><table>'
              '<tr id="TMPDUNST"><td>TMPDUNST</td><td></td><td></td></tr>')
-        keys = [it['key'] for it in self.items(d) if it['mech']]
-        self.assertIn('empty:main.html#note', keys)
-        self.assertIn('placeholder:main.html#TMPDUNST', keys)
-        self.assertIn('empty:main.html#TMPDUNST cell', keys)
+        items = {it['key']: it for it in self.items(d)}
+        self.assertFalse(items['empty:main.html#note']['mech'])              # waivable
+        self.assertFalse(items['placeholder:main.html#TMPDUNST']['mech'])    # waivable
+        self.assertTrue(items['empty:main.html#TMPDUNST cell']['mech'])      # an empty cell is the defect
         rc, out = run(main_extra='<tr id="TMPDUNST"><td>x</td><td>y</td><td>z</td></tr>')
         self.assertEqual(rc, 0, out)                 # the validator stays structural
+
+    def test_lone_dash_is_none_not_placeholder(self):
+        d = self.fixture()
+        edit(d, 'main.html', '<table>', '<table><tr id="kp-rate"><td>Rate</td><td>5</td><td>—</td></tr>'
+             '<tr id="kp-todo"><td>Rate</td><td>--</td><td>…</td></tr>')
+        keys = [it['key'] for it in self.items(d)]
+        self.assertNotIn('empty:main.html#kp-rate cell', keys)
+        self.assertIn('empty:main.html#kp-todo cell', keys)
+
+    def test_waivers_take_an_answer_with_a_reason(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<p id="tier">Priced on the vendor\'s "valid as of 2024" tier</p>'
+             '<p id="temp-sensor-1">Reads the intake temperature</p><div id="mark"></div></main>')
+        items = {it['key']: it for it in self.items(d)}
+        ctx = evaluate_in(d)[0]
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            V = lambda key, *words: lspec.validate(items[key], given(list(words)), ctx, set())
+            self.assertEqual(V('caveat:motor.html#tier', 'quoted', 'the', 'vendor', 'names', 'the', 'tier')[1],
+                             'Reconciled: waived caveat motor.html#tier (quoted) — the vendor names the tier')
+            self.assertEqual(V('placeholder:motor.html#temp-sensor-1', 'literal', 'a', 'real', 'sensor', 'id')[1],
+                             'Reconciled: waived placeholder motor.html#temp-sensor-1 (literal) — a real sensor id')
+            self.assertEqual(V('empty:motor.html#mark', 'structural', 'an', 'anchor', 'only')[1],
+                             'Reconciled: waived empty motor.html#mark (structural) — an anchor only')
+            with self.assertRaisesRegex(ValueError, 'needs --reason'):
+                V('caveat:motor.html#tier', 'historical')
+            with self.assertRaisesRegex(ValueError, 'not a legal answer'):
+                V('caveat:motor.html#tier', 'literal', 'wrong', 'answer', 'kind')
+        finally:
+            os.chdir(cwd)
+
+    def test_waiver_follows_its_evidence_and_lands_in_the_commit(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<p id="tier">Priced on the "valid as of 2024" tier</p></main>')
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = settle(d, 'docs: tier', answers={'caveat': ['quoted', 'the', 'vendor', 'phrase']})
+        self.assertEqual(rc, 0, out)
+        receipt = lspec.json.loads(state_file(d, 'receipt.json').read_text())
+        self.assertIn('Reconciled: waived caveat motor.html#tier (quoted) — the vendor phrase', receipt['trailers'])
+        edit(d, 'motor.html', '2024" tier', '2024" tier, confirmed as of 2026-01-01')
+        sh('git', 'add', '-A', cwd=d)
+        out = cli(d, 'reconcile')[1]
+        self.assertIn('caveat 1', out)               # the edit reopens the waiver
+
+    def test_waiver_is_asked_afresh_each_commit_and_reasons_may_repeat_across_commits(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<p id="tier">Priced on the "valid as of 2024" tier</p></main>')
+        sh('git', 'add', '-A', cwd=d)
+        self.assertEqual(settle(d, 'docs: tier', answers={'caveat': ['quoted', 'the', 'vendor', 'phrase']})[0], 0)
+        commit(d, 'docs: tier')
+        edit(d, 'motor.html', '2024" tier', '2024" tier, see <a href="#top">top</a>')   # link-only change
+        sh('git', 'add', '-A', cwd=d)
+        out = cli(d, 'reconcile', '--subject', 'docs: link the tier')[1]
+        self.assertIn('caveat 1', out)                       # not auto-answered from last commit
+        rc, out = settle(d, 'docs: link the tier', answers={'caveat': ['quoted', 'the', 'vendor', 'phrase']})
+        self.assertEqual(rc, 0, out)                          # the same reason, a commit later, is fine
+
+    def test_data_watch_until_in_text_is_not_a_dangling_mention(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<p id="howto">Mark a dated condition data-watch-until="YYYY-MM-DD".</p></main>')
+        self.assertNotIn('caveat:motor.html#howto watch-until', [it['key'] for it in self.items(d)])
+
+    def test_provisional_and_unlinked_watch_have_no_waiver(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<p id="rpm">3000 rpm, provisional(bench)</p>'
+             '<p id="fan">Fan [WATCH]</p></main>')
+        items = {it['key']: it for it in self.items(d)}
+        self.assertTrue(items['provisional:motor.html#rpm']['mech'])
+        self.assertTrue(items['caveat:motor.html#fan watch']['mech'])
 
     def test_provisional_values_and_inline_caveats(self):
         d = self.fixture()
@@ -2497,7 +2700,7 @@ class Checklist(unittest.TestCase):
              '<p id="fan">Fan [WATCH]</p><p id="fan2">Fan <a href="#watch-fan">[WATCH]</a></p>'
              '<p id="fan3">Fan <a href="#top">[WATCH]</a></p>'
              '<table><tr id="watch-fan"><td>fan noise</td><td>2026-10-04</td><td>closes when quiet a week</td></tr></table></main>')
-        keys = [it['key'] for it in self.items(d) if it['mech']]
+        keys = [it['key'] for it in self.items(d)]
         self.assertIn('provisional:motor.html#rpm', keys)
         self.assertNotIn('provisional:motor.html#torque', keys)
         self.assertIn('caveat:motor.html#temp', keys)
@@ -2677,6 +2880,73 @@ class Checklist(unittest.TestCase):
         finally:
             os.chdir(cwd)
 
+    def test_every_commit_is_asked_what_it_watched_and_decided(self):
+        """The two prose rules the benches saw dropped become one question each,
+        on every commit that is not a review; a fix answers the watch question
+        in its cause item."""
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        kinds = [it['kind'] for it in self.items(d, 'docs: derate')]
+        self.assertIn('watched', kinds); self.assertIn('decided', kinds)
+        kinds = [it['kind'] for it in self.items(d, 'fix: derate')]
+        self.assertIn('cause', kinds); self.assertNotIn('watched', kinds); self.assertIn('decided', kinds)
+        kinds = [it['kind'] for it in self.items(d, 'review: main.html#claim')]
+        self.assertNotIn('watched', kinds); self.assertNotIn('decided', kinds)
+
+    def test_watched_and_decided_answers(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<table><tr id="watch-noise"><td>noise</td><td>2026-10-04</td>'
+             '<td>closes after a week quiet</td></tr></table></main>')
+        edit(d, 'main.html', '</table>', '<tr id="dl-quiet"><td>Quiet fan</td><td>Loud fan</td>'
+             '<td>Noise complaints.</td></tr></table>')
+        items = self.items(d, 'docs: quiet the fan')
+        ctx = evaluate_in(d, 'docs: quiet the fan')[0]
+        w = next(i for i in items if i['kind'] == 'watched')
+        c = next(i for i in items if i['kind'] == 'decided')
+        self.assertIn('watch entry motor.html#watch-noise (added)', w['excerpt'])
+        self.assertIn('decision row main.html#dl-quiet', c['excerpt'])
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            V = lambda it, *words: lspec.validate(it, given(list(words)), ctx, set())
+            self.assertEqual(V(w, 'none')[1], 'Reconciled: nothing watched')
+            self.assertEqual(V(w, 'watched', 'watch-noise')[1], 'Reconciled: watched at motor.html#watch-noise')
+            with self.assertRaisesRegex(ValueError, 'not a watch entry'):
+                V(w, 'watched', 'dl-quiet')
+            self.assertEqual(V(c, 'none')[1], 'Reconciled: nothing decided')
+            self.assertEqual(V(c, 'decided', 'dl-quiet')[1], 'Reconciled: decided at main.html#dl-quiet')
+            with self.assertRaisesRegex(ValueError, 'not a decision row'):
+                V(c, 'decided', 'watch-noise')
+            with self.assertRaisesRegex(ValueError, 'takes no --reason'):
+                V(c, 'none', 'no', 'reason', 'needed')
+        finally:
+            os.chdir(cwd)
+
+    def test_watched_and_decided_are_asked_afresh_each_commit(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        self.assertEqual(settle(d, 'docs: derate')[0], 0)
+        commit(d, 'docs: derate')
+        edit(d, 'motor.html', '105 kW', '100 kW'); sh('git', 'add', '-A', cwd=d)
+        out = cli(d, 'reconcile', '--subject', 'docs: derate more')[1]
+        self.assertIn('watched 1, decided 1', out)   # last commit's "none" does not carry
+
+    def test_none_is_recorded_in_the_trailers(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        self.assertEqual(settle(d, 'docs: derate')[0], 0)
+        receipt = lspec.json.loads(state_file(d, 'receipt.json').read_text())
+        self.assertIn('Reconciled: nothing watched', receipt['trailers'])
+        self.assertIn('Reconciled: nothing decided', receipt['trailers'])
+
+    def test_dangling_watch_mention_is_mechanical(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<p id="leap">Report failed on the leap day ( watch-leapday )</p>'
+             '<p id="ok">Fan noise, see <a href="#watch-fan">watch-fan</a>; the <code>watch-</code> prefix.</p>'
+             '<table><tr id="watch-fan"><td>fan</td><td>2026-10-04</td><td>closes when quiet</td></tr></table></main>')
+        keys = [it['key'] for it in self.items(d) if it['mech']]
+        self.assertIn('caveat:motor.html#leap watch-leapday', keys)
+        self.assertNotIn('caveat:motor.html#ok watch-fan', keys)
+
     def test_tick_flags_never_swallow_main(self):
         d = self.fixture()
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
@@ -2707,7 +2977,7 @@ class Checklist(unittest.TestCase):
         edit(d, 'main.html', '<h1 id="top">Main</h1>', '<h1 id="top"></h1>'); sh('git', 'add', '-A', cwd=d)
         rc, out = cli(d, 'reconcile')
         self.assertEqual(rc, 1, out)
-        self.assertIn('OPEN [empty] main.html#top is empty', out)
+        self.assertIn('empty 1', out)                # waivable, but open until answered
         self.assertFalse(state_file(d, 'receipt.json').exists())
 
 
@@ -2761,6 +3031,18 @@ class Receipts(unittest.TestCase):
         self.assertIn('Co-Authored-By: A <a@b>\nReconciled: checklist', text)
         self.assertEqual(cli(d, 'hook', 'commit-msg', str(msg))[0], 0)
 
+    def test_amend_is_refused_even_with_a_fresh_receipt(self):
+        d = self.hrepo()
+        edit(d, 'main.html', 'Main', 'Main heading')
+        self.assertEqual(self.gcommit(d, 'docs: retitle', add=['main.html']).returncode, 0)
+        before = head(d)
+        self.assertEqual(settle(d, 'docs: retitle')[0], 0)    # a receipt for the empty amend
+        r = subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit',
+                            '--amend', '--no-edit'], cwd=d, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('amending or reusing a commit rewrites a reconciled record', r.stderr)
+        self.assertEqual(head(d), before)
+
     def test_review_commits_through_the_gate(self):
         d = self.hrepo()
         edit(d, 'motor.html', '120 kW', '105 kW')
@@ -2796,11 +3078,13 @@ class Receipts(unittest.TestCase):
         tool = lambda *a: subprocess.run([sys.executable, 'lspec.py', '--main', 'main.html', *a],
                                          cwd=d, env=env, capture_output=True, text=True)
         tool('reconcile', '--subject', 'docs: alternate candidate')
-        for _ in range(5):
-            tok = re.search(r'token: (\w+)', tool('reconcile', '--next').stdout)
+        for _ in range(8):
+            out = tool('reconcile', '--next').stdout
+            tok = re.search(r'token: (\w+)', out)
             if not tok:
                 break
-            tool('reconcile', '--tick', tok.group(1), 'read-whole')
+            kind = re.search(r'ITEM \d+ of \d+ \[(\w+)\]', out).group(1)
+            tool('reconcile', '--tick', tok.group(1), *tick_argv(DEFAULT_ANSWERS[kind](0)))
         r = subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit',
                             '--no-edit', '-m', 'x'], cwd=d, env=env, text=True, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

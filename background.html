@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<!-- Background to The Living Specification: exposition split from live-spec.html by its split row (dl-split-background). Not the state. -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Living Specification - background</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css">
+</head>
+<body>
+
+<main>
+
+<h1 id="top">The Living Specification &mdash; Background</h1>
+<p id="about">A <a href="live-spec.html#v-supporting">supporting spec</a> of <a href="live-spec.html#top">live-spec.html</a>, which is the entry point and holds the state; this file exists by its split row there (<a href="live-spec.html#dl-split-background">dl-split-background</a>). It carries exposition no <a href="live-spec.html#protocol">session protocol</a> move crosses into: how the pattern maps across solution types, the non-obvious failures, and why the format is load-bearing. Read it whole when adapting the pattern to a new domain; a session maintaining main does not load it.</p>
+
+<hr>
+<h2 id="generalize">Generalizing Across Solution Types</h2>
+<p>Nothing in the <a href="live-spec.html#cornerstones">cornerstones</a> is specific to mechanical engineering: the "unknowns" and "sources" change form; the structure is identical. The mapping beyond hardware is by analogy, exercised most concretely on the software/config side.</p>
+
+<table>
+<thead>
+<tr><th>Pattern slot</th><th>Hardware</th><th>Software system / API</th><th>Process / method flow</th><th>Agentic flow design</th><th>Project (scoped or continuous)</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td><strong>Canonical store</strong></td>
+  <td>Dimensions, ratios, torques, voltages, derate curves</td>
+  <td>Config values, interface contracts, API signatures, data schemas, perf budgets, SLOs</td>
+  <td>Roles, SLAs, thresholds, decision criteria, RACI, handoff definitions</td>
+  <td>Tool inventory &amp; signatures, state schema, prompt/IO contracts, model + sampling params, token/latency budgets, guardrails</td>
+  <td>Milestones &amp; acceptance criteria, deliverable definitions, owners, budget figures, deadlines</td>
+</tr>
+<tr>
+  <td><strong>Provisional value</strong></td>
+  <td>Un-measured donor part dimension</td>
+  <td>Unverified third-party behavior, assumed throughput, untested integration assumption</td>
+  <td>Unvalidated step volume / cycle time / drop-off rate</td>
+  <td>Untested tool reliability, unmeasured step latency / cost, assumed model capability</td>
+  <td>Estimated duration / cost, assumed resource availability, unconfirmed stakeholder commitment</td>
+</tr>
+<tr>
+  <td><strong>"Architecture locked"</strong></td>
+  <td>Engine, transaxle/belt, bus voltage</td>
+  <td>Stack, topology, data-model spine, sync-vs-async boundary</td>
+  <td>The flow's spine: stages and their order</td>
+  <td>Orchestration topology (single agent / supervisor / swarm), the state model, human-in-loop boundary</td>
+  <td>The project&rsquo;s spine: phases and their order, the scope boundary, the delivery structure</td>
+</tr>
+<tr>
+  <td><strong>Decision log entry</strong></td>
+  <td>Component selection vs rejected part</td>
+  <td>An ADR (Architecture Decision Record)</td>
+  <td>Why this routing / ownership / gate</td>
+  <td>Why this orchestration / model / tool over the alternatives</td>
+  <td>Why this sequencing / vendor / make-vs-buy over the alternatives</td>
+</tr>
+<tr>
+  <td><strong>Scope fence</strong></td>
+  <td>"EV range out of scope" / "not an OEM design gate"</td>
+  <td>Non-goals: "not multi-tenant," "no i18n at launch," "single region"</td>
+  <td>"Out of scope: exceptions handled by Team X"</td>
+  <td>"No autonomous spend," "no irreversible actions without confirmation," "these intents not handled"</td>
+  <td>"Out of scope: deliverable X, stakeholder group Y; handled by project Z"</td>
+</tr>
+<tr>
+  <td><strong>Reasoning / tooling</strong></td>
+  <td>Governing equations + <code>psd_sim.py</code></td>
+  <td>Reference implementation / spike + a perf model</td>
+  <td>A throughput / queueing simulation</td>
+  <td>The eval harness + a cost/latency model + saved sample traces</td>
+  <td>The schedule / critical-path model + the budget workbook</td>
+</tr>
+<tr>
+  <td><strong>A "measurement"</strong></td>
+  <td>A bench or teardown reading</td>
+  <td>A benchmark run, an integration test, a spike result</td>
+  <td>A measured pilot / time-and-motion study</td>
+  <td>An eval run, a probe of the live tool, an observed failure rate</td>
+  <td>A completed milestone review, actuals-vs-estimate, a stakeholder sign-off</td>
+</tr>
+</tbody>
+</table>
+
+<p>For software, several cornerstones map to established practice &mdash; the decision log is ADRs, the typed commit history mirrors <em>Keep a Changelog</em>, the gated open list is a traceability matrix, P15 is the spirit of literate programming; the contribution here is the synthesis into one artifact tuned for a stateless, pattern-matching editor. That editor's forgetting is a widely worked problem, and the same devices recur wherever it is worked independently &mdash; a repo-root file taken as canonical project state (<code>AGENTS.md</code> and kin), a curated, always-reloaded memory bank, the named &ldquo;clean-slate juror&rdquo; re-litigation that <a href="live-spec.html#p11">P11</a>, <a href="live-spec.html#p12">P12</a>, and <a href="live-spec.html#p18">P18</a> pre-empt. The pattern also has recognized kin in the specification literature itself: its live-system regime is the <em>in-service / maintained-as</em> specification, and its executable, always-current character is <em>Specification by Example</em>'s "Living Documentation" reached from the stateless-editor side. The <a href="live-spec.html#regimes">regime</a> is orthogonal to every column: a <em>scoped</em> project is the forward regime, a <em>continuous</em> program is the live-system regime, and the maintenance regime adds the <a href="live-spec.html#regime-diffs">regime differences</a> of the <a href="live-spec.html#regimes">two-regime framing</a> to whichever column applies.</p>
+
+<hr>
+
+<h2 id="antipatterns">Anti-Patterns</h2>
+<p>The direct inverses of the cornerstones (no store, no fence, no bootloader, untyped commits&hellip;) follow from <a href="live-spec.html#cornerstones">the cornerstones</a>; this table names the non-obvious failures.</p>
+
+<table>
+<thead><tr><th>Anti-pattern</th><th>What it breaks</th></tr></thead>
+<tbody>
+<tr><td>A stated count with no link to the enumeration it counts</td><td>The set changes and the count silently lies; a retained count checksum detects a dropped item when the enumeration shrinks (<a href="live-spec.html#dl-counts">dl-counts</a>).</td></tr>
+<tr><td>Filing a disproven diagnosis as a decision-log "rejected alternative," or not recording it</td><td>A dead end has no chosen counterpart, so it is lost; the elimination is re-run (<a href="live-spec.html#p17">P17</a>).</td></tr>
+<tr><td>Treating the document as canonical for values it only indexes from a live system</td><td>An edit "fixes" the wrong layer; the running artifact is silently overridden (<a href="live-spec.html#p1">P1</a>/<a href="live-spec.html#p7">P7</a>).</td></tr>
+<tr><td>Resolving a source contradiction silently, or attributing only one side</td><td>The losing reading returns unattributed and is re-fought; the resolution cannot be re-judged when a source changes (<a href="live-spec.html#p7">P7</a>, <a href="live-spec.html#dl-contradict">dl-contradict</a>).</td></tr>
+<tr><td>Pre-emptively dating every confirmed value ("confirmed as-of&hellip;" everywhere)</td><td>A document-wide drift surface with no payload; caveat metadata belongs in <a href="live-spec.html#v-watch">watch entries</a> (<a href="live-spec.html#dl-watchreg">dl-watchreg</a>).</td></tr>
+<tr><td>Editing a node without reconciling its one-hop neighborhood</td><td>Referrers assert falsehoods that surface sessions later, detached from the causing edit (<a href="live-spec.html#protocol">the session protocol</a>).</td></tr>
+<tr><td>Leaving a workaround in place after upstream fixes the cause, with no tombstone</td><td>Dead scaffolding accretes; sessions maintain a fix for a problem that no longer exists (<a href="live-spec.html#p9">P9</a>).</td></tr>
+<tr><td>Merging near-duplicates that encode a real boundary</td><td>De-drift erases a real distinction (internal vs. wire, requested vs. granted) (<a href="live-spec.html#dl-nearcopy">dl-nearcopy</a>).</td></tr>
+<tr><td>A bespoke, heavy stylesheet on the artifact itself</td><td>Taxes every session's context and invites breakage; presentation is a single externalized source too (<a href="#format">the format</a>).</td></tr>
+<tr><td>A supporting spec with no split row at its parent</td><td>Nobody can say whether main should absorb it, so it accretes; the collection boundary cannot be derived (<a href="live-spec.html#p19">P19</a>).</td></tr>
+<tr><td>Preloading supporting specs "for context"</td><td>Load cost with no crossed edge to justify it; the session plans on files its move never touches (<a href="live-spec.html#dl-collection">dl-collection</a>).</td></tr>
+<tr><td>Review acknowledgments (<code>data-rev</code> and kin) in the documents</td><td>An in-file ledger by another name: a per-session reading tax and a drift surface (<a href="live-spec.html#dl-reviewgit">dl-reviewgit</a>).</td></tr>
+<tr><td>A hand-maintained file or ownership manifest</td><td>A second home for what the files and split rows already state; diverges by the next session (<a href="live-spec.html#dl-graphderived">dl-graphderived</a>).</td></tr>
+<tr><td>Treating a plain link as a review obligation, or a <code>depends-on</code> link as mere navigation</td><td>Either every reference owes a review or none does; the typed edge is what makes the load-bearing subset visible (<a href="live-spec.html#dl-dependson">dl-dependson</a>).</td></tr>
+<tr><td>Change narrative in the document body instead of git</td><td>History duplicated out of git becomes a drift surface and a per-session reading tax (<a href="live-spec.html#dl-twohomes">dl-twohomes</a>).</td></tr>
+</tbody>
+</table>
+
+<hr>
+
+<h2 id="format">The format is load-bearing, not packaging</h2>
+<p><strong>Granular addressability.</strong> HTML gives arbitrary <code>id</code> anchors on any element &mdash; table rows, spans, list items &mdash; which is what the dense reference web (<a href="live-spec.html#p3">P3</a>) runs on. Markdown anchors only headings natively; the swap quietly discards a property the method depends on.</p>
+<p><strong>One file per spec, renders identically anywhere.</strong> A collection is several such files, each whole (<a href="live-spec.html#p19">P19</a>). The artifact passes between humans and stateless sessions with no tooling and navigation intact. "Self-contained" scopes to the <em>state</em>; presentation is externalized to one stylesheet dependency and degrades gracefully to plain semantic HTML offline (<a href="live-spec.html#dl-substrate">dl-substrate</a>).</p>
+<p><strong>Git is the memory of the memory.</strong> A living spec lives in version control: git is the sole record of the document's own past (<a href="live-spec.html#dl-snapshots">dl-snapshots</a>), so every content change, audit event (a clean sweep empty only when no files change), and verbatim claim is checkable rather than asserted.</p>
+<p><strong>Classless CSS is <a href="live-spec.html#c1">Cornerstone&nbsp;I</a> applied to styling.</strong> water.css externalizes presentation to one line, so every session spends its attention on content rather than a bespoke stylesheet it must read, preserve, and avoid breaking. This page ships only the water.css link &mdash; no custom block &mdash; the same principle taken to its limit, matching the <a href="live-spec.html#seed">seed</a>.</p>
+<p>Net: the principles say <em>what</em> state to hold; the substrate is part of <em>how</em> to hold it. Changing the carrier "for convenience" is a content decision in disguise.</p>
+
+<p class="meta"><a href="live-spec.html#top">&uarr; main spec</a></p>
+
+</main>
+</body>
+</html>
+
+<!-- Clayton Ford, 2026. MIT. https://github.com/claybford/live-spec -->

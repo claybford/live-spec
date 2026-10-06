@@ -23,11 +23,11 @@ Implementation details beyond the seed's operating rules:
   touches the dependent file. Edges present at that floor start there.
   Body lines and maintenance commit types do not establish seed boundaries.
 
-* Rename tracing preserves prior debt only for unambiguous moves: the old
-  address disappears in the same commit and its text is unique at the new
-  address. Address-only changes still require confirmation. Ambiguous moves,
-  unavailable trees, and unestablished shallow-history baselines yield
-  UNKNOWN rather than clearance.
+* A target renamed under identical text (the address changed, the edge
+  repaired in the same commit) is not traced: the edge's baseline becomes
+  UNKNOWN until a review: commit names the claim, as `mv` says. Unavailable
+  trees and unestablished shallow-history baselines yield UNKNOWN rather
+  than clearance.
 
 * data-specimen pre blocks are decoded once and checked independently as
   single-file specimens. Local links must use #fragment, even with
@@ -478,67 +478,37 @@ def review_baseline(a_path, src, href):
             return floor, "introduced"
         # Introduction is keyed to the edge itself — the dependent claim's id
         # plus its typed target — so an unrelated link sharing the href cannot
-        # move another claim's baseline. A rename repaired in one commit is not
-        # a birth: the edge's history continues through the old address, so an
-        # outstanding review survives the rename. But identical text alone does
-        # not establish a rename — the move is followed only when the old
-        # address disappears in the same commit and the text is unique at its
-        # new address; anything less is reported as unknown history.
-        live = {href}
+        # move another claim's baseline. A re-point to a target with different
+        # text is a birth. The same text under a new address (a rename repaired
+        # in the same commit, or a switch between twins) is not followed: it
+        # raises UNKNOWN, and a review: commit records the baseline. 108 bench
+        # sessions never exercised the tracing this replaced.
         args = ["log", "--format=%H", "--reverse"]
         if floor:
             args.append(f"{floor}..HEAD")
         args += ["--", repo_rel(a_path)]
-        commits = git(*args, cwd=root).split()
-        rewound = True
-        while rewound:                       # a discovered rename restarts the
-            rewound = False                  # walk with the old address live
-            for sha in commits:
-                spec = file_at(sha, a_path)
-                cur = next((l["href"] for l in (spec.links if spec else [])
-                            if l["rel"] == "depends-on" and l["src"] == src
-                            and l["href"] in live), None)
-                if cur is None:
-                    continue
-                # Root is parent metadata: zero parents. A declared but
-                # unreadable parent raises — unavailable evidence, never a root.
-                parents = git("rev-list", "--parents", "-n", "1", sha,
-                              cwd=root).split()[1:]
-                parent = file_at(parents[0], a_path) if parents else None
-                pedges = [l for l in (parent.links if parent else [])
-                          if l["rel"] == "depends-on" and l["src"] == src]
-                if any(l["href"] in live for l in pedges):
-                    continue                 # the edge already existed
-                ntp, nfr = resolve(a_path, cur)
-                new_text = _target_text(sha, cur)
-                rewired = []
-                for l in pedges:
-                    if l["href"] in live:
-                        continue
-                    old_text = _target_text(parents[0], l["href"])
-                    if old_text is None or old_text != new_text:
-                        continue             # a different target: a re-point birth
-                    otp, ofr = resolve(a_path, l["href"])
-                    o_now = file_at(sha, otp or a_path)
-                    old_gone = o_now is None or ofr not in o_now.elems
-                    n_now = file_at(sha, ntp or a_path)
-                    dupes = [i for i in (n_now.elems if n_now else [])
-                             if n_now.text(i) == new_text]
-                    if old_gone and len(dupes) == 1:
-                        rewired.append(l["href"])
-                    else:
-                        raise HistoryUnavailable(
-                            f"{l['href']} -> {cur}: identical target text without "
-                            "an unambiguous move (rename vs re-point)")
-                if rewired:
-                    live.update(rewired)     # rename repair: trace the old address
-                    # the old address may predate the walk: it reaches back to
-                    # the seed boundary, which the floor..HEAD walk excludes
-                    if floor_spec is not None and _has_edge(floor_spec, live):
-                        return floor, "introduced"
-                    rewound = True
-                    break
-                return sha, "introduced"
+        for sha in git(*args, cwd=root).split():
+            if not _has_edge(file_at(sha, a_path), {href}):
+                continue
+            # Root is parent metadata: zero parents. A declared but
+            # unreadable parent raises — unavailable evidence, never a root.
+            parents = git("rev-list", "--parents", "-n", "1", sha, cwd=root).split()[1:]
+            parent = file_at(parents[0], a_path) if parents else None
+            pedges = [l for l in (parent.links if parent else [])
+                      if l["rel"] == "depends-on" and l["src"] == src]
+            if any(l["href"] == href for l in pedges):
+                continue                     # the edge already existed
+            new_text = _target_text(sha, href)
+            still = {l["href"] for l in file_at(sha, a_path).links
+                     if l["rel"] == "depends-on" and l["src"] == src}
+            for l in pedges:
+                if l["href"] in still:
+                    continue                 # that edge survives: this one is a birth
+                if new_text is not None and _target_text(parents[0], l["href"]) == new_text:
+                    raise HistoryUnavailable(
+                        f"{l['href']} -> {href} at {sha[:7]}: the target's address changed "
+                        "under identical text (rename or re-point); record a review")
+            return sha, "introduced"
         raise HistoryUnavailable("committed link has no established introduction baseline")
     except HistoryUnavailable:
         raise
@@ -1032,7 +1002,8 @@ def owed_reviews(col, dirty_paths=None, basis="HEAD", pending_seeds=()):
                     cache[source_key] = file_at(base, fp)
                 bfp = cache[source_key]
                 if bfp and pair not in seen:
-                    prior = [x["src"] for x in bfp.links if x["href"] == l["href"]]
+                    prior = [x["src"] for x in bfp.links
+                             if x["href"] == l["href"] and x["rel"] == "depends-on" and x["src"]]
                     if prior and l["src"] not in prior:
                         rec = {"dependent": (fp, l["src"]), "target": (tp, fr), "baseline": base,
                                "how": how, "kind": "source-moved",
@@ -1266,6 +1237,40 @@ def head_collection(col):
     return head
 
 
+def within(spec, inner, outer):
+    """INNER's element lies inside OUTER's in SPEC (a nested claim)."""
+    if inner not in spec.elems or outer not in spec.elems:
+        return False
+    s, e = spec.elems[outer]
+    a, b = spec.elems[inner]
+    return s <= a and b <= e
+
+
+def review_offenders(named, changed, head_specs, staged_specs, retired):
+    """Claims a review: commit changes without naming them. A review changes
+    the claims it names (and claims nested in them); the one other change it
+    may carry is the deletion of a target whose edge from a named claim it
+    retires. Anything else rode in under the wrong type. -> [(name, kind)]"""
+    by_file = {}
+    for n in named:
+        f, _, i = n.partition("#")
+        by_file.setdefault(f, []).append(i)
+    retired_targets = {(tp, fr) for fp, l, tp, fr in retired
+                       if f"{repo_rel(fp)}#{l['src']}" in named}
+    out = []
+    for (p, eid), kind in sorted(changed.items()):
+        r = repo_rel(p)
+        if eid in by_file.get(r, []):
+            continue
+        spec = head_specs.get(p) if kind == "removed" else staged_specs.get(p)
+        if spec is not None and any(within(spec, eid, o) for o in by_file.get(r, [])):
+            continue
+        if kind == "removed" and (p, eid) in retired_targets:
+            continue
+        out.append((f"{r}#{eid}", kind))
+    return out
+
+
 def retired_dependencies(col):
     """HEAD edges removed or redirected while their source claim survives.
     Compare edges, not outstanding debt: removing a target and edge together
@@ -1291,8 +1296,10 @@ def retired_dependencies(col):
 
 SUBJECT_MAX = 72
 PLACEHOLDER_ID = re.compile(r"(?:tmp|temp|placeholder|todo|xxx)(?:[-_\d]|$)", re.I)
+# A lone dash is the ordinary idiom for "none" in a cell and is not a placeholder;
+# a run of dashes, dots or an ellipsis is.
 PLACEHOLDER_TEXT = re.compile(r"(?:(?:TMP|TEMP|TODO|TBD|FIXME|XXX|PLACEHOLDER)[A-Z0-9_-]*"
-                              r"|[.?…–—-]+)")
+                              r"|[.?…]+|[–—-]{2,})")
 PROVISIONAL_RE = re.compile(r"\bprovisional\s*\(", re.I)
 # In a table row a bare status word is a status token (the seed's own vocabulary),
 # so the row must link the open item that closes it; in prose only the token
@@ -1310,10 +1317,22 @@ ANSWERS = {
     "removed": {"replaced": (True, False), "retired": (False, True)},
     "cause": {"established": (True, True), "unverified": (True, False),
               "recurrence": (True, False)},
+    "watched": {"watched": (True, False), "none": (False, False)},
+    "decided": {"decided": (True, False), "none": (False, False)},
+    # Waivers: a check that infers a defect from a surface form can be wrong
+    # about the claim, so it takes an answer with a reason, recorded in the
+    # trailer. Where the form is the defect (an empty cell, an unlinked
+    # [WATCH], a provisional value with no link) there is nothing to waive.
+    "caveat": {"quoted": (False, True), "historical": (False, True)},
+    "placeholder": {"literal": (False, True)},
+    "empty": {"structural": (False, True)},
 }
 REF_NAMES = {"decision": "ROW", "replaced": "ROW", "established": "WATCH",
-             "unverified": "WATCH", "recurrence": "ROW"}
-QUESTION_ORDER = ("read", "sealed", "removed", "cause", "neighbor")
+             "unverified": "WATCH", "recurrence": "ROW", "watched": "WATCH",
+             "decided": "ROW"}
+WAIVABLE = ("caveat", "placeholder", "empty")
+QUESTION_ORDER = ("read", "caveat", "placeholder", "empty", "sealed", "removed", "cause",
+                  "watched", "decided", "neighbor")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
@@ -1439,6 +1458,7 @@ def gather(col, subject, request):
 def mechanical_items(ctx, today):
     items = []
     col, subject = ctx.staged, ctx.subject
+    head = head_sha() or "unborn"          # waivers are asked of each commit afresh
     main_rel = repo_rel(col.main)
     req = ctx.request
     if req is None or req.get("main") != main_rel:
@@ -1486,12 +1506,24 @@ def mechanical_items(ctx, today):
         tag = s.tags.get(eid)
         raw = s.element(eid)
         visible = re.sub(r"<code\b[^>]*>.*?</code>", " ", raw, flags=re.S)
+        # Waivable: the form suggests a defect; the agent may fix the file or
+        # answer with a reason. Evidence is the element's text, so an edit
+        # reopens the item (and usually removes it).
         if PLACEHOLDER_ID.match(eid) or (text and PLACEHOLDER_TEXT.fullmatch(text)):
-            items.append(item("placeholder", name, f"{name} is a placeholder", True,
-                              detail="commit real content or nothing"))
+            items.append(item("placeholder", name, f"{name} looks like a placeholder", False,
+                              evidence=digest(head, "placeholder", name, text or ""),
+                              excerpt=f"{name}: id {eid!r}, text {shorten(text or '', 200)!r}",
+                              question="Is this a placeholder (commit real content or nothing: fix "
+                                       "the file) or a real value that happens to match (answer "
+                                       "literal, with the reason)?"))
         elif tag in EMPTY_CHECKED and not text:
-            items.append(item("empty", name, f"{name} is empty", True,
-                              detail="an element carries a complete claim or is not committed"))
+            items.append(item("empty", name, f"{name} is empty", False,
+                              evidence=digest(head, "empty", name, tag or ""),
+                              excerpt=f"{name}: <{tag}> with no text",
+                              question="An element carries a complete claim or is not committed. "
+                                       "Is this empty by mistake (fix the file) or structural, "
+                                       "such as an anchor or a table the seed ships without rows "
+                                       "(answer structural, with the reason)?"))
         if tag == "tr" and text:
             cells = [claim_text(c) for c in re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", raw, re.S)]
             if any(not c or PLACEHOLDER_TEXT.fullmatch(c) for c in cells):
@@ -1503,13 +1535,30 @@ def mechanical_items(ctx, today):
             items.append(item("provisional", name, f"{name} states a provisional value "
                               "without linking the item that closes it", True,
                               detail="link the open item (P6)"))
-        if CAVEAT_RE.search(norm(visible)):
-            items.append(item("caveat", name, f"{name} carries an inline temporal caveat", True,
-                              detail="caveats live in watch entries; mark [WATCH] and link one"))
+        m = CAVEAT_RE.search(own_text)
+        if m:
+            phrase = own_text[max(0, m.start() - 60):m.end() + 40]
+            items.append(item("caveat", name, f"{name} carries an inline temporal caveat", False,
+                              evidence=digest(head, "caveat", name, own_text),
+                              excerpt=f"{name}: …{phrase}…",
+                              question="Caveats live in watch entries, not inline. Is this a "
+                                       "freshness caveat on the claim (mark [WATCH], link a watch "
+                                       "entry: fix the file), a source's own words inside provenance "
+                                       "or a quotation (answer quoted), or a date that is part of "
+                                       "what the claim states, such as a named tier or edition "
+                                       "(answer historical)? Each takes a reason."))
         if "[WATCH]" in norm(visible) and not links_watch(col, p, own_links):
             items.append(item("caveat", name + " watch", f"{name} has a [WATCH] marker "
                               f"without a link to its watch entry (a row whose id starts "
                               f"with {WATCH_PREFIX})", True))
+        # a watch entry named in prose that no row carries: a reference typed
+        # instead of a row filed ("( watch-leapday )" with no such id)
+        for m in re.finditer(rf"(?<![\w-]){WATCH_PREFIX}[A-Za-z0-9][\w-]*", norm(visible)):
+            wid = m.group(0).rstrip("-_")
+            if not any(wid in sp.ids for sp in col.specs.values()):
+                items.append(item("caveat", f"{name} {wid}", f"{name} mentions {wid}, which is no "
+                                  "watch entry in the collection", True,
+                                  detail="file the row with that id and link it, or reword"))
     items += watch_items(col, today)
     items += obligation_items(ctx)
     for p, s in col.specs.items():
@@ -1606,6 +1655,26 @@ def obligation_items(ctx):
                             f"{addr(tp, fr)} removed or redirected", True,
                             detail="assess the surviving claim; "
                                    + review_hint((fp, link["src"]))))
+    if named:
+        # A review names dependent claims: sources of a depends-on edge at HEAD
+        # or in the candidate, or claims whose edge this commit retires. A
+        # container named around one would exempt everything nested in it.
+        sources = {f"{repo_rel(fp)}#{l['src']}" for fp, l, _, _ in col.depends_on_edges()
+                   if l["src"]}
+        sources |= {f"{repo_rel(fp)}#{l['src']}" for fp, l, _, _ in retired}
+        if ctx.head is not None:
+            sources |= {f"{repo_rel(fp)}#{l['src']}" for fp, l, _, _ in ctx.head.depends_on_edges()
+                       if l["src"]}
+        for name in sorted(named - sources):
+            out.append(item("review", name + " named", f"review commit names {name}, which "
+                            "carries no depends-on link", True,
+                            detail="name the dependent claim itself (the id holding the link)"))
+        for name, kind in review_offenders(named, ctx.changed, ctx.head_specs,
+                                           col.specs, retired):
+            out.append(item("review", name + " scope", f"review commit changes {name} "
+                            f"({kind}), which it does not name", True,
+                            detail="a review changes only the claims it names; commit "
+                                   "this change separately, under its own type"))
     cand = owed_reviews(col, basis="staged", pending_seeds=pending)
     try:
         head_owed = owed_reviews(SimpleNamespace(
@@ -1728,16 +1797,17 @@ def judgment_items(ctx):
                                            "choice in its rejected cell), or retired (no fresh "
                                            "session would re-propose its alternative)?"))
     # a fix: is the cause established?
+    head = head_sha() or "unborn"
+    records = cause_records(ctx)
     if subject_type(ctx.subject, "fix") is not None:
         paths = sorted({n for n in git("diff", "--cached", "--name-only", "HEAD", cwd=ctx.root)
                         .splitlines()} if ctx.head_state == "ok" else [])
-        records = cause_records(ctx)
         excerpt = f"subject: {ctx.subject}\nfiles: {', '.join(paths) or 'none'}"
         excerpt += "".join(f"\n{label} {addr(p, eid)} ({kind}): {shorten(text, 240)}"
                            for label, p, eid, kind, text in records) or \
             "\nno watch entry or diagnostic-register row is added or changed in this commit"
         items.append(item("cause", "fix", "is the cause established?", False,
-                          evidence=digest(ctx.subject, *paths,
+                          evidence=digest(head, ctx.subject, *paths,
                                           *[f"{addr(p, e)}={t}" for _, p, e, _, t in records]),
                           excerpt=excerpt,
                           question="This commit is typed fix. A failure seen once gets a watch "
@@ -1747,6 +1817,33 @@ def judgment_items(ctx):
                                    "it) or unverified (name the entry)? If this failure recurred "
                                    "with the same diagnosis, name the diagnostic-register row "
                                    "added or updated in this commit."))
+    # what the work surfaced: a watch entry, a decision. Asked of every commit
+    # but a review (which changes only the claims it names); a fix answers the
+    # watch question in its cause item. Evidence is bound to HEAD, so each
+    # commit is asked afresh; a prose rule asked nowhere is the rule that gets
+    # dropped.
+    if subject_type(ctx.subject, "review") is None:
+        watches = [(p, e, k, t) for label, p, e, k, t in records if label == "watch entry"]
+        if subject_type(ctx.subject, "fix") is None:
+            excerpt = "".join(f"watch entry {addr(p, e)} ({k}): {shorten(t, 240)}\n"
+                              for p, e, k, t in watches) or \
+                "no watch entry is added or changed in this commit\n"
+            items.append(item("watched", "commit", "anything to watch?", False,
+                              evidence=digest(head, *[f"{addr(p, e)}={t}" for p, e, _, t in watches]),
+                              excerpt=excerpt.rstrip(),
+                              question="Did the work in this commit surface anything to watch: a "
+                                       "failure, a surprise, a one-off, something routed around or "
+                                       "resolved by assumption? Name the watch entry added or changed "
+                                       "in this commit, or answer none."))
+        rows = sorted((addr(p, rid), col.specs[p].text(rid) or "") for rid, p in ctx.rows.items())
+        excerpt = "".join(f"decision row {name}: {shorten(t, 240)}\n" for name, t in rows) or \
+            "no decision row is added or changed in this commit\n"
+        items.append(item("decided", "commit", "anything decided?", False,
+                          evidence=digest(head, *[f"{n}={t}" for n, t in rows]),
+                          excerpt=excerpt.rstrip(),
+                          question="Did the work in this commit decide anything: a choice made "
+                                   "against an alternative, in the files or in conversation? Name "
+                                   "the decision row added or changed in this commit, or answer none."))
     # one-hop neighbors of changed claims and of changed text outside any claim
     neighbors = {}
     for tp, fr, label, snippet in unanchored_links(ctx):
@@ -2025,6 +2122,22 @@ def validate(it, given, ctx, other_reasons):
 
     if kind in ("read", "neighbor"):
         return [answer], None
+    if kind in WAIVABLE:
+        return [answer, text], f"Reconciled: waived {kind} {name} ({answer}) — {text}"
+    if kind in ("watched", "decided"):
+        if answer == "none":
+            return ["none"], ("Reconciled: nothing watched" if kind == "watched"
+                              else "Reconciled: nothing decided")
+        if kind == "watched":
+            p, wid = changed_row("watch entry")
+            if not wid.startswith(WATCH_PREFIX):
+                raise ValueError(f"{ref} is not a watch entry: a watch entry is a row whose id "
+                                 f"starts with {WATCH_PREFIX}")
+            return [answer, addr(p, wid)], f"Reconciled: watched at {addr(p, wid)}"
+        p, rid = changed_row("decision row")
+        if not rid.startswith("dl-"):
+            raise ValueError(f"{ref} is not a decision row (dl- id)")
+        return [answer, addr(p, rid)], f"Reconciled: decided at {addr(p, rid)}"
     if kind in ("sealed", "removed"):
         if needs_reason:
             verb = "correction" if kind == "sealed" else "retired"
@@ -2418,7 +2531,8 @@ def cmd_impact(args):
         for l in s.links:
             if l["rel"] != "depends-on":
                 continue
-            prior = [x["src"] for x in b.links if x["href"] == l["href"]]
+            prior = [x["src"] for x in b.links
+                     if x["href"] == l["href"] and x["rel"] == "depends-on" and x["src"]]
             if prior and l["src"] not in prior:
                 any_change = True
                 moved.add((p, l["src"]))
@@ -2517,8 +2631,9 @@ def cmd_reconcile(args):
         if it["status"] == "answered":
             print(f"already answered: [{it['kind']}] {it['title']}")
         else:
+            current = {j["key"] for j in judged}
             others = {tick_reason(t) for k, t in state.get("ticks", {}).items()
-                      if k != it["key"] and tick_reason(t)}
+                      if k != it["key"] and k in current and tick_reason(t)}
             try:
                 answer, _ = validate(it, given, ctx, others)
             except ValueError as e:
@@ -2540,6 +2655,14 @@ def cmd_hook(args):
     Every check ran in reconcile, so a refusal means the candidate changed."""
     hint = "rerun `python3 lspec.py reconcile` (it keeps answers whose evidence is unchanged)"
     if args.which == "prepare-commit-msg":
+        # Git names the message source: "commit" means --amend, -c or -C. An
+        # amend rewrites a reconciled commit with a candidate reconciled
+        # against the commit being replaced, so its trailers would describe
+        # the wrong delta. The record is append-only; make a new commit.
+        if args.source and args.source[0] == "commit":
+            print("prepare-commit-msg: commit refused — amending or reusing a commit rewrites a "
+                  "reconciled record; make a new commit (git is the record)", file=sys.stderr)
+            return 1
         receipt = read_state("receipt.json")
         if receipt is None or receipt_problem():
             return 0                      # pre-commit / commit-msg refuse with the reason
@@ -2594,18 +2717,44 @@ def last_audit():
     return None
 
 
+def first_commit(path):
+    """-> (sha, label) of the oldest available commit touching PATH: 'first
+    commit', or 'oldest available' when history is shallow; (None, None)
+    without one."""
+    log = git("log", "--reverse", "--format=%H", "--", repo_rel(path), check=False,
+              cwd=repo_root()).split()
+    if not log:
+        return None, None
+    shallow = git("rev-parse", "--is-shallow-repository", check=False).strip() == "true"
+    return log[0], ("oldest available" if shallow else "first commit")
+
+
 def size_line(col):
+    """Main's word count against two baselines: the last audit, and the first
+    commit. An audit that adds words zeroes the first delta; the second is
+    the one the top risk (drift-by-accretion) is measured by."""
     now = spec_words(col.specs[col.main])
-    sha = last_audit() if repo_root() else None
+    if not repo_root():
+        return f"{now} words"
+    parts = []
+    sha = last_audit()
+    first, label = first_commit(col.main)
+    for ref, name in ((sha, "audit"), (first, label)):
+        if ref is None:
+            continue
+        if name == "audit" and first == sha and label:
+            continue                        # one commit, one delta
+        try:
+            then = spec_words(file_at(ref, col.main))
+        except HistoryUnavailable:
+            then = None
+        if then is None:
+            parts.append(f"main absent at {name} {ref[:7]}")
+        else:
+            parts.append(f"{now - then:+d} since {name} {ref[:7]}")
     if sha is None:
-        return f"{now} words (no audit: commit yet)"
-    try:
-        then = spec_words(file_at(sha, col.main))
-    except HistoryUnavailable:
-        then = None
-    if then is None:
-        return f"{now} words (main absent at audit {sha[:7]})"
-    return f"{now} words ({now - then:+d} since audit {sha[:7]})"
+        parts.insert(0, "no audit: commit yet")
+    return f"{now} words ({'; '.join(parts)})"
 
 
 def obligations_report(col, today=None):
@@ -2707,9 +2856,16 @@ def cmd_start(args):
                 resume_lines, refusal = resume_diff(col, args.resume)
             write_state("request.json", {"format": 1, "main": repo_rel(col.main),
                                          "start": head_sha(), "opened_at": now_iso()})
+            # A subject set before start survives it; recorded answers do not.
+            prior = read_state("reconcile.json") or {}
+            kept = {k: prior[k] for k in ("subject", "body") if prior.get(k)}
             remove_state("reconcile.json")
             remove_state("receipt.json")
+            if kept:
+                write_state("reconcile.json", kept)
             print(f"REQUEST — opened at {short(head_sha())}")
+            if kept.get("subject"):
+                print(f"  subject kept: {kept['subject']!r}")
             for kind, path, _ in working_changes(repo_root()):
                 print(f"  uncommitted {kind} before this request: {path} — reconcile and commit "
                       "it, or ask the user")
@@ -2928,7 +3084,9 @@ def cmd_review(args):
         if not frag:
             print(f"lspec review: {t} names a file; name the dependent claim", file=sys.stderr)
             return 2
-        deps = [l for l in col.specs[p].links_in(frag) if l["rel"] == "depends-on"]
+        # the claim itself, not a container around one: the edge's source id
+        deps = [l for l in col.specs[p].links_in(frag)
+                if l["rel"] == "depends-on" and l["src"] == frag]
         if not deps and (p, frag) not in retiring:
             print(f"lspec review: {addr(p, frag)} has no depends-on link; nothing to review",
                   file=sys.stderr); return 2
@@ -2963,6 +3121,30 @@ def cmd_review(args):
               + "); commit or unstage them first", file=sys.stderr)
         return 2
     root = repo_root()
+    # The verb stages whole files, so it looks at them claim by claim first: a
+    # change in a named file to a claim the review does not name would ride
+    # into history under review:, unasked. Refuse that before staging.
+    if head_status() == "ok":
+        head_specs, work_specs = {}, {}
+        for f in files:
+            p = canon(os.path.join(root, f))
+            try:
+                head_specs[p] = file_at("HEAD", p)
+            except HistoryUnavailable:
+                head_specs[p] = None
+            work_specs[p] = col.specs.get(p)
+            if work_specs[p] is None and os.path.exists(p) and p.endswith(".html"):
+                work_specs[p] = Spec(p)
+        changed = changed_claims({p: s for p, s in head_specs.items() if s},
+                                 {p: s for p, s in work_specs.items() if s})
+        offenders = review_offenders(set(names), changed, head_specs, work_specs, retired)
+        if offenders:
+            print("lspec review: these files hold changes to claims the review does not name:",
+                  file=sys.stderr)
+            for name, kind in offenders:
+                print(f"  {name} ({kind})", file=sys.stderr)
+            print("commit them separately under their own type, then review", file=sys.stderr)
+            return 2
     stageable = [f for f in sorted(files)
                  if os.path.exists(os.path.join(root, f))
                  or exists_at(os.path.join(root, f), "staged")]

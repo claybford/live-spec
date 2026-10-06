@@ -25,8 +25,9 @@ to plain semantic markup with no network.
 
 ## Using the pattern
 
-Hand `live-spec.html` to an AI chat or coding agent along with the work you want
-captured — a system design, a plan, a project to monitor and maintain — and say
+Hand this repository to an AI chat or coding agent — a clone, or at least
+`live-spec.html`, `background.html`, `lspec.py` and `hooks/` — along with the work you
+want captured — a system design, a plan, a project to monitor and maintain — and say
 "capture this into this format." The agent instantiates a living specification for it:
 a persistent, cross-session, human- and machine-readable definition that any future
 session (or you) can pick up cold. The spec's copy-the-seed instruction is for the
@@ -220,7 +221,10 @@ questions, closes the request and prints the handoff commit and the
 
 ### Validation and inspection
 
-- `check [MAIN]` validates structure in the working tree; `--staged` validates the
+- `check [MAIN]` validates structure in the working tree: anchors, ids, counts,
+  cell caps, and that every `dl-` and `watch-` row opens its first cell with its
+  own id as a `<code>` label (the row's visible name; not counted against the
+  cap). `--staged` validates the
   index; `--template` skips the unresolved `[ADAPT]`/`[PROJECT]` gate;
   `--diff BASE` and `--neighborhood TARGET` print neighborhoods; `--clean` lists
   staged, unstaged and untracked files repo-wide (silent and 0 when there are none).
@@ -231,7 +235,8 @@ questions, closes the request and prints the handoff commit and the
   claim it does not name: a review commit carries only the claims it names, so
   other work is committed first under its own type.
 - `show FILE_OR_CLAIM`, `show --graph`, `neighbors CLAIM`, `impact [BASE]` inspect
-  the collection; `mv OLD NEW` renames a file or anchor and repairs references.
+  the collection; `mv OLD NEW` renames a file or anchor and repairs references,
+  a renamed row's label included.
   A renamed anchor that is a dependency target owes a review: the edge's
   baseline is unknown until a `review:` commit names the dependent claim.
 

@@ -211,8 +211,18 @@ def claim_text(fragment):
     return norm(BLOCK_RE.sub(" ", fragment), sep="")
 
 
+LABEL_RE = re.compile(r"^\s*<code>((?:dl|watch)-[^<]+)</code>")
+
+
+def row_label(cell):
+    """The row-name label opening a first cell (<code>dl-x</code>), or None."""
+    m = LABEL_RE.match(cell)
+    return m.group(1) if m else None
+
+
 def words(cell):
-    return len(norm(cell).split())
+    """Word count of a cell; a row-name label is the row's name, not content."""
+    return len(norm(LABEL_RE.sub("", cell, count=1)).split())
 
 
 def is_external(path):
@@ -870,6 +880,16 @@ def check_structure(col, specimens=True, markers=True):
                 label = ("selection", "rejected/replaced", "reason")[index] if index < 3 else f"cell {index + 1}"
                 if words(cell) > CELL_WORD_CAP:
                     fails.append(f"[cell] {r}: {rid} {label} {words(cell)} words > {CELL_WORD_CAP}")
+        # A row shows its own id: the first cell of every dl- and watch- row
+        # opens with <code>ID</code>, the visible name references cite. The
+        # label is a restatement of the id, so it is checked (dl-rowname).
+        for rid, row in s.rows() + s.rows(WATCH_PREFIX):
+            tds = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S)
+            got = row_label(tds[0]) if tds else None
+            if got != rid:
+                fails.append(f"[label] {r}: {rid} first cell opens with "
+                             f"{'<code>' + got + '</code>' if got else 'no label'}; "
+                             f"a row shows its own id: <code>{rid}</code>")
         n = volatile_ordinals(s, col.specs)
         if n:
             fails.append(f"[ordinal] {r}: {n} volatile section reference(s) "
@@ -2994,7 +3014,8 @@ def mv_anchor(col, old, new):
               file=sys.stderr); return 2
     touched = {}
     touched[p] = rewrite(p, [(rf'(?<![-\w])id="{re.escape(frag)}"', f'id="{nfrag}"'),
-                             (rf'href="#{re.escape(frag)}"', f'href="#{nfrag}"')])
+                             (rf'href="#{re.escape(frag)}"', f'href="#{nfrag}"'),
+                             (rf'<code>{re.escape(frag)}</code>', f'<code>{nfrag}</code>')])
     for q in col.specs:
         if q == p:
             continue

@@ -25,7 +25,7 @@ MAIN = """<html><body><main>
 <ul id="regime-diffs" data-count="differences"><li>a</li><li>b</li><li>c</li><li>d</li><li>e</li></ul>
 <p id="claim">This design needs <a rel="depends-on" href="motor.html#power">motor power</a>.</p>
 <table>
-<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>
+<tr id="dl-split-motor"><td><code>dl-split-motor</code> <a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>
 {extra}
 </table>
 </main></body></html>"""
@@ -56,14 +56,14 @@ class T(unittest.TestCase):
         rc, out = run(); self.assertEqual(rc, 0, out); self.assertIn("2 file(s)", out)
 
     def test_broken_cross_file_anchor(self):
-        rc, out = run(main_extra='<tr id="dl-x"><td><a href="motor.html#torque">t</a></td><td>r</td><td>w</td></tr>')
+        rc, out = run(main_extra='<tr id="dl-x"><td><code>dl-x</code> <a href="motor.html#torque">t</a></td><td>r</td><td>w</td></tr>')
         self.assertEqual(rc, 1); self.assertIn("no id 'torque'", out)
 
     def test_broken_in_file_anchor(self):
         rc, out = run(motor_extra='<a href="#nope">x</a>'); self.assertIn("href=#nope", out)
 
     def test_ghost_split_row(self):
-        rc, out = run(main_extra='<tr id="dl-split-ghost"><td><a href="ghost.html">g</a></td><td>r</td><td>w</td></tr>')
+        rc, out = run(main_extra='<tr id="dl-split-ghost"><td><code>dl-split-ghost</code> <a href="ghost.html">g</a></td><td>r</td><td>w</td></tr>')
         self.assertEqual(rc, 1); self.assertIn("ghost row", out)
 
     def test_orphan(self):
@@ -75,7 +75,7 @@ class T(unittest.TestCase):
         self.assertEqual(rc, 0); self.assertIn("disconnected", out)
 
     def test_two_parents(self):
-        rc, out = run(motor_extra='<table><tr id="dl-split-again"><td><a href="main.html">m</a></td><td>r</td><td>w</td></tr></table>')
+        rc, out = run(motor_extra='<table><tr id="dl-split-again"><td><code>dl-split-again</code> <a href="main.html">m</a></td><td>r</td><td>w</td></tr></table>')
         self.assertEqual(rc, 1); self.assertIn("one parent per file", out)
 
     def test_dependson_without_source_id(self):
@@ -89,8 +89,24 @@ class T(unittest.TestCase):
         rc, out = run(main_extra='</table><p>three principles</p><table>'); self.assertIn("contradicts", out)
 
     def test_cell_cap(self):
-        rc, out = run(main_extra='<tr id="dl-long"><td>s</td><td>r</td><td>' + "w " * 41 + '</td></tr>')
+        rc, out = run(main_extra='<tr id="dl-long"><td><code>dl-long</code> s</td><td>r</td><td>' + "w " * 41 + '</td></tr>')
         self.assertIn("[cell]", out)
+
+    def test_row_shows_its_own_id(self):
+        rc, out = run(main_extra='<tr id="dl-x"><td>no label</td><td>r</td><td>w</td></tr>')
+        self.assertEqual(rc, 1); self.assertIn('[label] main.html: dl-x first cell opens with no label', out)
+        rc, out = run(main_extra='<tr id="dl-x"><td><code>dl-y</code> wrong</td><td>r</td><td>w</td></tr>')
+        self.assertEqual(rc, 1); self.assertIn('opens with <code>dl-y</code>', out)
+        rc, out = run(motor_extra='<table><tr id="watch-fan" data-watch-until="2026-11-04"><td>fan</td><td>b</td><td>c</td></tr></table>')
+        self.assertEqual(rc, 1); self.assertIn('[label] motor.html: watch-fan', out)
+        rc, out = run(main_extra='<tr id="dl-x"><td><code>dl-x</code> labeled</td><td>r</td><td>w</td></tr>')
+        self.assertEqual(rc, 0, out)
+
+    def test_label_is_not_counted_against_the_cap(self):
+        rc, out = run(main_extra='<tr id="dl-x"><td><code>dl-x</code> ' + 'w ' * 40 + '</td><td>r</td><td>w</td></tr>')
+        self.assertEqual(rc, 0, out)
+        rc, out = run(main_extra='<tr id="dl-x"><td><code>dl-x</code> ' + 'w ' * 41 + '</td><td>r</td><td>w</td></tr>')
+        self.assertIn('[cell] main.html: dl-x selection 41 words', out)
 
     def test_seed_pre_ignored(self):
         rc, out = run(main_extra='</table><pre>&lt;a href="#fake"&gt;</pre><table>'); self.assertEqual(rc, 0, out)
@@ -258,6 +274,13 @@ class G(unittest.TestCase):
         rc, out = cli(d, "impact", "HEAD")
         self.assertIn("MOVED   motor.html#rated  (was #power)", out)
         self.assertIn("[address-only]", out)
+
+    def test_mv_anchor_renames_the_row_label(self):
+        d = repo(); rc, out = cli(d, "mv", "main.html#dl-split-motor", "main.html#dl-split-drive")
+        self.assertEqual(rc, 0, out)
+        m = open(os.path.join(d, "main.html")).read()
+        self.assertIn('<tr id="dl-split-drive"><td><code>dl-split-drive</code>', m)
+        self.assertNotIn('dl-split-motor', m)
 
     def test_mv_anchor_collision(self):
         d = repo(); rc, out = cli(d, "mv", "motor.html#power", "motor.html#top")
@@ -774,7 +797,7 @@ class N(unittest.TestCase):
         open(os.path.join(d, "sub.html"), "w").write(
             '<html><body><main><p id="sclaim">x <a rel="depends-on" href="motor.html#power">p</a></p></main></body></html>')
         edit(d, "motor.html", "\n</main>",
-             '\n<table><tr id="dl-split-sub"><td><a href="sub.html">s</a> holds sub</td>'
+             '\n<table><tr id="dl-split-sub"><td><code>dl-split-sub</code> <a href="sub.html">s</a> holds sub</td>'
              '<td>keep in motor</td><td>own clock.</td></tr></table>\n</main>')
         commit(d, "docs: split sub")
         rc, out = cli(d, "neighbors", "motor.html#power")
@@ -839,7 +862,7 @@ class N(unittest.TestCase):
         self.assertEqual(rc, 1); self.assertIn("[cell] main.html: dl-long", out)
 
     def test_split_row_with_reordered_attrs(self):
-        row = ('<tr class="s" id="dl-split-extra"><td><a href="extra.html">x</a> holds it</td>'
+        row = ('<tr class="s" id="dl-split-extra"><td><code>dl-split-extra</code> <a href="extra.html">x</a> holds it</td>'
                '<td>keep in main</td><td>own clock.</td></tr>')
         rc, out = run(main_extra=row, motor_extra='<a href="extra.html">e</a>',
                       files={"extra.html": '<p id="a">x</p>'})
@@ -877,7 +900,7 @@ class L(unittest.TestCase):
         d = repo(); rc, out = cli(d, "start")
         self.assertEqual(rc, 0, out)
         self.assertNotIn('id="power"', out)                    # the agent reads the specs
-        self.assertIn("main.html (main) — 13 lines, 39 words", out)
+        self.assertIn("main.html (main) — 13 lines, 40 words", out)
         self.assertIn("motor.html — 5 lines; split from main.html (dl-split-motor)", out)
         self.assertLess(len(out.splitlines()), 25, out)        # short enough never to truncate
 
@@ -957,6 +980,7 @@ class RevisionRegressions(unittest.TestCase):
                 with self.subTest(index=index, size=size):
                     cells = ['short'] * 3
                     cells[index] = 'word ' * size
+                    cells[0] = '<code>dl-test</code> ' + cells[0]
                     extra = '<tr id="dl-test">' + ''.join(f'<td>{v}</td>' for v in cells) + '</tr>'
                     Path(d, 'main.html').write_text(MAIN.format(extra=extra), encoding='utf-8')
                     rc, out = cli(d, 'check')
@@ -1086,7 +1110,7 @@ class RevisionRegressions(unittest.TestCase):
         seed = self.resolve_markers(self.seed())
         return seed.replace('</main>', '''<section id="rating"><h3>Rating</h3><p>120 kW</p></section>
 <p id="claim">Cooling assumes <a rel="depends-on" href="#rating">the rating</a>.</p>
-<table><tr id="dl-cooling"><td>Liquid cooling</td><td>Air cooling</td><td>Meets the thermal requirement.</td></tr></table></main>''')
+<table><tr id="dl-cooling"><td><code>dl-cooling</code> Liquid cooling</td><td>Air cooling</td><td>Meets the thermal requirement.</td></tr></table></main>''')
 
     def gate(self, d, subject):
         """The review gate inside reconcile: 1 when it holds the commit."""
@@ -1496,7 +1520,7 @@ class HookIntegration(unittest.TestCase):
         """S4: an artifact fix with a decision row but no watch entry."""
         d = self.hrepo()
         edit(d, 'motor.html', '120 kW', '105 kW')
-        edit(d, 'main.html', '</table>', '<tr id="dl-derate"><td>Derate to 105 kW</td>'
+        edit(d, 'main.html', '</table>', '<tr id="dl-derate"><td><code>dl-derate</code> Derate to 105 kW</td>'
              '<td>Keep 120 kW</td><td>The bench run overheated.</td></tr></table>')
         sh('git', 'add', '-A', cwd=d)
         ensure_request(d)
@@ -1506,7 +1530,7 @@ class HookIntegration(unittest.TestCase):
         self.assertNotIn('RECEIPT', cli(d, 'reconcile')[1])
         r = self.gcommit(d, 'fix: derate the motor', settle_=False)
         self.assertNotEqual(r.returncode, 0)
-        edit(d, 'motor.html', '</main>', '<table><tr id="watch-heat"><td>Motor overheated on the bench '
+        edit(d, 'motor.html', '</main>', '<table><tr id="watch-heat"><td><code>watch-heat</code> Motor overheated on the bench '
              'at 120 kW</td><td>2026-10-04</td><td>Derated to 105 kW; closes after ten bench runs '
              'under 80 C</td></tr></table></main>')
         sh('git', 'add', '-A', cwd=d)
@@ -1603,7 +1627,7 @@ class HookIntegration(unittest.TestCase):
         d = self.hrepo()
         edit(d, 'main.html', '<a rel="depends-on" href="motor.html#power">motor power</a>',
              'an independently established rating')
-        edit(d, 'main.html', '<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
+        edit(d, 'main.html', '<tr id="dl-split-motor"><td><code>dl-split-motor</code> <a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
         sh('git', 'rm', '-q', 'motor.html', cwd=d)
         rc, out = do_review(d, 'main.html#claim', message='Independent rating verified')
         self.assertEqual(rc, 2, out)
@@ -1613,7 +1637,7 @@ class HookIntegration(unittest.TestCase):
              'an independently established rating')
         rc, out = do_review(d, 'main.html#claim', message='Independent rating verified')
         self.assertEqual(rc, 0, out)
-        edit(d, 'main.html', '<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
+        edit(d, 'main.html', '<tr id="dl-split-motor"><td><code>dl-split-motor</code> <a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
         sh('git', 'rm', '-q', 'motor.html', cwd=d)
         r = self.gcommit(d, 'docs: retire motor', add=['main.html'])
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1799,7 +1823,7 @@ class HookIntegration(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
         edit(d, 'main.html', '</table>\n</main></body></html>',
-             '<tr id="dl-req"><td>Bend it</td><td>Keep rigid</td><td>New evidence.</td></tr>'
+             '<tr id="dl-req"><td><code>dl-req</code> Bend it</td><td>Keep rigid</td><td>New evidence.</td></tr>'
              '</table>\n</main></body></html>')
         sh('git', 'add', 'main.html', cwd=d)
         ensure_request(d)
@@ -1956,6 +1980,7 @@ def lrepo():
 
 def decision_row(d, row_id, where='main.html', cells=('s', 'r', 'w')):
     """Add a dl- row to WHERE's table."""
+    cells = (f'<code>{row_id}</code> {cells[0]}',) + tuple(cells[1:])
     edit(d, where, '</table>\n</main></body></html>',
          f'<tr id="{row_id}">' + ''.join(f'<td>{c}</td>' for c in cells) + '</tr>'
          '</table>\n</main></body></html>')
@@ -2028,7 +2053,7 @@ class SealGate(unittest.TestCase):
         commit(d, 'docs: authorize once')
         edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
         edit(d, 'main.html', '<tr id="dl-req">', '<tr id="dl-req" class="pretty">')
-        edit(d, 'main.html', '<td>s</td><td>r</td>', '<td>s</td> <td>r</td>')
+        edit(d, 'main.html', ' s</td><td>r</td>', ' s</td> <td>r</td>')
         with self.assertRaisesRegex(ValueError, 'not added or changed'):
             self.answer(d, ['decision', 'dl-req'])
 
@@ -2055,7 +2080,7 @@ class SealGate(unittest.TestCase):
         edit(d, 'motor.html', '<h1 id="top">Motor</h1>',
              '<h1 id="top">Motor</h1><p id="mreq" data-sealed>Motor mount is locked.</p>')
         commit(d, 'docs: lock the mount')
-        edit(d, 'main.html', '<tr id="dl-split-motor"><td><a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
+        edit(d, 'main.html', '<tr id="dl-split-motor"><td><code>dl-split-motor</code> <a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>', '')
         _, sealed, _ = self.sealed(d)
         self.assertIn('leaves the collection', sealed['sealed:motor.html#mreq']['title'])
         sh('git', 'rm', '-q', 'motor.html', cwd=d)
@@ -2282,7 +2307,7 @@ class ChangeFeedback(unittest.TestCase):
         self.assertIn('[uncommitted]', out)
 
     def add_decision(self, d):
-        row = '<tr id="dl-old"><td>Chosen</td><td>Rejected</td><td>Because</td></tr>'
+        row = '<tr id="dl-old"><td><code>dl-old</code> Chosen</td><td>Rejected</td><td>Because</td></tr>'
         edit(d, 'main.html', '</table>', row + '</table>')
         commit(d, 'docs: decision')
         return row
@@ -2317,7 +2342,7 @@ class ChangeFeedback(unittest.TestCase):
     def test_replaced_answer_names_a_changed_row(self):
         d = self.fixture()
         row = self.add_decision(d)
-        edit(d, 'main.html', row, '<tr id="dl-new"><td>New</td><td>Chosen</td><td>Better</td></tr>')
+        edit(d, 'main.html', row, '<tr id="dl-new"><td><code>dl-new</code> New</td><td>Chosen</td><td>Better</td></tr>')
         sh('git', 'add', 'main.html', cwd=d)
         ctx, items, _ = evaluate_in(d)
         it = next(i for i in items if i['kind'] == 'removed')
@@ -2513,7 +2538,7 @@ class Requests(unittest.TestCase):
     def test_expired_watch_entries_come_back(self):
         d = self.fixture()
         edit(d, 'motor.html', '</main>',
-             '<table><tr id="watch-fan" data-watch-until="2020-01-01"><td>fan</td><td>2019-12-01</td>'
+             '<table><tr id="watch-fan" data-watch-until="2020-01-01"><td><code>watch-fan</code> fan</td><td>2019-12-01</td>'
              '<td>closes 2020-01-01</td></tr></table></main>')
         commit(d, 'docs: watch the fan')
         for argv in (['start'], ['finish']):
@@ -2699,7 +2724,7 @@ class Checklist(unittest.TestCase):
              '<p id="temp">40 C, confirmed as of 2026-09-01</p>'
              '<p id="fan">Fan [WATCH]</p><p id="fan2">Fan <a href="#watch-fan">[WATCH]</a></p>'
              '<p id="fan3">Fan <a href="#top">[WATCH]</a></p>'
-             '<table><tr id="watch-fan"><td>fan noise</td><td>2026-10-04</td><td>closes when quiet a week</td></tr></table></main>')
+             '<table><tr id="watch-fan"><td><code>watch-fan</code> fan noise</td><td>2026-10-04</td><td>closes when quiet a week</td></tr></table></main>')
         keys = [it['key'] for it in self.items(d)]
         self.assertIn('provisional:motor.html#rpm', keys)
         self.assertNotIn('provisional:motor.html#torque', keys)
@@ -2737,7 +2762,7 @@ class Checklist(unittest.TestCase):
     def test_watch_entry_dates(self):
         d = self.fixture()
         edit(d, 'motor.html', '</main>', '<table><tr id="watch-w" data-watch-until="2026-10-01">'
-             '<td>fan noise</td><td>2026-09-01</td><td>closes 2026-10-01</td></tr></table></main>')
+             '<td><code>watch-w</code> fan noise</td><td>2026-09-01</td><td>closes 2026-10-01</td></tr></table></main>')
         today = lspec.datetime(2026, 10, 4).date()
         self.assertIn('watch:motor.html#watch-w', [it['key'] for it in self.items(d, today=today)])
         edit(d, 'motor.html', '2026-10-01">', '2026-11-01">')
@@ -2789,9 +2814,9 @@ class Checklist(unittest.TestCase):
 
     def test_fix_asks_whether_the_cause_is_established(self):
         d = self.fixture()
-        edit(d, 'motor.html', '</main>', '<table><tr id="watch-noise"><td>noise</td><td>2026-10-04</td>'
+        edit(d, 'motor.html', '</main>', '<table><tr id="watch-noise"><td><code>watch-noise</code> noise</td><td>2026-10-04</td>'
              '<td>closes after a week quiet</td></tr></table></main>')
-        edit(d, 'main.html', '</table>', '<tr id="dl-quiet"><td>Quiet fan</td><td>Loud fan</td>'
+        edit(d, 'main.html', '</table>', '<tr id="dl-quiet"><td><code>dl-quiet</code> Quiet fan</td><td>Loud fan</td>'
              '<td>Noise complaints.</td></tr></table>')
         items = self.items(d, 'fix: quiet the fan')
         it = next(i for i in items if i['kind'] == 'cause')
@@ -2831,7 +2856,7 @@ class Checklist(unittest.TestCase):
     def test_rewriting_the_watch_entry_reopens_the_cause_answer(self):
         """A cause answer cannot outlive a rewrite of the record it names."""
         d = self.fixture()
-        edit(d, 'motor.html', '</main>', '<table><tr id="watch-noise"><td>noise</td>'
+        edit(d, 'motor.html', '</main>', '<table><tr id="watch-noise"><td><code>watch-noise</code> noise</td>'
              '<td>2026-10-04</td><td>closes after a week quiet</td></tr></table></main>')
         sh('git', 'add', '-A', cwd=d)
         cli(d, 'reconcile', '--subject', 'fix: quiet the fan')
@@ -2842,7 +2867,7 @@ class Checklist(unittest.TestCase):
         out = cli(d, 'reconcile')[1]
         self.assertIn('judgment open: 1', out)
         self.assertIn('cause 1', out)
-        self.assertIn('watch entry motor.html#watch-noise (added): noise 2026-10-04 unverified',
+        self.assertIn('watch entry motor.html#watch-noise (added): watch-noise noise 2026-10-04 unverified',
                       cli(d, 'reconcile', '--next')[1])
 
     def test_watch_entries_are_rows_with_the_watch_prefix(self):
@@ -2852,11 +2877,11 @@ class Checklist(unittest.TestCase):
         rc, out = run(motor_extra='<p id="watch-x" data-watch-until="2026-11-04">x</p>')
         self.assertEqual(rc, 1); self.assertIn('it belongs on a watch entry', out)
         rc, out = run(motor_extra='<table><tr id="watch-fan" data-watch-until="2026-11-04">'
-                                  '<td>a</td><td>b</td><td>c</td></tr></table>')
+                                  '<td><code>watch-fan</code> a</td><td>b</td><td>c</td></tr></table>')
         self.assertEqual(rc, 0, out)
         d = self.fixture()
         edit(d, 'motor.html', '</main>', '<table><tr id="watch-a" data-watch-until="2026-11-04">'
-             '<td>a</td><td>b</td><td>c</td></tr><tr id="watch-b"><td>a</td><td>b</td><td>c</td>'
+             '<td><code>watch-a</code> a</td><td>b</td><td>c</td></tr><tr id="watch-b"><td><code>watch-b</code> a</td><td>b</td><td>c</td>'
              '</tr></table></main>')
         commit(d, 'docs: two watches')
         line = 'WATCH ENTRIES (2): motor.html#watch-a (until 2026-11-04), motor.html#watch-b'
@@ -2895,9 +2920,9 @@ class Checklist(unittest.TestCase):
 
     def test_watched_and_decided_answers(self):
         d = self.fixture()
-        edit(d, 'motor.html', '</main>', '<table><tr id="watch-noise"><td>noise</td><td>2026-10-04</td>'
+        edit(d, 'motor.html', '</main>', '<table><tr id="watch-noise"><td><code>watch-noise</code> noise</td><td>2026-10-04</td>'
              '<td>closes after a week quiet</td></tr></table></main>')
-        edit(d, 'main.html', '</table>', '<tr id="dl-quiet"><td>Quiet fan</td><td>Loud fan</td>'
+        edit(d, 'main.html', '</table>', '<tr id="dl-quiet"><td><code>dl-quiet</code> Quiet fan</td><td>Loud fan</td>'
              '<td>Noise complaints.</td></tr></table>')
         items = self.items(d, 'docs: quiet the fan')
         ctx = evaluate_in(d, 'docs: quiet the fan')[0]
@@ -2942,7 +2967,7 @@ class Checklist(unittest.TestCase):
         d = self.fixture()
         edit(d, 'motor.html', '</main>', '<p id="leap">Report failed on the leap day ( watch-leapday )</p>'
              '<p id="ok">Fan noise, see <a href="#watch-fan">watch-fan</a>; the <code>watch-</code> prefix.</p>'
-             '<table><tr id="watch-fan"><td>fan</td><td>2026-10-04</td><td>closes when quiet</td></tr></table></main>')
+             '<table><tr id="watch-fan"><td><code>watch-fan</code> fan</td><td>2026-10-04</td><td>closes when quiet</td></tr></table></main>')
         keys = [it['key'] for it in self.items(d) if it['mech']]
         self.assertIn('caveat:motor.html#leap watch-leapday', keys)
         self.assertNotIn('caveat:motor.html#ok watch-fan', keys)
@@ -3096,11 +3121,11 @@ class OldInstances(unittest.TestCase):
     """The new tool reads instances seeded from older versions."""
 
     def test_data_changes_is_reported_retired_not_failed(self):
-        rc, out = run(main_extra='<tr id="dl-x" data-changes="main.html#claim"><td>s</td><td>r</td><td>w</td></tr>')
+        rc, out = run(main_extra='<tr id="dl-x" data-changes="main.html#claim"><td><code>dl-x</code> s</td><td>r</td><td>w</td></tr>')
         self.assertEqual(rc, 0, out)
         self.assertIn('data-changes is retired', out)
         d = lrepo()
-        authorize = '<tr id="dl-req" data-changes="main.html#req"><td>s</td><td>r</td><td>w</td></tr>'
+        authorize = '<tr id="dl-req" data-changes="main.html#req"><td><code>dl-req</code> s</td><td>r</td><td>w</td></tr>'
         edit(d, 'main.html', '</table>\n</main></body></html>', authorize + '</table>\n</main></body></html>')
         edit(d, 'main.html', 'The pair rule holds.', 'The pair rule bends.')
         ensure_request(d)

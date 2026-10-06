@@ -27,7 +27,8 @@ ARGS=(
 )
 if [ "$METHOD" = 1 ]; then
   ARGS+=( --dir /home/user/methodology
-    --ro-bind "$HERE/../live-spec.html" /home/user/methodology/live-spec.html )
+    --ro-bind "$HERE/../live-spec.html" /home/user/methodology/live-spec.html
+    --ro-bind "$HERE/../background.html" /home/user/methodology/background.html )
 fi
 ARGS+=( --setenv HOME /home/user --setenv OPENCODE_CONFIG_CONTENT "$OC"
   --chdir "$WORK" --die-with-parent --unshare-all --share-net )

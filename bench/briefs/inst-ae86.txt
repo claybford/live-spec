@@ -1,0 +1,10 @@
+This repo is my AE86 garage project: I am swapping a Honda K24A2 (from a 2004 Acura TSX
+donor) into my 1985 Toyota Corolla. The repo holds my bay measurements, the donor engine
+reference specs, my parts list with order status, known issues observed on the bench, and
+a small fitment calculator.
+
+I want to start maintaining a Living Specification of this project. The methodology is at
+/home/user/methodology/live-spec.html. Read it whole and follow its instructions for
+starting a new spec. Capture this project's current state into that format. The repo's own
+files are the authority for what the project actually is. lspec.py and hooks/ are provided
+in the repo; the methodology explains them. Commit your work as the methodology directs.

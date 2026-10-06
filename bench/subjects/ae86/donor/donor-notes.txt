@@ -1,0 +1,5 @@
+Donor K24A2, stock #EJ-2214, picked up 2026-08-02.
+Compression (warm, WOT): 178/181/180/177 psi.
+Oil pressure hot idle: 28 psi. 3k: 71 psi.
+Leak-down: all cylinders <4%.
+No observable bore scope scoring; light carbon on pistons 2 and 3.

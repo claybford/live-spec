@@ -1,0 +1,6 @@
+I was reading our spec and noticed its dependencies paragraph says to use
+rel="depends-on" for dependencies requiring review — but I don't think there's a single
+one wired anywhere in the document. Some claims here do genuinely depend on others. Wire
+the real ones — only where a change to the target should genuinely force a re-read of the
+dependent claim — following the spec's own conventions for how these links work. Commit
+as the spec directs.

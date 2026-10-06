@@ -1,0 +1,10 @@
+This repo is factorytax, the payroll tax engine for Riverbend Stamping Works, a
+240-employee metal stamping factory. It computes shift pay (including overtime and
+night-shift rules), statutory withholding from the 2026 bracket tables, plant-specific
+allowances, monthly filing bands, and the bookkeeper-facing reports.
+
+I want to start maintaining a Living Specification of this system. The methodology is at
+/home/user/methodology/live-spec.html. Read it whole and follow its instructions for
+starting a new spec. Capture this system's current state into that format. The repo's own
+files are the authority for what the system actually is. lspec.py and hooks/ are provided
+in the repo; the methodology explains them. Commit your work as the methodology directs.

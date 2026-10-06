@@ -13,5 +13,6 @@ node_modules/
 *~
 .DS_Store
 
-# Evaluation harness materials (lab materials, not methodology state)
-/bench/
+# bench/: everything tracked except the key-bearing configs substituted from templates
+/bench/oc-inst.json
+/bench/oc-oper.json

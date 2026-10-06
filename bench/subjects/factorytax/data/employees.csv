@@ -1,0 +1,9 @@
+emp_id,name,tax_code,hourly_rate,department,effective_from
+R-0001,Marta Kowalski,B,24.50,press,2025-04-01
+R-0002,Devon Ellis,B,26.10,welding,2025-04-01
+R-0003,Su-Min Park,C,22.75,finishing,2025-07-15
+R-0004,Alina Petrov,C,29.40,maintenance,2024-11-03
+R-0005,Jesse Harlan,A,21.90,press,2026-01-12
+R-0006,Owen Gallagher,B,27.30,welding,2025-04-01
+R-0007,Priya Raman,C,23.10,press,2026-02-02
+R-0008,Tomasz Zieliński,A,22.40,finishing,2026-01-12

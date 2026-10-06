@@ -1,0 +1,8 @@
+measurement,value_mm,how,status
+bay_width_rail_to_rail,1120,tape between inner rails at strut towers,MEASURED 2026-08-16
+bay_width_rail_to_rail_v2,1105,caliper check against rail caps,MEASURED 2026-09-06
+bay_height_hood_underside,612,tape from crossmember to hood skin (minus skin br 8mm),MEASURED 2026-08-16
+crossmember_to_oilpan_area,148,tape at sump location,UNMEASURED - tape blocked by brake lines, estimate only
+shifter_tunnel_opening,95,tape at tunnel,UNMEASURED - rough guess, need slot gauge
+firewall_to_radiator_support,438,tape along centerline,MEASURED 2026-08-16
+driveshaft_flange_to_diff,904,tape along left side,MEASURED 2026-09-06

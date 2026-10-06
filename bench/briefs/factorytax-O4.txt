@@ -1,0 +1,2 @@
+I was poking at the shift pay code the other day and tweaked something — can you make
+sure everything's still consistent?

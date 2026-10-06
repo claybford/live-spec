@@ -1,0 +1,4 @@
+Follow-up on the rebuild binder: I went ahead and transcribed it into the repo after
+all — it's in rebuild-notes/ now (torque sequence and specs for every major fastener,
+the wiring conversion plan pin by pin, and the coolant routing plan). Capture all of
+that detail in the spec so it's never just in a binder.

@@ -1,0 +1,11 @@
+part,description,source,status,qty,notes
+K24A2,Complete donor engine w/ 6MT,E-J Recycling,received,1,118k km compression test in donor/donor-notes.txt
+K20A2-ECU,ECU + harness w/ K-Pro v4,plugnpplayhonda.com,received,1,
+RBC-IM,RBC intake manifold,HondaPartsNow,received,1,
+HAS-MNT,Hasport AE86/K mount kit,Hasport,received,1,
+AE86-5LUG,5-lug conversion axle set (custom length),DriveShaft Shop,ordered,2,custom length pending final measurement
+TDNS-R,power steering delete rack (manual AE86 rack refurbed),local machine shop,received,1,
+RADI-42,42mm aluminium radiator,cspeed3.com,received,1,overflow event see known-issues.md
+CLUTCH-EX,Exedy organic clutch kit 240mm,Exedy,ordered,1,SUPERSEDED: order changed to CLUTCH-HD stage 2 2026-09-28
+CLUTCH-HD,Exedy stage 2 clutch kit 240mm,Exedy,ordered,1,replaces CLUTCH-EX
+SHFT-LNK,Shifter linkage custom,Energy Suspension,ordered,1,needs bay width final number before ordering

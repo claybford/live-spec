@@ -1,0 +1,4 @@
+I finally transcribed my whole engine-rebuild binder into the repo: it's in
+rebuild-notes/ — torque sequence and specs for every major fastener, the wiring
+conversion plan pin by pin, and the coolant routing plan. I want all of that detail
+captured in the spec so it's never just in the binder. Add it.

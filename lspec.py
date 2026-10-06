@@ -2861,8 +2861,13 @@ def cmd_start(args):
             print(f"REQUEST — already open since "
                   f"{short(request.get('start'))} "
                   f"(opened {request.get('opened_at')}); not reset")
-            print("  If this request was not opened in this conversation, ask the user whether "
-                  "to continue it before acting on it.")
+            print("  An open request is work that was started and never handed off with "
+                  "`finish`: its uncommitted edits read as spec to you, its recorded "
+                  "answers are not yours, and its owner session may still be running.")
+            print("  Only the user knows whether another agent is live. If this request "
+                  "was not opened in this conversation, ask the user whether to continue "
+                  "it before acting on it — the call is theirs: continue it here, or "
+                  "close it with `lspec finish`.")
             changes = working_changes(repo_root())
             for kind, path, _ in changes:
                 print(f"  uncommitted {kind}: {path}")

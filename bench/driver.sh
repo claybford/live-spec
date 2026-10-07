@@ -39,7 +39,9 @@ sess() {  # sess CELL PROFILE BRIEF TAG
   if tdone "$cell-$tag"; then log "$cell $tag skipped (done)"; return 0; fi
   local t="$EV/transcripts/$cell-$tag.jsonl"
   [ -f "$t" ] && mv "$t" "$t.partial"
-  "$HERE/run_session.sh" "$EV/cells/$cell" "$profile" "$brief" "$tag" > "$EV/logs/$cell.$tag.out" 2>&1
+  # < /dev/null: a session must not inherit (and consume) the dispatch loop's
+  # herestring stdin, or read hits EOF and the deck ends early (watch-stdineat)
+  "$HERE/run_session.sh" "$EV/cells/$cell" "$profile" "$brief" "$tag" < /dev/null > "$EV/logs/$cell.$tag.out" 2>&1
   log "$cell $tag rc=$?"
 }
 
@@ -149,11 +151,15 @@ deck() {  # one cell's full operating deck, ordered and routed by the registry
 }
 
 decks() {
-  local N
+  local N P1 P2 R1 R2
   for N in 1 2 3; do
-    deck "ae86-$N" ae86 &
-    deck "factorytax-$N" factorytax &
-    wait
+    deck "ae86-$N" ae86 & P1=$!
+    deck "factorytax-$N" factorytax & P2=$!
+    R1=0; R2=0; wait "$P1" || R1=$?; wait "$P2" || R2=$?
+    # fail-closed: a FATAL inside a deck subshell must abort the whole run
+    if [ "$R1" -ne 0 ] || [ "$R2" -ne 0 ]; then
+      log "FATAL deck subshell failed (rc $R1/$R2)"; exit 1
+    fi
   done
 }
 

@@ -4,7 +4,7 @@ Model under test: fireworks-ai/accounts/fireworks/models/glm-5p3-flash, effort l
 Scoring: each criterion MET / PARTIAL / FAILED, with quoted evidence (transcript line or git evidence).
 Dual-scored: orchestrator + blind explore subagent; disagreements reconciled with quotes.
 
-## A. Instantiation criteria (scored for all 12)
+## A. Instantiation criteria (scored for all 6)
 
 | # | Criterion | Signal |
 |---|-----------|--------|
@@ -52,7 +52,7 @@ Mechanical, per instance: count at final handoff —
 3. watch entries missing required anatomy (date, closing condition)
 4. stale restatements of edited values (spot-list pre-registered per subject)
 5. commits bypassing reconcile (no Reconciled: trailers)
-Advisory arm expected to score worse; the comparison is the open-gate verdict.
+From run #4 there is one arm, enforced (bench-spec dl-arms); D is reported as absolute counts per cell, not an arm comparison. Runs #1–#3 scored it as enforced vs advisory.
 
 ## E. Metrics series (mechanical, per commit)
 

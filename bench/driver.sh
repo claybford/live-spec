@@ -70,7 +70,7 @@ stage_o4_edit() {  # $1 = cell repo, $2 = subject; verified in place, aborts on 
 }
 
 setup() {
-  local S ARM N CELL HOOKDIR H
+  local S N CELL HOOKDIR H
   mkdir -p "$EV/subjects" "$EV/cells"
   for S in ae86 factorytax; do
     if [ ! -d "$EV/subjects/$S-base" ]; then
@@ -84,21 +84,17 @@ setup() {
         commit -qm "baseline: subject + lspec tooling @ $(git -C "$HERE/.." rev-parse --short HEAD)"
       log "staged subject $S-base"
     fi
-    for ARM in enforced advisory; do
-      for N in 1 2 3; do
-        CELL="$S-$ARM-$N"
-        if [ ! -d "$EV/cells/$CELL" ]; then
-          git -C "$EV/subjects/$S-base" clone -q --no-hardlinks "$EV/subjects/$S-base" "$EV/cells/$CELL"
-          HOOKDIR=$(git -C "$EV/cells/$CELL" rev-parse --path-format=absolute --git-path hooks)
-          if [ "$ARM" = enforced ]; then
-            rm -f "$HOOKDIR"/*.sample
-            for H in commit-msg post-commit pre-commit prepare-commit-msg; do
-              ln -sf "../../hooks/$H" "$HOOKDIR/$H"
-            done
-          fi
-          log "staged cell $CELL"
-        fi
-      done
+    for N in 1 2 3; do   # every cell is enforced: hooks installed (dl-arms)
+      CELL="$S-$N"
+      if [ ! -d "$EV/cells/$CELL" ]; then
+        git -C "$EV/subjects/$S-base" clone -q --no-hardlinks "$EV/subjects/$S-base" "$EV/cells/$CELL"
+        HOOKDIR=$(git -C "$EV/cells/$CELL" rev-parse --path-format=absolute --git-path hooks)
+        rm -f "$HOOKDIR"/*.sample
+        for H in commit-msg post-commit pre-commit prepare-commit-msg; do
+          ln -sf "../../hooks/$H" "$HOOKDIR/$H"
+        done
+        log "staged cell $CELL"
+      fi
     done
   done
 }
@@ -106,10 +102,8 @@ setup() {
 inst() {
   local N
   for N in 1 2 3; do
-    sess "ae86-enforced-$N"     inst "$HERE/briefs/inst-ae86.txt"       inst &
-    sess "ae86-advisory-$N"     inst "$HERE/briefs/inst-ae86.txt"       inst &
-    sess "factorytax-enforced-$N" inst "$HERE/briefs/inst-factorytax.txt" inst &
-    sess "factorytax-advisory-$N" inst "$HERE/briefs/inst-factorytax.txt" inst &
+    sess "ae86-$N"       inst "$HERE/briefs/inst-ae86.txt"       inst &
+    sess "factorytax-$N" inst "$HERE/briefs/inst-factorytax.txt" inst &
     wait
   done
 }
@@ -141,10 +135,8 @@ deck() {  # one cell's full operating deck
 decks() {
   local N
   for N in 1 2 3; do
-    deck "ae86-enforced-$N" ae86 &
-    deck "ae86-advisory-$N" ae86 &
-    deck "factorytax-enforced-$N" factorytax &
-    deck "factorytax-advisory-$N" factorytax &
+    deck "ae86-$N" ae86 &
+    deck "factorytax-$N" factorytax &
     wait
   done
 }

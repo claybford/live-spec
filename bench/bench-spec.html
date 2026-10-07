@@ -1,0 +1,146 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>lspec bench &mdash; Living Specification</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css">
+</head><body><main>
+
+<h1>lspec bench</h1>
+<p id="status">Status: live-system. Locked: the sandbox (<a href="#dl-sandbox">dl-sandbox</a>), one
+  synthetic home per session (<a href="#dl-home">dl-home</a>), the pinned model (<a href="#dl-model">dl-model</a>),
+  the 12-cell design (<a href="#dl-arms">dl-arms</a>), the run order (<a href="#dl-order">dl-order</a>),
+  reports outside the repo (<a href="#dl-reports">dl-reports</a>), keys never tracked (<a href="#dl-keys">dl-keys</a>).
+  Open: four watch entries (<a href="#open">open items</a>). Top risk: a harness defect that
+  voids a run's premise before scoring &mdash; every watch entry below is one. This status line is a derived view.
+  When reporting recorded state, attribute it to the spec; when changing state,
+  re-derive the line whole from the locked list, open table, and top-risk
+  source. Delete a clause with no source, and surface any contradiction with
+  its sources.</p>
+<p id="directive">Ethos: fix the apparatus, never score around it &mdash; a harness defect is repaired in the harness,
+  recorded here as a watch entry, and the affected cells re-run; a run is never corrected by hand.</p>
+<p id="conventions">Conventions: read main whole before acting. Read a supporting
+  spec whole when work crosses into it; every supporting file needs a split row
+  at its parent. No partial loads. Keep each file short.
+  Every value lives once in Key Parameters or is indexed from its authority:
+  artifacts establish actual behavior, approved requirements and decisions
+  establish required behavior, verification evidence establishes conformance.
+  Status tokens: <code>confirmed(source) / provisional(source) / locked / open / WATCH</code>.
+  Git holds history; body text states current conditions and links to rationale.
+  Authority: the scripts and configs in <code>bench/</code> establish what the harness does; this spec indexes them;
+  the pre-registered <a href="rubric.md" rel="external">rubric</a> and <a href="seed-inventory.md" rel="external">seed inventory</a>
+  establish how a run is scored; run reports establish results (<a href="#runs">runs</a>).</p>
+
+<p>Decisions: use dl- row ids; open each row's first cell with its id in
+  <code>, the row's visible name, uncounted; keep each cell &le; 40 words.
+  Replace superseded rows, keeping the displaced choice in the successor's
+  rejected/replaced cell. Retain a row only if a fresh session might re-propose
+  its rejected alternative. For an assumption-dependent lock, name the assumption
+  and reopening condition.
+  Change the fence and log the decision before reintroducing an excluded option.
+  A change to a data-sealed claim is a decision change, recorded in a decision
+  row in the same commit, or a correction with its reason.</p>
+
+<p>Session: load &rarr; make one move &rarr; update the canonical state
+  &rarr; reconcile touched claims and their one-hop neighbors &rarr; commit
+  &rarr; confirm a clean working tree. Check referrers, cited evidence, copies,
+  counts, status, declared counterparts, dependents, and indexed artifacts;
+  follow up only into neighbors changed by the fixes.
+  Report missing instruction referents; state your interpretation and clarify
+  if alternatives would materially change the edit. If you cannot ask, take
+  the reading that changes least and record the alternative as an open item.
+  Commit types: <code data-commit-types>docs fix seed audit review tool</code>
+  (<code>tool:</code> for a change to a script, config template, brief or subject). Each subject is one typed
+  transition line pointing to rationale; seed and review bodies may hold assessments.</p>
+
+<p>Dependencies: put <code>&lt;a rel="depends-on" href="#target"&gt;</code>
+  inside the dependent claim. Its nearest id'd ancestor names that claim.
+  Both anchors enclose complete claims: use a paragraph, section, or table row;
+  a heading covers only its title. Plain links are navigation. Example:
+  <code>&lt;p id="claim"&gt;Cooling assumes &lt;a rel="depends-on"
+  href="#rating"&gt;the rating&lt;/a&gt;.&lt;/p&gt;</code>
+  Compare the target's committed text with the latest review naming the dependent
+  claim, or the edge's introduction if unreviewed. A changed or missing target
+  owes review. Confirm or fix the dependent, then record a review: commit naming
+  comma-separated dependent path#id claims, empty if no edit was needed.
+  Removing or redirecting a dependency of a surviving claim also takes a
+  review: commit, including when its target is deleted together with the edge.
+  Deleting the dependent claim retires its obligations without review.
+  Uncommitted edits do not clear debt. If history is unavailable, fetch it or
+  explicitly re-review against committed state. Keep review history in git.</p>
+
+<p>Tooling: begin with <code>python3 lspec.py start bench/bench-spec.html</code> from the repository root
+  and follow its output. Without the tool, perform its checks by hand.</p>
+
+<h2 id="params">Key Parameters &mdash; single source of truth</h2>
+<table><tr><th>Parameter</th><th>Value</th><th>Status &middot; provenance</th></tr>
+<tr id="kp-model"><td>Model under test</td><td><code>fireworks-ai/accounts/fireworks/models/glm-5p3-flash#low</code> &mdash; the variant (reasoning effort low) rides in the model string; the same pin sits in both config templates</td><td>confirmed(<code>run_session.sh</code>, <code>oc-*.json.tmpl</code>)</td></tr>
+<tr id="kp-sandbox"><td>Sandbox namespace</td><td>bwrap, <code>--unshare-all --share-net --die-with-parent</code>; <code>/usr</code> and <code>/etc</code> read-only, <code>/tmp</code> and <code>/home/user</code> tmpfs; the instance repo bound writable at <code>/home/user/work</code>; the methodology (<code>live-spec.html</code>, <code>background.html</code>) read-only at <code>/home/user/methodology</code> only with <code>--with-methodology</code></td><td>confirmed(<code>sandbox.sh</code>)</td></tr>
+<tr id="kp-home"><td>Synthetic home</td><td>Template: <code>.config/opencode</code> copied from the real home with symlinks dereferenced, plus <code>.local/share/opencode/auth.json</code> only. One copy per session, bound into the tmpfs home, deleted after metrics extraction</td><td>confirmed(<code>run_session.sh</code>; run #2)</td></tr>
+<tr id="kp-db"><td>Session state and metrics source</td><td>opencode v2 keeps state in <code>&lt;home&gt;/.local/share/opencode/opencode.db</code>; cost, tokens, model and variant are read from its <code>session_v2</code> table by <code>extract_metrics.py</code></td><td>confirmed(run #2; <code>extract_metrics.py</code>)</td></tr>
+<tr id="kp-cli"><td>opencode invocation</td><td><code>opencode run --standalone --format json -m MODEL "$(cat BRIEF)"</code>; <code>--pure</code>/<code>--variant</code> no longer exist; the API key must be in the config (<code>provider.fireworks-ai.options.apiKey</code>) &mdash; <code>auth.json</code> is not honored for the injected provider</td><td>confirmed(run #2; <code>run_session.sh</code>)</td></tr>
+<tr id="kp-profiles"><td>Permission profiles</td><td><code>oc-inst.json</code>: <code>external_directory</code> allowed (the methodology is legitimate input); <code>oc-oper.json</code>: denied. Both deny <code>sudo</code>, <code>systemctl</code>, <code>pkill</code>, <code>git push</code>, <code>git remote</code>; sharing disabled; the config is passed via <code>OPENCODE_CONFIG_CONTENT</code></td><td>confirmed(<code>oc-*.json.tmpl</code>, <code>sandbox.sh</code>)</td></tr>
+<tr id="kp-evidence"><td>Evidence directory</td><td><code>$BENCH_EV</code>, fresh per run (e.g. <code>/tmp/opencode/lspec-bench-&lt;ts&gt;</code>): <code>sandbox-homes/</code>, <code>transcripts/</code> (jsonl + stderr per session), <code>metrics/</code> (JSON per session), <code>subjects/</code>. Invisible inside the sandbox</td><td>confirmed(<code>run_session.sh</code>)</td></tr>
+<tr id="kp-subjects"><td>Subjects</td><td>Two repos under <code>subjects/</code>, tracked without git or tooling: <code>ae86</code> (K24 swap garage project; forward design) and <code>factorytax</code> (payroll engine; live-system). Setup per run: copy to <code>$BENCH_EV/subjects/</code>, <code>git init</code>, add the repo's current <code>lspec.py</code> and <code>hooks/</code>, commit a baseline, clone per cell</td><td>confirmed(<code>subjects/</code>; run #2)</td></tr>
+<tr id="kp-cells"><td>Cells</td><td>12 instantiations: 2 subjects &times; 2 arms &times; 3 replicates. Enforced cells symlink the four hooks; advisory cells leave them uninstalled</td><td>confirmed(run #2)</td></tr>
+<tr id="kp-deck"><td>Briefs</td><td><code>briefs/inst-*</code> seed each cell; the operating deck per subject is O1 continuity, O2 drift, O3 split pressure (O3b supplemental), O4 out-of-band edit, O5 failure, O6 sealed pressure (ae86) or policy change (factorytax), O7 review-owed (shared, <code>both-O7</code>); W1 wiring assist</td><td>confirmed(<code>briefs/</code>)</td></tr>
+<tr id="kp-scoring"><td>Scoring</td><td>Pre-registered before any session: criteria A1&ndash;A10, B1&ndash;B4, C1&ndash;C11, gate measurement D, metrics series E (<a href="rubric.md" rel="external">rubric</a>); 20 seed rules scored IN-SEED / REFERENCED / ABSENT (<a href="seed-inventory.md" rel="external">inventory</a>). Dual-scored, from direct git evidence (<a href="#dl-evidence">dl-evidence</a>)</td><td>confirmed(<code>rubric.md</code>, <code>seed-inventory.md</code>)</td></tr>
+</table>
+
+<h2 id="procedure">Procedure &mdash; one run</h2>
+<ol id="steps">
+  <li>Substitute <code>oc-inst.json</code> and <code>oc-oper.json</code> from the <code>.tmpl</code> files with the key from <code>~/.local/share/opencode/auth.json</code>; never commit or copy the key (<a href="#dl-keys">dl-keys</a>).</li>
+  <li>Set <code>BENCH_EV</code> to a fresh evidence dir (<a href="#kp-evidence">kp-evidence</a>); build <code>$BENCH_EV/sandbox-homes/template</code> (<a href="#kp-home">kp-home</a>).</li>
+  <li>Canary before any real session: methodology read-only, repo writable, <code>$BENCH_EV</code> invisible, a trivial <code>opencode run</code> completes with the pinned model and variant (<a href="#kp-model">kp-model</a>).</li>
+  <li>Stage the subjects (<a href="#kp-subjects">kp-subjects</a>); run all 12 instantiations (<a href="#kp-cells">kp-cells</a>), then the operating decks on all of them (<a href="#kp-deck">kp-deck</a>), each session <code>run_session.sh REPO inst|oper BRIEF TAG</code>. Wrap batches in <code>systemd-inhibit</code> (<a href="#watch-suspend">watch-suspend</a>). Stage and verify any material a brief references immediately before that brief (<a href="#watch-referent">watch-referent</a>); after the first cell, grep transcripts to verify each brief reached the cells it applies to (<a href="#watch-misroute">watch-misroute</a>).</li>
+  <li>Score from direct git evidence against the pre-registered instruments (<a href="#kp-scoring">kp-scoring</a>); write the report outside the repo and index it in <a href="#runs">runs</a> (<a href="#dl-reports">dl-reports</a>).</li>
+</ol>
+
+<h2 id="runs">Runs &mdash; indexed reports</h2>
+<p>Reports are the authority for results; this table indexes them.</p>
+<table><tr><th>Run</th><th>Basis</th><th>Report</th><th>Carried findings</th></tr>
+<tr id="run-1"><td>#1 (before 2026-10-04)</td><td>pre-6ffbacf</td><td>not retained</td><td>Defect shape: <em>undated</em> watch entries; most instances missed the watch/diagnostic/ruled-out rules, left <code data-literal>[ADAPT]</code> markers, copied the footer; zero depends-on edges (F1)</td></tr>
+<tr id="run-2"><td>#2 (2026-10-04/05)</td><td>live-spec@6ffbacf</td><td><code>/home/user/Documents/lspec-bench2.html</code> (corrected: entries missing at birth 4/12, two per arm)</td><td>Defect shape: <em>missing</em> watch entries, all filed ones dated. Sealed pressure 12/12 clean; review-owed 12/12 trusted the tool's count; ~7 reconcile runs per commit; operating cost enforced $0.021 vs advisory $0.023 per session, indistinguishable; lineage machinery never fired in 108 sessions; a decision rewrite rode a <code>review:</code> subject via the review verb</td></tr>
+</table>
+
+<h2 id="open">Open Items</h2>
+<p>A watch entry is an open-items row whose id starts watch-, its first cell
+  opening with that id in <code>: claim,
+  triggering event, date, and the condition that closes it, set by whoever
+  files it. A <code data-literal>[WATCH]</code> marker links to its entry. Mark a dated condition
+  <code>data-watch-until="YYYY-MM-DD"</code>; once it passes,
+  close or extend the entry on purpose. A failure seen once, even if
+  root-caused, gets a watch entry: symptom, date, diagnosis, fix.
+  Add a diagnostic-register row (symptom &middot; tell &middot; fix) when
+  a later occurrence confirms the same diagnosis; repeated symptoms alone do
+  not qualify. Any unresolved work remains in the open list and links to that
+  row. Keep a ruled-out register, each cause with the conditions
+  that ruled it out, when an eliminated cause is re-proposed.</p>
+<table><tr><th>Item</th><th>Gates</th><th>Resolves when</th></tr>
+<tr id="watch-misroute"><td><code>watch-misroute</code> Run #2 (2026-10-05): the deck driver sent the shared review-owed brief to every cell and never delivered the factorytax sealed-pressure brief. Diagnosis: brief-to-cell routing unchecked. Fix: deliver each brief to every applicable cell; grep transcripts after the first cell</td><td>Validity of every operating-deck criterion (C-series) for the affected brief</td><td>A full deck run's transcripts show every brief at every cell it applies to</td></tr>
+<tr id="watch-referent"><td><code>watch-referent</code> Run #2 (2026-10-05): the ae86 O3 brief referenced <code>rebuild-notes/</code>, never created; all six cells reported the missing referent. Diagnosis: referenced material not staged. Fix: stage and verify material before the brief that references it</td><td>The O3 split-pressure premise (C3)</td><td>A full deck run's O3 cells find the material at the brief</td></tr>
+<tr id="watch-batchparse"><td><code>watch-batchparse</code> Run #2 (2026-10-05): one batch parse of entries filed at birth produced a false negative (factorytax-advisory-1) that two identical re-runs did not reproduce. Diagnosis: unreproduced; cached batch output trusted. Fix: score from direct git evidence (<a href="#dl-evidence">dl-evidence</a>)</td><td>Every gate-measurement count (D-series)</td><td>A run is scored with no cached batch output on the scoring path</td></tr>
+<tr id="watch-suspend"><td><code>watch-suspend</code> Run #1 (recorded 2026-10-04): a host suspend voided an instantiation mid-session. Diagnosis: no inhibitor around batches. Fix: wrap batches in <code>systemd-inhibit</code></td><td>Completeness of every batch</td><td>A full run completes under the inhibitor with no session interrupted</td></tr>
+</table>
+
+<h2 id="log">Decision Log</h2>
+<table><tr><th>Selection</th><th>Rejected / Replaced</th><th>Reason</th></tr>
+<tr id="dl-sandbox" data-sealed><td><code>dl-sandbox</code> A bwrap default-empty namespace per session: only the instance repo writable, the operator's real home never bound, network on for the model API (<a href="#kp-sandbox">kp-sandbox</a>)</td><td>A container or VM per run; running sessions in the real home; network off</td><td>Per-session isolation at near-zero cost; nothing of the operator's state leaks into a cell or out of it; the model API needs the network. Do not revert: a session with the real home can read keys and other runs.</td></tr>
+<tr id="dl-home"><td><code>dl-home</code> One synthetic home per session, holding config and auth only, so each session gets a fresh opencode DB and the <a rel="depends-on" href="#kp-db">session_v2 table</a> holds exactly that session's metrics</td><td>One shared home across a run; extracting metrics from transcripts alone</td><td>A shared DB mixes sessions and carries memory between cold starts; a fresh DB is cheap and gives clean per-session cost and tokens. Reopens if opencode moves its state out of the home.</td></tr>
+<tr id="dl-model"><td><code>dl-model</code> Pin <a rel="depends-on" href="#kp-model">the model and variant</a> in the config templates and the runner's model string, identically for every cell and run</td><td>The provider or config default; varying the model across arms</td><td>Cost and behavior are only comparable across cells and runs under one pin; v2 reads the variant from the model string, so the runner must carry it too.</td></tr>
+<tr id="dl-arms"><td><code>dl-arms</code> Twelve cells: two subjects, enforced and advisory arms, three replicates (<a href="#kp-cells">kp-cells</a>); the gate is the only difference between arms</td><td>A single enforced arm; one replicate; more subjects per run</td><td>The question each run answers is the open-gate verdict (rubric D): what enforcement changes in outcome and cost. Three replicates separate a model's variance from the arm effect at affordable cost.</td></tr>
+<tr id="dl-profiles"><td><code>dl-profiles</code> Instantiation sessions may read outside the repo; operating sessions may not (<a href="#kp-profiles">kp-profiles</a>)</td><td>One permission profile for both</td><td>The methodology is legitimate input at seeding; an operating session that consults it would mask whether the instance carries its own rules, which is what the deck measures.</td></tr>
+<tr id="dl-order"><td><code>dl-order</code> Fixed order per run: substitute configs, template, canary, all instantiations, then every operating deck; no choices (<a href="#procedure">procedure</a>)</td><td>Ad hoc order; skipping the canary; interleaving decks with instantiations</td><td>A sandbox defect found after sessions ran voids them; the canary finds it for the price of one trivial session. Decks need all cells seeded on the same basis.</td></tr>
+<tr id="dl-evidence"><td><code>dl-evidence</code> Score from direct <code>git show</code>/<code>git cat-file</code> evidence against the pre-registered rubric and inventory, dual-scored (orchestrator plus a blind subagent), disagreements reconciled with quotes</td><td>Cached batch-parse output; criteria written after sessions ran; single scorer</td><td>A batch parse produced an unreproducible false negative (<a href="#watch-batchparse">watch-batchparse</a>); post-hoc criteria fit the result; two scorers with quotes make a verdict checkable.</td></tr>
+<tr id="dl-reports"><td><code>dl-reports</code> Run reports and evidence live outside the repo (<a href="#runs">runs</a> indexes them); the repo holds the apparatus</td><td>Committing reports, transcripts or metrics</td><td>Evidence is large and key-adjacent; the apparatus is small and must be reproducible from a clone. The index gives a cold session the pointer without the payload.</td></tr>
+<tr id="dl-keys" data-sealed><td><code>dl-keys</code> Configs are tracked as <code>.tmpl</code> files with <code>__FIREWORKS_API_KEY__</code>; only the substituted <code>oc-inst.json</code> and <code>oc-oper.json</code> are gitignored; everything else in <code>bench/</code> is tracked</td><td>Gitignoring all of <code>bench/</code>; tracking substituted configs; keys in <code>auth.json</code> alone</td><td>A pointer at absent materials is a broken reference (<a href="../live-spec.html#dl-benchtracked" rel="external">dl-benchtracked</a> in the methodology spec); a committed key is unrecoverable; v2 ignores <code>auth.json</code> for the injected provider (<a href="#kp-cli">kp-cli</a>). Do not revert.</td></tr>
+<tr id="dl-island"><td><code>dl-island</code> This spec is an independent instance of the pattern: not a member of <code>live-spec.html</code>'s collection, not bound into the sandbox, not input to any instantiation</td><td>A supporting spec split from <code>live-spec.html</code>; a runbook README; notes files per run</td><td>The methodology's every session reads its main whole; the harness is not the methodology's state. Notes files put harness failures outside any spec, where the next run re-discovers them.</td></tr>
+</table>
+
+<h2 id="fence">Out of Scope</h2>
+<p>Judging the methodology: results live in the reports and the decisions they inform live in <code>live-spec.html</code>, not here. The subjects' domain correctness (the swap, the payroll rules) beyond their role as fixed fixtures. opencode internals beyond what the harness relies on (<a href="#kp-cli">kp-cli</a>, <a href="#kp-db">kp-db</a>). Any critique that the harness should be a general evaluation framework: it exists to run this one comparison repeatably.</p>
+
+<h2 id="record">Record</h2>
+<p>Git is the record: every session-event is a commit; every full sweep takes an
+  <code>audit:</code> commit. A clean sweep may update bookkeeping; its commit
+  is empty only when no files change. No in-file history.</p>
+
+</main></body></html>
+<!-- Clayton Ford, 2026. MIT. https://github.com/claybford/live-spec -->

@@ -1,4 +1,4 @@
-# lspec bench #2 — seed-rule inventory (pre-registered 2026-10-04)
+# lspec bench — seed-rule inventory (standing instrument; pre-registered 2026-10-04)
 
 Methodology basis: live-spec @ 6ffbacf. For each operating rule below, score each instance:
 IN-SEED (stated in the instance's own text) / REFERENCED (operational via tool output or linked rule) / ABSENT.

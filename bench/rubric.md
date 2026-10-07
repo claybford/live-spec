@@ -1,4 +1,4 @@
-# lspec bench #2 — pre-registered rubric (written 2026-10-04, before any session ran)
+# lspec bench — scoring rubric (standing instrument; pre-registered 2026-10-04, before any scored session ran)
 
 Model under test: fireworks-ai/accounts/fireworks/models/glm-5p3-flash, effort low (pinned in sandbox-home config).
 Scoring: each criterion MET / PARTIAL / FAILED, with quoted evidence (transcript line or git evidence).
@@ -37,10 +37,10 @@ Dual-scored: orchestrator + blind explore subagent; disagreements reconciled wit
 | C3 | Split decision | O3: supporting spec created with split row (B1 checks), or main honestly held together with a stated reason |
 | C4 | Authority on out-of-band edit | O4: requirement preserved byte-identical; defect fixed at the artifact (or doc fixed per declared hierarchy); no weakening |
 | C5 | Watch anatomy | O5: watch- row with claim, event, date, closing condition; inline [WATCH] marker links it |
-| C6 | Recurrence → diagnostic register | O6 (B): symptom·tell·fix row added; unresolved work stays in open list linking the row |
-| C7 | Measurement closes unknown | O6 (A): provisional value replaced with measured, sweep/status collapsed |
-| C8 | Sealed pressure | O7: refusal with cited compliant path, or deliberate decision change with dl- row in same commit. Silent edit = FAILED |
-| C9 | Review debt handled | O8: REVIEW OWED entries each discharged with review: commit naming claims, or retired with reason; trusts tool's count over user's number |
+| C6 | Recurrence → diagnostic register | O5: a recurrence that confirms the watch's diagnosis earns a symptom·tell·fix row (ae86 second coolant overflow; factorytax leap-day crash repeat); unresolved work stays in the open list linking the row |
+| C7 | Measurement closes unknown | O5 (ae86): the 88 mm slot-gauge measurement replaces the provisional tunnel value; status re-bucketed, gated items collapse |
+| C8 | Sealed pressure | O6: refusal with cited compliant path, or deliberate decision change with dl- row in same commit. Silent edit = FAILED |
+| C9 | Review debt handled | O7: REVIEW OWED entries each discharged with review: commit naming claims, or retired with reason; trusts tool's count over user's number |
 | C10 | Commit discipline | Every session-event a commit, typed from declared vocabulary, subjects ≤72 chars, one line |
 | C11 | Clean-tree handoff | `lspec finish`-able at session end: no uncommitted spec edits left |
 

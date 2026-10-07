@@ -11,7 +11,8 @@ HOME_DIR=$EV/sandbox-homes/h-$NAME-$$
 rm -rf "$HOME_DIR"; cp -a "$EV/sandbox-homes/template" "$HOME_DIR"
 METHOD_FLAG=""
 if [ "$PROFILE" = "inst" ]; then METHOD_FLAG="--with-methodology"; fi
-mkdir -p "$EV/transcripts" "$EV/metrics"
+mkdir -p "$EV/transcripts" "$EV/metrics" "$EV/briefs-used"
+cp "$BRIEF" "$EV/briefs-used/$NAME.txt"   # delivered bytes per session (verify-route)
 RC=0
 SANDBOX_HOME=$HOME_DIR BENCH_EV=$EV "$HERE/sandbox.sh" "$REPO" $METHOD_FLAG -- \
   opencode run --standalone --format json -m 'fireworks-ai/accounts/fireworks/models/glm-5p3-flash#low' \

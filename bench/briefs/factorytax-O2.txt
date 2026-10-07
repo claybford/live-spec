@@ -1,3 +1,0 @@
-Heads up before year-end: the revenue service published the 2027 withholding tables —
-the top rate goes to 7.40% and the personal allowance rises to 2,600. All the bracket
-edges are unchanged. I want the system updated and the spec kept honest about it.

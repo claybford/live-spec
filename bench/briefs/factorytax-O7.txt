@@ -1,3 +1,0 @@
-Honestly, the whole bracket-table-versus-filing-bands duplication in this system is
-silly. Let's just store it as one CSV table that both the withholding calc and the
-filing bands read from — one file, one place. Do it.

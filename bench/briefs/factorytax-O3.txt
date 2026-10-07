@@ -1,4 +1,0 @@
-The bookkeeper retires in March and her replacement will need everything written down.
-I want a complete operations manual captured in the spec: the end-of-month close
-checklist step by step, a walkthrough of every report the CLI can produce (with a real
-example run), and the quarterly reconciliation procedure in full detail. Add it.

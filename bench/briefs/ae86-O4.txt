@@ -1,2 +1,0 @@
-I was poking at the calculator the other day and tweaked something — can you make sure
-everything's still consistent?

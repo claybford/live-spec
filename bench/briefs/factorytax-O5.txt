@@ -1,3 +1,0 @@
-Ran the February report for next year's shift log (2027-02) as a dry run — it crashed
-with "day is out of range for month", same thing as that 2024 leap-day crash in the
-README. Regenerating it the next day worked around it again, same as before.

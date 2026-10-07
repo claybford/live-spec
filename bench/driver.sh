@@ -1,8 +1,9 @@
 #!/bin/bash
-# driver.sh — the bench deck driver: routes briefs, stages material, resumes,
-# classifies completion. Replaces the per-run hand-driven steps whose defects
-# are recorded in the bench spec (diag-staging, watch-prestaged, watch-partial,
-# watch-rc). Phases: setup | inst | deck | all (default). Resumable: a session
+# driver.sh — the bench deck driver: generates the deck from briefs.py, routes
+# briefs by the registry, stages material, resumes, classifies completion.
+# Replaces the per-run hand-driven steps whose defects are recorded in the
+# bench spec (diag-staging, watch-prestaged, watch-partial, watch-rc).
+# Phases: setup | inst | deck | all (default). Resumable: a session
 # whose transcript ends in a final text part is never re-run; an incomplete
 # transcript is quarantined to *.partial (dl-completion).
 set -u
@@ -72,6 +73,7 @@ stage_o4_edit() {  # $1 = cell repo, $2 = subject; verified in place, aborts on 
 setup() {
   local S N CELL HOOKDIR H
   mkdir -p "$EV/subjects" "$EV/cells"
+  python3 "$HERE/briefs.py" emit-all "$EV/briefs" || { log "FATAL brief generation failed"; exit 1; }
   for S in ae86 factorytax; do
     if [ ! -d "$EV/subjects/$S-base" ]; then
       cp -a "$HERE/subjects/$S" "$EV/subjects/$S-base"
@@ -100,44 +102,60 @@ setup() {
 }
 
 inst() {
-  local N
+  local N S PLAN TAG FILE HOOK COND
   for N in 1 2 3; do
-    sess "ae86-$N"       inst "$HERE/briefs/inst-ae86.txt"       inst &
-    sess "factorytax-$N" inst "$HERE/briefs/inst-factorytax.txt" inst &
+    for S in ae86 factorytax; do
+      PLAN=$(python3 "$HERE/briefs.py" plan "$S" inst) || { log "FATAL brief plan $S inst"; exit 1; }
+      IFS=$'\t' read -r TAG FILE HOOK COND <<< "$PLAN"
+      sess "$S-$N" inst "$EV/briefs/$FILE" "$TAG" &
+    done
     wait
   done
 }
 
-deck() {  # one cell's full operating deck
+# dispatch one slot from the registry plan: conditional skip, fail-closed
+# staging hook in the slot's own step (diag-staging), then the session
+dispatch() {  # dispatch CELL SUBJECT REPO WIRED LINE
+  local cell=$1 subject=$2 repo=$3 wired=$4 line=$5
+  local TAG FILE HOOK COND
+  IFS=$'\t' read -r TAG FILE HOOK COND <<< "$line"
+  if [ "$COND" = w1 ] && [ "$wired" = 1 ]; then
+    log "$cell $TAG skipped (depends-on present at seed)"
+    return 0
+  fi
+  case "$HOOK" in
+    none) ;;
+    rebuild_notes) stage_rebuild_notes "$repo" ;;
+    o4_edit)       stage_o4_edit "$repo" "$subject" ;;
+    *) log "FATAL unknown stage hook $HOOK"; exit 1 ;;
+  esac
+  sess "$cell" oper "$EV/briefs/$FILE" "$TAG"
+}
+
+deck() {  # one cell's full operating deck, ordered and routed by the registry
   local cell=$1 subject=$2
   local repo="$EV/cells/$cell"
-  local wired=0   # evaluated on the seed, before any deck session (dl-w1)
+  local wired=0 line PLAN   # wired evaluated on the seed, before any deck session (dl-w1)
   grep -qs 'rel="depends-on"' "$repo"/*.html && wired=1
-  sess "$cell" oper "$HERE/briefs/$subject-O1.txt" O1
-  sess "$cell" oper "$HERE/briefs/$subject-O2.txt" O2
-  sess "$cell" oper "$HERE/briefs/$subject-O3.txt" O3
-  if [ "$subject" = ae86 ]; then
-    stage_rebuild_notes "$repo"
-    sess "$cell" oper "$HERE/briefs/ae86-O3b.txt" O3b
-  fi
-  stage_o4_edit "$repo" "$subject"
-  sess "$cell" oper "$HERE/briefs/$subject-O4.txt" O4
-  sess "$cell" oper "$HERE/briefs/$subject-O5.txt" O5
-  sess "$cell" oper "$HERE/briefs/$subject-O6.txt" O6
-  sess "$cell" oper "$HERE/briefs/both-O7.txt" O7
-  if [ "$wired" = 1 ]; then
-    log "$cell W1 skipped (depends-on present at seed)"
-  else
-    sess "$cell" oper "$HERE/briefs/W1.txt" W1
-  fi
+  PLAN=$(python3 "$HERE/briefs.py" plan "$subject" deck) || { log "FATAL brief plan $subject deck"; exit 1; }
+  while IFS= read -r line; do
+    dispatch "$cell" "$subject" "$repo" "$wired" "$line"
+  done <<< "$PLAN"
 }
 
 decks() {
-  local N
+  local N S
   for N in 1 2 3; do
     deck "ae86-$N" ae86 &
     deck "factorytax-$N" factorytax &
     wait
+    if [ "$N" = 1 ]; then   # watch-misroute: verify delivery after the first cells
+      for S in ae86 factorytax; do
+        python3 "$HERE/briefs.py" verify-route "$EV" "$S-1" "$S" \
+          || { log "FATAL route verification $S-1"; exit 1; }
+      done
+      log "first-cell routes verified"
+    fi
   done
 }
 

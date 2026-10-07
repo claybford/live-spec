@@ -1,3 +1,0 @@
-No changes yet — before I ask you to do anything, walk me through the current state of
-this project per the spec: what's locked, what's open, what the top risk is, and why we
-chose the K24A2 over the alternatives.

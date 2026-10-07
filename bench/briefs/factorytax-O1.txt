@@ -1,3 +1,0 @@
-No changes yet — before I ask you to do anything, walk me through the current state of
-this system per the spec: what's locked, what's open, what the top risk is, and why the
-filing bands are stated separately from the withholding brackets.

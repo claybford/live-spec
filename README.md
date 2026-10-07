@@ -282,6 +282,7 @@ dependent claims it clears. Commit types come from `data-commit-types` in
 live-spec.html; never use `seed:` here. History lives in git, never in the
 document body. Tests: `python3 -m unittest tests.test_lspec`.
 
-Evaluation harness materials — sandbox wrapper, session runner, opencode configs,
-subject repos, briefs, rubric — live in `bench/`; see `bench/README.md` for how to run
-a benchmark. Only the key-bearing substituted configs are gitignored.
+The evaluation harness lives in `bench/` and is governed by its own living
+specification, `bench/bench-spec.html` — an independent instance of the pattern, not a
+member of `live-spec.html`'s collection and not an input to instantiation. Work there
+starts with `python3 lspec.py start bench/bench-spec.html`.

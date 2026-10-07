@@ -141,21 +141,19 @@ deck() {  # one cell's full operating deck, ordered and routed by the registry
   while IFS= read -r line; do
     dispatch "$cell" "$subject" "$repo" "$wired" "$line"
   done <<< "$PLAN"
+  # watch-misroute / watch-verroute: verify-route is an end-of-deck check
+  # (it needs every planned brief delivered or W1 logged skipped), so it runs
+  # after each cell's deck, from the first cell onward
+  python3 "$HERE/briefs.py" verify-route "$EV" "$cell" "$subject" \
+    || { log "FATAL route verification $cell"; exit 1; }
 }
 
 decks() {
-  local N S
+  local N
   for N in 1 2 3; do
     deck "ae86-$N" ae86 &
     deck "factorytax-$N" factorytax &
     wait
-    if [ "$N" = 1 ]; then   # watch-misroute: verify delivery after the first cells
-      for S in ae86 factorytax; do
-        python3 "$HERE/briefs.py" verify-route "$EV" "$S-1" "$S" \
-          || { log "FATAL route verification $S-1"; exit 1; }
-      done
-      log "first-cell routes verified"
-    fi
   done
 }
 

@@ -3,9 +3,10 @@
 # briefs by the registry, stages material, resumes, classifies completion.
 # Replaces the per-run hand-driven steps whose defects are recorded in the
 # bench spec (diag-staging, watch-prestaged, watch-partial, watch-rc).
-# Phases: setup | inst | deck | all (default). Resumable: a session
-# whose transcript ends in a final text part is never re-run; an incomplete
-# transcript is quarantined to *.partial (dl-completion).
+# Phases: setup | inst | deck | all (default). Resumable: a session whose
+# transcript ends in a final text part and whose end-of-session HEAD stamp
+# exists is never re-run; an incomplete transcript is quarantined to
+# *.partial (dl-completion).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 EV=${BENCH_EV:?set BENCH_EV to the evidence dir for this run}
@@ -20,17 +21,25 @@ fi
 
 log() { echo "$1 $(date -Is)" >> "$EV/driver-progress.log"; }
 
-# transcript done = last JSON line is not an "error" part (watch-rc: exit codes advisory)
+# session done (dl-completion; watch-rc: exit codes advisory; watch-tdone):
+# the transcript's final part is text (step-finish markers after it ignored)
+# AND the runner's end-of-session HEAD stamp exists, written by run_session.sh
+# after opencode returned and metrics were extracted. A killed session has
+# a transcript ending in tool_use or step_start, or no stamp.
 tdone() {
-  local t="$EV/transcripts/$1.jsonl"
-  [ -f "$t" ] || return 1
+  local t="$EV/transcripts/$1.jsonl" stamp="$EV/metrics/$1.head"
+  [ -f "$t" ] && [ -f "$stamp" ] || return 1
   python3 - "$t" <<'PY'
 import json, sys
 lines = [l for l in open(sys.argv[1]) if l.strip().startswith('{')]
-if not lines: sys.exit(1)
-try: j = json.loads(lines[-1])
-except Exception: sys.exit(1)
-sys.exit(1 if j.get("type") == "error" else 0)
+last = None
+for l in reversed(lines):
+    try: j = json.loads(l)
+    except Exception: sys.exit(1)
+    if j.get("type") in ("step_finish", "step-finish"):
+        continue
+    last = j; break
+sys.exit(0 if last and last.get("type") == "text" else 1)
 PY
 }
 

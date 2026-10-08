@@ -13,8 +13,10 @@ import ast
 import contextlib
 import html
 import io
+import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2676,6 +2678,44 @@ class SealCorrection(unittest.TestCase):
         self.assertEqual(cli(d, 'finish')[0], 0)
         cli(d, 'start')                                   # reports the awaiting correction
         self.assertIn('already open', cli(d, 'start')[1])  # not an observation
+
+
+# ------------------------------------------------ bench driver (dl-completion)
+
+class BenchDriver(unittest.TestCase):
+    """driver.sh's tdone: a session is done when its transcript's final part
+    is text (trailing step-finish markers ignored) and the runner's
+    end-of-session HEAD stamp exists. Pure files, no git, no model."""
+
+    DRIVER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bench', 'driver.sh')
+
+    def tdone(self, ev, name):
+        src = (f'EV={shlex.quote(ev)}\n' + re.search(r'^tdone\(\) \{.*?^\}', open(self.DRIVER).read(),
+                                                     re.S | re.M).group(0) + f'\ntdone {name}')
+        return subprocess.run(['bash', '-c', src], capture_output=True, text=True).returncode
+
+    def case(self, ev, name, parts, stamp=True):
+        os.makedirs(os.path.join(ev, 'transcripts'), exist_ok=True)
+        os.makedirs(os.path.join(ev, 'metrics'), exist_ok=True)
+        with open(os.path.join(ev, 'transcripts', name + '.jsonl'), 'w') as f:
+            for p in parts:
+                f.write(json.dumps({'type': p, 'x': 1}) + '\n')
+        if stamp:
+            Path(ev, 'metrics', name + '.head').write_text('abc123\n')
+
+    def test_done_only_with_final_text_and_a_stamp(self):
+        ev = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, ev, ignore_errors=True)
+        self.case(ev, 'ok', ['step_start', 'tool_use', 'text', 'step_finish'])
+        self.assertEqual(self.tdone(ev, 'ok'), 0)
+        self.case(ev, 'cut-tool', ['step_start', 'text', 'tool_use'])
+        self.assertEqual(self.tdone(ev, 'cut-tool'), 1)
+        self.case(ev, 'cut-step', ['text', 'step_finish', 'step_start'])
+        self.assertEqual(self.tdone(ev, 'cut-step'), 1)
+        self.case(ev, 'err', ['text', 'error'])
+        self.assertEqual(self.tdone(ev, 'err'), 1)
+        self.case(ev, 'nostamp', ['text', 'step_finish'], stamp=False)
+        self.assertEqual(self.tdone(ev, 'nostamp'), 1)
+        self.assertEqual(self.tdone(ev, 'absent'), 1)
 
 
 # ------------------------------------------------ read probe (dl-wholeload)

@@ -19,5 +19,8 @@ SANDBOX_HOME=$HOME_DIR BENCH_EV=$EV "$HERE/sandbox.sh" "$REPO" $METHOD_FLAG -- \
   "$(cat "$BRIEF")" > "$EV/transcripts/$NAME.jsonl" 2> "$EV/transcripts/$NAME.stderr" || RC=$?
 python3 "$HERE/extract_metrics.py" "$HOME_DIR/.local/share/opencode/opencode.db" \
   "$EV/metrics/$NAME.json" "$NAME"
+# end-of-session git state: the cell's HEAD once the session has returned and
+# its metrics are extracted; its presence is half of done (dl-completion)
+git -C "$REPO" rev-parse HEAD 2>/dev/null > "$EV/metrics/$NAME.head" || echo unborn > "$EV/metrics/$NAME.head"
 rm -rf "$HOME_DIR"
 exit "$RC"

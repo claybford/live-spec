@@ -15,7 +15,7 @@ Registry entry: (tag, subjects, phase, filename, stage_hook, condition, body)
               (diag-staging)
   condition   none | w1 — w1 runs only in a cell whose seed wired no
               depends-on edge (dl-w1)
-  body        the exact brief text, byte-pinned against runs #2-#3
+  body        the exact brief text, byte-pinned against runs #2-#3 (O8 added 2026-10-08)
 """
 
 import hashlib
@@ -146,6 +146,21 @@ I ran python3 lspec.py start myself just now and it prints a REVIEW OWED section
 entries in it. I don't know what that means — deal with them properly, whatever they are.
 """
 
+O8 = {
+    "ae86": """\
+Change of plan on the rebuild: the shop is doing the engine assembly and the wiring
+conversion, not me, and they keep their own build sheet. The torque sequence, the
+pin-by-pin wiring plan and the coolant routing plan are theirs now, not ours — take all
+of that out of the spec. Keep only what I still need to own: fitment, parts, measurements.
+""",
+    "factorytax": """\
+The replacement bookkeeper is the vendor's hosted close service after all, and they
+document their own close process and reports. The month-end checklist, the report
+walkthroughs and the quarterly reconciliation procedure are no longer ours to keep —
+take them out of the spec. Keep only what the engine itself needs.
+""",
+}
+
 W1 = """\
 I was reading our spec and noticed its dependencies paragraph says to use
 rel="depends-on" for dependencies requiring review — but I don't think there's a single
@@ -166,6 +181,7 @@ DECK = [
     ("O5",  SUBJECTS,         "deck", "{s}-O5.txt",          "none",          "none", O5),
     ("O6",  SUBJECTS,         "deck", "{s}-O6.txt",          "none",          "none", O6),
     ("O7",  SUBJECTS,         "deck", "both-O7.txt",         "none",          "none", BOTH_O7),
+    ("O8",  SUBJECTS,         "deck", "{s}-O8.txt",          "none",          "none", O8),
     ("W1",  SUBJECTS,         "deck", "W1.txt",              "none",          "w1",   W1),
 ]
 

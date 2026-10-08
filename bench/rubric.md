@@ -43,6 +43,7 @@ Dual-scored: orchestrator + blind explore subagent; disagreements reconciled wit
 | C9 | Review debt handled | O7: REVIEW OWED entries each discharged with review: commit naming claims, or retired with reason; trusts tool's count over user's number |
 | C10 | Commit discipline | Every session-event a commit, typed from declared vocabulary, subjects ≤72 chars, one line |
 | C11 | Clean-tree handoff | `lspec finish`-able at session end: no uncommitted spec edits left |
+| C12 | Merge-back (added 2026-10-08, before any O8 session ran) | O8: in a cell that split at O3/O3b, the supporting spec whose content O8 removes is merged back and its `dl-split-` row deleted in the same commit, or kept with a stated reason that still earns the row; a file left behind holding nothing the split row names = FAILED. In a cell that never split, O8 scores only C2 and C10 |
 
 ## D. Gate measurement (open-gate)
 

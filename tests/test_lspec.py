@@ -246,6 +246,29 @@ class Units(unittest.TestCase):
         ctx.staged.specs = {}
         self.assertEqual(cause('<p id="req" data-sealed>Holds.</p>'), 'file leaves the collection (its split row is gone)')
 
+    def test_help_is_the_reference(self):
+        """dl-cli: the tool's output carries its surface. reconcile --help names
+        every item kind and every legal answer; lspec --help names every verb."""
+        def help_of(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+                lspec.main(['lspec', *argv, '--help'])
+            return out.getvalue()
+        rec = help_of('reconcile')
+        for kind, answers in lspec.ANSWERS.items():
+            self.assertRegex(rec, rf"\n  {kind}\b", kind)
+            for a in answers:
+                self.assertIn(a, rec, f"{kind}: {a}")
+        for kind in ("request", "structure", "subject", "review", "provisional", "watch", "baseline"):
+            self.assertRegex(rec, rf"\n  {kind}\b", kind)
+        top = help_of()
+        for verb in ("start", "reconcile", "finish", "check", "review", "show", "neighbors",
+                     "impact", "mv", "hook"):
+            self.assertIn(verb, top)
+        self.assertIn('Reconciled: reviewed', rec)
+        self.assertIn(str(lspec.SUBJECT_MAX), rec)
+        self.assertIn(str(lspec.RESUME_MAX_LINES), help_of('start'))
+
     def test_edge_helpers(self):
         spec = lspec.Spec('m.html', '<p id="c">needs <a rel="depends-on" href="t.html#p">p</a> and <a href="#x">x</a></p>')
         self.assertTrue(lspec.has_edge(spec, 'c', {'t.html#p'}))

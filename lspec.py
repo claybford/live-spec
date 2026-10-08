@@ -3810,9 +3810,152 @@ def cmd_review(args):
 
 
 # ================================================================== main
+# The tool's surface is its own output and these help texts (dl-cli): there
+# is no reference document to go stale beside them.
+
+HELP = {
+"lspec": """\
+A session: start MAIN, read what it lists whole, edit and stage, reconcile
+--subject "type: one transition", answer the checklist (--next / --tick), commit
+with `git commit --no-edit` (the hooks write subject and Reconciled: trailers),
+finish on a clean tree. Every verb takes --main MAIN before or after the verb;
+with a request open, MAIN defaults to the request's. Exit status: 0 pass, 1 a
+failed check or open checklist, 2 unreadable input, missing evidence or a
+refused operation. State lives in the per-worktree git directory under lspec/
+(request.json, reconcile.json, receipt.json, a random secret). It is a
+cooperative local gate, not a signature: a shell can forge a token or bypass
+hooks, which is deliberate circumvention. Green means the checks ran and the
+questions were answered, not that the answers are right.""",
+
+"start": """\
+Opens a request and records its start commit; with a request already open it
+reports it (start commit, uncommitted work, recorded answers) instead of
+resetting it — if you did not open it in this conversation, ask the user. A
+request that opened with nothing owed and has committed, answered and edited
+nothing was an observation: the next start closes it and owes no finish. (An
+edit reverted before any commit looks the same; the witnessed event's watch
+entry is the record.) The output lists every collection file with its size,
+the sealed claims, the depends-on edges, and the obligations: structural
+failures, REVIEW OWED, watch entries (expired ones flagged), sealed corrections
+awaiting a later session's confirmation, missing or old hooks; plus one
+advisory line, edgeless claims that share a number-with-unit literal. A
+shallow clone gets one CLEARANCE UNKNOWN line naming the fetch, no rows. Then
+read every listed file whole, in sequential pages, before any commit.
+
+--resume COMMIT: a follow-up in the same conversation with the earlier full
+read still in context; COMMIT is the handoff commit finish printed. Shows the
+collection's changed lines since then (refuses if COMMIT is not an ancestor or
+more than %d lines changed). After compaction, do a full read.""",
+
+"reconcile": """\
+Evaluates the staged candidate (git's selected index) against HEAD. --subject
+and --body are kept until changed. Every run prints the checklist; when nothing
+is open it writes the receipt, bound to HEAD, the index, this file, the subject,
+the body and the answers. Any later change to the index means rerunning
+reconcile, which keeps every answer whose evidence is unchanged.
+
+Mechanical items clear only when the files (or the subject) change:
+  request      no request is open for MAIN (run start)
+  structure    a check failure in the staged collection
+  subject      no subject; a type outside main's data-commit-types; over %d
+               characters (review: excepted); clauses chained with ';'
+  review       debt outstanding at HEAD, ambiguous history, or a removed or
+               redirected dependency of a surviving claim, unless the subject is a
+               review: naming the claim or a seed: boundary for its file; a review:
+               whose changes touch a claim it does not name; a shallow clone (one
+               item, with the fetch to run)
+  empty (cell) an added or changed row has an empty or placeholder cell
+  provisional  a provisional value or bare status word with no link to what closes it
+  caveat       a [WATCH] marker not linking a watch- row; a watch- name no row carries
+  watch        a data-watch-until date has passed, or is malformed
+  baseline     HEAD or the baseline collection cannot be read
+
+Judgment items are answered one at a time: --next shows the first open item,
+its evidence, the question, a token for that item alone and one ready command
+per legal answer; --tick TOKEN --answer ANSWER answers it, with --ref ID or
+--reason "TEXT" where the answer needs one (reasons: three words or more, not
+another item's). Each answer is recorded as a Reconciled: trailer.
+  read         main, every edited collection file, and files holding targets of
+               their dependencies: read-whole
+  reseed       a seed: subject on a file that already has a seed: boundary (its
+               review baselines are discarded): reseed --reason
+  caveat       an inline "as of <date>": fix the file | quoted --reason |
+               historical --reason
+  placeholder  an id or text that looks like a placeholder: fix | literal --reason
+  empty        a block element with no text: fix | structural --reason
+  sealed       a data-sealed claim changed, deleted, renamed, unmarked or dropped:
+               decision --ref ROW (a dl- row added or changed here) |
+               correction --ref ROW --reason (the existing row the text restores) |
+               correction --reason (held until a later session confirms it)
+  confirm      a sealed correction a previous request left awaiting:
+               confirmed --reason (what you checked) | fix the file
+  removed      a decision row removed: replaced --ref ROW | retired --reason
+  cause        every fix: commit: established --ref WATCH --reason |
+               unverified --ref WATCH | recurrence --ref ROW (diagnostic register)
+  watched      every commit but review: and fix:: watched --ref WATCH | none
+  decided      every commit but review:: decided --ref ROW | none
+  derived      a watch entry, decision row or sealed claim changed: was the
+               bootloader re-derived whole? rederived | unaffected --reason
+  neighbor     each unchanged claim one hop from a changed one: holds (else fix the
+               file). On a dependent of a target this commit changed, holds is the
+               review: the trailer Reconciled: reviewed PATH#ID is the edge's
+               baseline, as a review: commit would be.""",
+
+"finish": """\
+Requires a clean working tree and no review owed; otherwise lists the
+leftovers or the owed edges (with the review command) and exits 1, leaving the
+request open — asking "should I commit?" is a pause, not a handoff, and debt
+handed off is inherited as a lie. Incomplete history (a shallow clone) is a
+condition, not debt. On a clean tree: the request's commits, the obligations,
+accounting questions to answer, the handoff commit and the start --resume
+command for a follow-up.""",
+
+"check": """\
+Validates structure: anchors, ids, counts, cell caps, row labels, markers.
+Notes an .html file under main's directory that the collection does not reach,
+unless it declares its own data-commit-types (another instance's main: independent
+by construction). --staged validates the index; --template skips the
+[ADAPT]/[PROJECT] gate; --diff BASE and --neighborhood TARGET print neighborhoods;
+--clean lists staged, unstaged and untracked files repo-wide (silent, 0 when none).
+Hooks do not clone; run check in CI.""",
+
+"review": """\
+Stages the named dependent claims' files and their targets', sets the subject
+`review: CLAIM, ...` and commits once the checklist is clear (otherwise prints
+it, exit 1; committing later works the same). Refuses (exit 2) a red tree,
+unrelated staged changes, a claim that owes nothing (naming the commit that
+already reviewed it), and a change in a named file to a claim it does not name.
+A target change committed through the gate is normally reviewed there by the
+dependent's holds answer; a review: commit is for a dependent that had to
+change, or debt from an edit that landed outside the protocol.""",
+
+"hook": """\
+Install all four from the repository root:
+  for h in pre-commit prepare-commit-msg commit-msg post-commit; do
+    ln -sf ../../hooks/$h .git/hooks/$h; done
+pre-commit refuses without a receipt matching HEAD, the index and the checker
+being committed (`git commit -a` and path-limited commits build a different
+index); prepare-commit-msg writes the reconciled subject, body and Reconciled:
+trailers, keeps other trailers you pass, and refuses --amend, -c and -C;
+commit-msg refuses a message whose subject or trailers differ from the receipt;
+post-commit lists files still uncommitted and prints nothing when there are
+none. Sources must keep executable modes. Upgrading an instance: copy lspec.py
+and hooks/, install, replace its tooling paragraph with "begin with python3
+lspec.py start MAIN and follow its output", commit under an ordinary type —
+never seed:, which discards the review history.""",
+
+"mv": """\
+Renames a file or an anchor and repairs references, a renamed row's label
+included; the rename and its repairs are staged, nothing committed. A renamed
+dependency target owes a review: its edge's baseline is unknown until a
+review: commit names the dependent claim.""",
+}
+
 
 def main(argv):
-    ap = argparse.ArgumentParser(prog="lspec", description=(__doc__ or "lspec — Living Specification maintenance").split("\n")[0])
+    raw = argparse.RawDescriptionHelpFormatter
+    ap = argparse.ArgumentParser(prog="lspec", formatter_class=raw, epilog=HELP["lspec"],
+                                 description=(__doc__ or "lspec — Living Specification maintenance").split("\n")[0])
     ap.add_argument("--main", help="main spec (default live-spec.html); accepted before or after the subcommand")
     sub = ap.add_subparsers(dest="verb")
     # --main on each subparser too (default=SUPPRESS so an absent one never
@@ -3820,11 +3963,13 @@ def main(argv):
     def add_main(sp):
         sp.add_argument("--main", default=argparse.SUPPRESS,
                         help="main spec (same as the global --main)")
-    s = sub.add_parser("start", help="open or report the request; list what to read")
+    s = sub.add_parser("start", help="open or report the request; list what to read",
+                       formatter_class=raw, epilog=HELP["start"] % RESUME_MAX_LINES)
     s.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(s)
     s.add_argument("--resume", metavar="COMMIT",
                    help="follow-up in the same conversation: the handoff commit finish printed")
-    g = sub.add_parser("reconcile", help="the commit gate: checklist, answers, receipt")
+    g = sub.add_parser("reconcile", help="the commit gate: checklist, answers, receipt",
+                       formatter_class=raw, epilog=HELP["reconcile"] % SUBJECT_MAX)
     g.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(g)
     g.add_argument("--subject", help="the commit subject: one typed transition line")
     g.add_argument("--body", help="commit body (review and seed assessments)")
@@ -3833,9 +3978,11 @@ def main(argv):
     g.add_argument("--answer", help="the answer (see --next for the legal answers)")
     g.add_argument("--ref", metavar="ID", help="the row or watch entry the answer names")
     g.add_argument("--reason", metavar="TEXT", help="the reason, quoted")
-    f = sub.add_parser("finish", help="hand off: clean tree, request summary, close the request")
+    f = sub.add_parser("finish", help="hand off: clean tree, request summary, close the request",
+                       formatter_class=raw, epilog=HELP["finish"])
     f.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(f)
-    c = sub.add_parser("check", help="validator: structure, neighborhoods, --clean")
+    c = sub.add_parser("check", help="validator: structure, neighborhoods, --clean",
+                       formatter_class=raw, epilog=HELP["check"])
     c.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(c)
     c.add_argument("--diff", metavar="BASE"); c.add_argument("--neighborhood", metavar="TARGET")
     c.add_argument("--template", action="store_true",
@@ -3847,16 +3994,21 @@ def main(argv):
                    help="list staged/unstaged/untracked files repo-wide; nonzero while any remain")
     c.add_argument("--finish-receipt", action="store_true", help=argparse.SUPPRESS)
     c.add_argument("--commit-msg", dest="commit_msg", help=argparse.SUPPRESS)
-    h = sub.add_parser("hook", help="run by the installed git hooks")
+    h = sub.add_parser("hook", help="run by the installed git hooks", formatter_class=raw,
+                       epilog=HELP["hook"])
     h.add_argument("which", choices=["pre-commit", "prepare-commit-msg", "commit-msg"])
     h.add_argument("msg", nargs="?"); h.add_argument("source", nargs="*")
-    sh = sub.add_parser("show"); sh.add_argument("target", nargs="?", help="path#id for an element; a bare path delivers the file whole; omit with --graph"); add_main(sh)
+    sh = sub.add_parser("show", help="print an element, a file whole, or --graph"); sh.add_argument("target", nargs="?", help="path#id for an element; a bare path delivers the file whole; omit with --graph"); add_main(sh)
     sh.add_argument("--text", action="store_true"); sh.add_argument("--graph", action="store_true")
-    n = sub.add_parser("neighbors"); n.add_argument("target"); add_main(n)
+    n = sub.add_parser("neighbors", help="one claim's neighborhood: edges, dependents, owed reviews")
+    n.add_argument("target"); add_main(n)
     n.add_argument("--whole-file", action="store_true", help="allow file-wide neighborhood output")
-    i = sub.add_parser("impact"); i.add_argument("base", nargs="?", default="HEAD"); add_main(i)
-    m = sub.add_parser("mv"); m.add_argument("old"); m.add_argument("new"); add_main(m)
-    r = sub.add_parser("review"); r.add_argument("claims", nargs="+", metavar="CLAIM",
+    i = sub.add_parser("impact", help="elements changed since BASE and the reviews they owe")
+    i.add_argument("base", nargs="?", default="HEAD"); add_main(i)
+    m = sub.add_parser("mv", help="rename a file or anchor, repairing references", formatter_class=raw,
+                       epilog=HELP["mv"]); m.add_argument("old"); m.add_argument("new"); add_main(m)
+    r = sub.add_parser("review", help="record a dependency review as a review: commit",
+                       formatter_class=raw, epilog=HELP["review"]); r.add_argument("claims", nargs="+", metavar="CLAIM",
                                                  help="the dependent claim(s) reviewed, path#id"); add_main(r)
     r.add_argument("-m", "--message")
     args = ap.parse_args(argv[1:])

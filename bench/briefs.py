@@ -216,14 +216,27 @@ def cmd_plan(subject, phase):
 
 
 def transcript_done(t):
-    """Mirror driver.sh tdone: last JSON line is not an error part."""
+    """The transcript's final part is text; trailing step-finish markers are
+    ignored. One half of done (dl-completion); driver.sh's tdone calls this."""
     try:
         lines = [l for l in open(t) if l.strip().startswith("{")]
-        if not lines:
-            return False
-        return json.loads(lines[-1]).get("type") != "error"
+        for l in reversed(lines):
+            j = json.loads(l)
+            if j.get("type") in ("step_finish", "step-finish"):
+                continue
+            return j.get("type") == "text"
+        return False
     except Exception:
         return False
+
+
+def session_done(ev, name):
+    """Done = final text part AND the runner's end-of-session HEAD stamp
+    (metrics/NAME.head, written by run_session.sh after opencode returned
+    and metrics were extracted). A killed session lacks one or the other."""
+    ev = Path(ev)
+    return ((ev / "metrics" / f"{name}.head").exists()
+            and transcript_done(ev / "transcripts" / f"{name}.jsonl"))
 
 
 def cmd_verify_route(ev, cell, subject):
@@ -246,8 +259,8 @@ def cmd_verify_route(ev, cell, subject):
             continue
         if sha(used.read_text()) != sha(body):
             bad.append(f"{name}: delivered bytes differ from registry")
-        if not transcript_done(ev / "transcripts" / f"{name}.jsonl"):
-            bad.append(f"{name}: transcript missing or incomplete")
+        if not session_done(ev, name):
+            bad.append(f"{name}: session incomplete (transcript or HEAD stamp)")
     if bad:
         for b in bad:
             print(f"ROUTE FAIL {b}", file=sys.stderr)
@@ -255,9 +268,52 @@ def cmd_verify_route(ev, cell, subject):
     print(f"{cell} route verified ({subject})")
 
 
+def cmd_skeleton(ev, out):
+    """The mechanical half of a run's sanitized summary (dl-reports): per
+    session, the cell, slot, completion, commits typed from the cell's log,
+    Reconciled: coverage and cost from metrics/; a criteria table left to
+    score; no paths, transcripts or keys. The scorer fills it in and tracks
+    it as bench/reports/run-N.html."""
+    import subprocess
+    ev = Path(ev)
+    rows = []
+    for m in sorted((ev / "metrics").glob("*.json")):
+        name = m.stem
+        cell, _, tag = name.rpartition("-")
+        data = json.loads(m.read_text())
+        cost = sum((s.get("cost") or 0) for s in data.get("sessions", []))
+        repo = ev / "cells" / cell
+        log = subprocess.run(["git", "-C", str(repo), "log", "--format=%s%x00%b", "--reverse"],
+                             capture_output=True, text=True).stdout if repo.exists() else ""
+        commits = [l for l in log.split("\n") if l and not l.startswith("baseline:")]
+        gated = sum("Reconciled: checklist" in c for c in commits)
+        rows.append((cell, tag, "done" if session_done(ev, name) else "INCOMPLETE",
+                     len(commits), gated, cost))
+    crit = [f"A{i}" for i in range(1, 11)] + [f"B{i}" for i in range(1, 5)] + [f"C{i}" for i in range(1, 13)]
+    cells = sorted({r[0] for r in rows})
+    h = ["<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">",
+         "<title>lspec bench — run summary</title>",
+         "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/water.css@2/out/light.css\">",
+         "</head><body><main><h1>lspec bench — run #N</h1>",
+         "<p>Basis: live-spec@[SHA]. Sanitized summary: scored criteria, counts and metrics; "
+         "raw evidence stays outside the repo (dl-reports).</p>",
+         "<h2>Sessions</h2><table><tr><th>Cell</th><th>Slot</th><th>Complete</th>"
+         "<th>Commits</th><th>Gated</th><th>Cost (USD)</th></tr>"]
+    h += [f"<tr><td>{c}</td><td>{t}</td><td>{d}</td><td>{n}</td><td>{g}</td><td>{cost:.3f}</td></tr>"
+          for c, t, d, n, g, cost in rows]
+    h += ["</table><h2>Criteria (MET / PARTIAL / FAILED, with quoted evidence)</h2><table><tr><th>#</th>"
+          + "".join(f"<th>{c}</th>" for c in cells) + "</tr>"]
+    h += ["<tr><td>" + k + "</td>" + "".join("<td>[score]</td>" for _ in cells) + "</tr>" for k in crit]
+    h += ["</table><h2>Gate measurement (D) and metrics (E)</h2><p>[D-series counts per cell; "
+          "E-series from the sessions table]</p><h2>Representative failures</h2><p>[two or three, "
+          "quoted from transcripts, no paths]</p></main></body></html>"]
+    Path(out).write_text("\n".join(h) + "\n")
+    print(f"skeleton: {len(rows)} sessions, {len(cells)} cells -> {out}")
+
+
 def main(argv):
     usage = ("usage: briefs.py emit-all DIR | plan SUBJECT PHASE | "
-             "verify-route EV CELL SUBJECT")
+             "verify-route EV CELL SUBJECT | done EV NAME | skeleton EV OUT")
     if len(argv) < 2:
         sys.exit(usage)
     cmd = argv[1]
@@ -267,6 +323,10 @@ def main(argv):
         cmd_plan(argv[2], argv[3])
     elif cmd == "verify-route" and len(argv) == 5:
         cmd_verify_route(argv[2], argv[3], argv[4])
+    elif cmd == "done" and len(argv) == 4:
+        sys.exit(0 if session_done(argv[2], argv[3]) else 1)
+    elif cmd == "skeleton" and len(argv) == 4:
+        cmd_skeleton(argv[2], argv[3])
     else:
         sys.exit(usage)
 

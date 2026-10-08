@@ -3,7 +3,7 @@
 # briefs by the registry, stages material, resumes, classifies completion.
 # Replaces the per-run hand-driven steps whose defects are recorded in the
 # bench spec (diag-staging, watch-prestaged, watch-partial, watch-rc).
-# Phases: setup | inst | deck | all (default). Resumable: a session whose
+# Phases: setup | inst | deck | all (default) | score (summary skeleton). Resumable: a session whose
 # transcript ends in a final text part and whose end-of-session HEAD stamp
 # exists is never re-run; an incomplete transcript is quarantined to
 # *.partial (dl-completion).
@@ -22,26 +22,9 @@ fi
 log() { echo "$1 $(date -Is)" >> "$EV/driver-progress.log"; }
 
 # session done (dl-completion; watch-rc: exit codes advisory; watch-tdone):
-# the transcript's final part is text (step-finish markers after it ignored)
-# AND the runner's end-of-session HEAD stamp exists, written by run_session.sh
-# after opencode returned and metrics were extracted. A killed session has
-# a transcript ending in tool_use or step_start, or no stamp.
-tdone() {
-  local t="$EV/transcripts/$1.jsonl" stamp="$EV/metrics/$1.head"
-  [ -f "$t" ] && [ -f "$stamp" ] || return 1
-  python3 - "$t" <<'PY'
-import json, sys
-lines = [l for l in open(sys.argv[1]) if l.strip().startswith('{')]
-last = None
-for l in reversed(lines):
-    try: j = json.loads(l)
-    except Exception: sys.exit(1)
-    if j.get("type") in ("step_finish", "step-finish"):
-        continue
-    last = j; break
-sys.exit(0 if last and last.get("type") == "text" else 1)
-PY
-}
+# one implementation, briefs.py session_done — final text part AND the
+# runner's end-of-session HEAD stamp (metrics/NAME.head from run_session.sh)
+tdone() { python3 "$HERE/briefs.py" done "$EV" "$1"; }
 
 sess() {  # sess CELL PROFILE BRIEF TAG
   local cell=$1 profile=$2 brief=$3 tag=$4
@@ -177,6 +160,7 @@ case "$PHASE" in
   inst)  inst ;;
   deck)  decks ;;
   all)   setup; inst; decks ;;
-  *) echo "usage: driver.sh [setup|inst|deck|all]" >&2; exit 2 ;;
+  score) python3 "$HERE/briefs.py" skeleton "$EV" "$EV/report-skeleton.html" ;;
+  *) echo "usage: driver.sh [setup|inst|deck|all|score]" >&2; exit 2 ;;
 esac
 log "$PHASE DONE"

@@ -2683,16 +2683,15 @@ class SealCorrection(unittest.TestCase):
 # ------------------------------------------------ bench driver (dl-completion)
 
 class BenchDriver(unittest.TestCase):
-    """driver.sh's tdone: a session is done when its transcript's final part
-    is text (trailing step-finish markers ignored) and the runner's
-    end-of-session HEAD stamp exists. Pure files, no git, no model."""
+    """bench/briefs.py session_done, which driver.sh's tdone and verify-route
+    both call: a session is done when its transcript's final part is text
+    (trailing step-finish markers ignored) and the runner's end-of-session
+    HEAD stamp exists. Pure files, no git, no model (dl-completion)."""
 
-    DRIVER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bench', 'driver.sh')
+    BRIEFS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bench', 'briefs.py')
 
-    def tdone(self, ev, name):
-        src = (f'EV={shlex.quote(ev)}\n' + re.search(r'^tdone\(\) \{.*?^\}', open(self.DRIVER).read(),
-                                                     re.S | re.M).group(0) + f'\ntdone {name}')
-        return subprocess.run(['bash', '-c', src], capture_output=True, text=True).returncode
+    def done(self, ev, name):
+        return subprocess.run([sys.executable, self.BRIEFS, 'done', ev, name]).returncode
 
     def case(self, ev, name, parts, stamp=True):
         os.makedirs(os.path.join(ev, 'transcripts'), exist_ok=True)
@@ -2706,16 +2705,33 @@ class BenchDriver(unittest.TestCase):
     def test_done_only_with_final_text_and_a_stamp(self):
         ev = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, ev, ignore_errors=True)
         self.case(ev, 'ok', ['step_start', 'tool_use', 'text', 'step_finish'])
-        self.assertEqual(self.tdone(ev, 'ok'), 0)
+        self.assertEqual(self.done(ev, 'ok'), 0)
         self.case(ev, 'cut-tool', ['step_start', 'text', 'tool_use'])
-        self.assertEqual(self.tdone(ev, 'cut-tool'), 1)
+        self.assertEqual(self.done(ev, 'cut-tool'), 1)
         self.case(ev, 'cut-step', ['text', 'step_finish', 'step_start'])
-        self.assertEqual(self.tdone(ev, 'cut-step'), 1)
+        self.assertEqual(self.done(ev, 'cut-step'), 1)
         self.case(ev, 'err', ['text', 'error'])
-        self.assertEqual(self.tdone(ev, 'err'), 1)
+        self.assertEqual(self.done(ev, 'err'), 1)
         self.case(ev, 'nostamp', ['text', 'step_finish'], stamp=False)
-        self.assertEqual(self.tdone(ev, 'nostamp'), 1)
-        self.assertEqual(self.tdone(ev, 'absent'), 1)
+        self.assertEqual(self.done(ev, 'nostamp'), 1)
+        self.assertEqual(self.done(ev, 'absent'), 1)
+
+    def test_driver_delegates_tdone_to_briefs(self):
+        driver = open(os.path.join(os.path.dirname(self.BRIEFS), 'driver.sh')).read()
+        self.assertRegex(driver, r'tdone\(\) \{ python3 "\$HERE/briefs.py" done')   # one implementation
+
+    def test_skeleton_lists_sessions_without_paths(self):
+        ev = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, ev, ignore_errors=True)
+        self.case(ev, 'ae86-1-O1', ['text'])
+        Path(ev, 'metrics', 'ae86-1-O1.json').write_text(json.dumps({'sessions': [{'cost': 0.0123}]}))
+        out = os.path.join(ev, 'skeleton.html')
+        r = subprocess.run([sys.executable, self.BRIEFS, 'skeleton', ev, out], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        html_ = open(out).read()
+        self.assertIn('<td>ae86-1</td><td>O1</td><td>done</td>', html_)
+        self.assertIn('0.012', html_)
+        self.assertIn('<td>C12</td>', html_)
+        self.assertNotIn(ev, html_)                              # no evidence paths leak
 
 
 # ------------------------------------------------ read probe (dl-wholeload)

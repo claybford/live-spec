@@ -2263,7 +2263,7 @@ def derived_item(ctx, head):
     col = ctx.staged
     if subject_type(ctx.subject, "review") is not None:
         return None
-    sources = []
+    sources, texts = [], []
     for (p, eid), kind in sorted(ctx.changed.items()):
         spec = col.specs.get(p) or ctx.head_specs.get(p)
         label = ("watch entry" if eid.startswith(WATCH_PREFIX) else
@@ -2271,6 +2271,8 @@ def derived_item(ctx, head):
                  "sealed claim" if spec is not None and eid in spec.sealed else None)
         if label and eid != "status":
             sources.append(f"{label} {addr(p, eid)} ({kind})")
+            staged = col.specs.get(p)
+            texts.append(staged.text(eid) or "" if staged and eid in staged.elems else "")
     if not sources:
         return None
     status = [(p, s) for p, s in col.specs.items() if "status" in s.elems]
@@ -2278,8 +2280,11 @@ def derived_item(ctx, head):
                    f"{' (' + ctx.changed[(p, 'status')] + ')' if (p, 'status') in ctx.changed else ''}: "
                    f"{shorten(s.text('status') or '', 300)}" for p, s in status) \
         or "\nbootloader: the top matter (no element with id status)"
+    # The answer is bound to what it reviewed: the sources' staged text and the
+    # status line itself, so a later edit to either reopens the question.
+    bound = texts + [s.text("status") or "" for _, s in status]
     return item("derived", "bootloader", "is the bootloader re-derived?", False,
-                evidence=digest(head, *sources),
+                evidence=digest(head, *sources, *bound),
                 excerpt="\n".join(sources) + view,
                 question="These sources of the bootloader moved. Was the status line re-derived "
                          "whole from the locked list, open table and top-risk source (answer "

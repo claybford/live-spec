@@ -17,7 +17,7 @@
 <header>
 <p><strong>Status:</strong> live-system, maintained (<a href="#dl-selfregime">dl-selfregime</a>) &mdash; this document is applied and follows its own pattern; its indexed external artifact is the file's git history (<a href="#dl-snapshots">dl-snapshots</a>).<br>
 <strong>Locked:</strong> the four cornerstones / nineteen principles (<a href="#cornerstones">Cornerstones I&ndash;IV</a>), the collection rule among them (<a href="#p19">P19</a>, <a href="#dl-unlock">dl-unlock</a>); the HTML + water.css <a href="#substrate">substrate</a>; the <a href="#regimes">two-regime framing</a>; git as the sole record (<a href="#dl-snapshots">dl-snapshots</a>); one typed edge (<a href="#dl-dependson">dl-dependson</a>).<br>
-<strong>Open:</strong> nothing recorded (<a href="#decisions">open items</a>); <code data-literal>[ADAPT]</code> slots resolve in the reader's instance, not here (<a href="#dl-noopen">dl-noopen</a>).<br>
+<strong>Open:</strong> one watch entry (<a href="#watch-derivedtick">watch-derivedtick</a>); <code data-literal>[ADAPT]</code> slots resolve in the reader's instance, not here (<a href="#dl-noopen">dl-noopen</a>).<br>
 <strong>Top risk:</strong> drift-by-accretion &mdash; this document out-growing its own compression rules (<a href="background.html#antipatterns">anti-patterns</a>, <a href="#dl-twohomes">dl-twohomes</a>).<br>
 <strong>Last full sweep:</strong> 2026-10-04 &mdash; derived from git's latest completed full sweep of this spec (<a href="#p14">P14</a>).<br>
 <strong>Read every line of this file before acting on it</strong> (<a href="#dl-wholeload">dl-wholeload</a>); the seed alone is not the spec. <strong>To start a new spec:</strong> copy the <a href="#seed">seed</a> verbatim. To audit one: run the <a href="#protocol">session protocol</a> &mdash; with the tool installed, <code>python3 lspec.py start</code> (<a href="#dl-cli">dl-cli</a>).</p>
@@ -408,7 +408,15 @@
 
 <hr>
 <h2 id="decisions">Decisions &amp; Scope Fence (this document)</h2>
-<p>This document's current state: its open items, the decision log and the scope fence. The document's past lives in git (<a href="#dl-snapshots">dl-snapshots</a>), not in any in-file section. <code data-literal>[ADAPT]</code> markers resolve in the reader's instance, not here. Open items &mdash; <a href="#v-sweepowed">sweep-owed entries</a>, <a href="#v-watch">watch entries</a>, other unknowns &mdash; live in an open-items table here that exists only while it has a row (<a href="#dl-noopen">dl-noopen</a>); none is open.</p>
+<p>This document's current state: its open items, the decision log and the scope fence. The document's past lives in git (<a href="#dl-snapshots">dl-snapshots</a>), not in any in-file section. <code data-literal>[ADAPT]</code> markers resolve in the reader's instance, not here. Open items &mdash; <a href="#v-sweepowed">sweep-owed entries</a>, <a href="#v-watch">watch entries</a>, other unknowns &mdash; live in an open-items table here that exists only while it has a row (<a href="#dl-noopen">dl-noopen</a>).</p>
+
+<h4>Open items</h4>
+<table>
+<thead><tr><th>Item</th><th>Gates</th><th>Resolves when</th></tr></thead>
+<tbody>
+<tr id="watch-derivedtick"><td><code>watch-derivedtick</code> 2026-10-08, outside critique: the bootloader gate item bound its answer to the changed sources' names, not their text or the status line's, so an edit after answering kept the tick. Diagnosis: the evidence digest omitted what the answer reviewed. Fix: the digest binds the sources' staged text and the status line</td><td>The <a href="#dl-reconcile">dl-reconcile</a> claim that ticks follow their evidence</td><td>A later session finds no gate item whose digest omits the text its question shows, or a recurrence promotes this to a diagnostic row</td></tr>
+</tbody>
+</table>
 
 <h4>Locked selections</h4>
 <table>

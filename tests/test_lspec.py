@@ -2701,6 +2701,25 @@ class DerivedView(unittest.TestCase):
         it = next(i for i in evaluate_in(d, 'docs: watch the fan')[1] if i['kind'] == 'derived')
         self.assertIn('(changed)', it['excerpt'])          # the status line's own change is shown
 
+    def test_answer_reopens_when_status_or_source_text_changes(self):
+        """The tick is bound to what it reviewed: a later edit to the status
+        line, or to a source row's text, reopens the question."""
+        d = self.fixture()
+        decision_row(d, 'dl-x'); sh('git', 'add', '-A', cwd=d)
+        rc, out = settle(d, 'docs: decide')
+        self.assertEqual(rc, 0, out)
+        edit(d, 'main.html', 'Open: none.', 'Open: one.'); sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'reconcile')
+        self.assertEqual(rc, 1); self.assertIn('derived 1', out)      # reopened by the status edit
+        answer_all(d); self.assertEqual(cli(d, 'reconcile')[0], 0)
+        edit(d, 'main.html', '<code>dl-x</code> s', '<code>dl-x</code> s2'); sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'reconcile')
+        self.assertEqual(rc, 1); self.assertIn('derived 1', out)      # reopened by the row edit
+        answer_all(d); self.assertEqual(cli(d, 'reconcile')[0], 0)
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'reconcile')
+        self.assertNotIn('derived 1', out)                             # an unrelated edit keeps it
+
     def test_not_asked_without_a_source_change_or_on_a_review(self):
         d = self.fixture()
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)

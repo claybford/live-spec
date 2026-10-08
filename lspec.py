@@ -3989,7 +3989,14 @@ unrelated staged changes, a claim that owes nothing (naming the commit that
 already reviewed it), and a change in a named file to a claim it does not name.
 A target change committed through the gate is normally reviewed there by the
 dependent's holds answer; a review: commit is for a dependent that had to
-change, or debt from an edit that landed outside the protocol.""",
+change, or debt from an edit that landed outside the protocol.
+
+What is owed: the target's committed text is compared with the latest review
+naming the dependent claim, or with the edge's introduction if unreviewed; a
+changed or missing target owes review. The review names claims as
+comma-separated path#id. If history is unavailable the debt is UNKNOWN, never
+cleared: fetch it (start names the command) or re-review against committed
+state with this verb.""",
 
 "hook": """\
 Install all four from the repository root:

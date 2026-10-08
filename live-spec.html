@@ -121,17 +121,13 @@
   a heading covers only its title. Plain links are navigation. Example:
   &lt;code&gt;&amp;lt;p id="claim"&amp;gt;Cooling assumes &amp;lt;a rel="depends-on"
   href="#rating"&amp;gt;the rating&amp;lt;/a&amp;gt;.&amp;lt;/p&amp;gt;&lt;/code&gt;
-  Compare the target's committed text with the latest review naming the dependent
-  claim, or the edge's introduction if unreviewed. A changed or missing target
-  owes review. Confirm or fix the dependent, then record a review: commit naming
-  comma-separated dependent path#id claims, empty if no edit was needed; a
-  dependent confirmed unchanged by the commit that changes its target is reviewed
-  there, in a Reconciled: reviewed path#id trailer.
-  Removing or redirecting a dependency of a surviving claim also takes a
-  review: commit, including when its target is deleted together with the edge.
-  Deleting the dependent claim retires its obligations without review.
-  Uncommitted edits do not clear debt. If history is unavailable, fetch it or
-  explicitly re-review against committed state. Keep review history in git.&lt;/p&gt;
+  A changed or missing target owes review: confirm or fix the dependent and
+  record it, in a review: commit naming the claim, or in the target's own
+  commit when its gate confirms the dependent unchanged. Removing or
+  redirecting a dependency of a surviving claim takes a review too, including
+  when the target is deleted with the edge; deleting the dependent claim
+  retires its obligations. Uncommitted edits clear nothing. Review history
+  lives in git.&lt;/p&gt;
 
 &lt;p&gt;Tooling [ADAPT: lspec]: begin with &lt;code&gt;python3 lspec.py start MAIN&lt;/code&gt;
   and follow its output. Without the tool, perform its checks by hand.&lt;/p&gt;

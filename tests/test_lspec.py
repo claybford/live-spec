@@ -1400,8 +1400,8 @@ class RevisionRegressions(unittest.TestCase):
         seed = seed.replace('[PROJECT]', project)
         for marker, fill in [
                 ('[ADAPT — the one stance governing every edit]', 'fix the cause, not the symptom'),
-                ('[ADAPT — confirmed(source) / provisional(source) / locked / open / WATCH]',
-                 'confirmed(source) / provisional(source) / locked / open / WATCH'),
+                ('[ADAPT — evidence confirmed(source) / provisional(source);\n  commitment locked / open; review WATCH]',
+                 'evidence confirmed(source) / provisional(source); commitment locked / open; review WATCH'),
                 ('[ADAPT: 40]', '40'),
                 ('[ADAPT: lspec]', 'lspec')]:
             seed = seed.replace(marker, fill)

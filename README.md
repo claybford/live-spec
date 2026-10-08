@@ -5,6 +5,8 @@ chat sessions. The document — not the conversation — holds the whole state o
 Each session loads it, makes one move, and writes it back.
 
 Treat **the document as the program's state and the AI as a stateless function over it.**
+The document is the semantic state; git and the tool's metadata are transaction state,
+authoritative about nothing in the design (`dl-state`).
 
 ## The spec: `live-spec.html`
 
@@ -42,7 +44,11 @@ entry point, and a supporting spec is loaded only when work crosses into it (P19
 `lspec.py` is optional maintenance automation (stdlib only), not part of the state:
 the spec reads without it, and the session protocol says what to do by hand. This
 section is its reference; the spec says *when* each step happens, the tool's own
-output says *how*.
+output says *how*. "Optional" means not part of the state, not small. That most
+recent commits are `tool:` while the spec is the slowest-growing file is the
+methodology stabilizing, on one condition: every rule the gate enforces is stated in
+the document, so a tool change either enforces a documented rule better or is drift,
+and an audit removes it.
 
 Three verbs mark the three moments of a request:
 
@@ -50,7 +56,7 @@ Three verbs mark the three moments of a request:
 |---|---|---|
 | Load | `start` | Opens (or reports) the request and lists what to read. It does not print the spec. |
 | Each commit | `reconcile` | Runs every check against the staged candidate and works through a checklist; a cleared checklist issues the receipt the hooks require. |
-| Hand off | `finish` | Requires a clean tree, summarizes the request and closes it. |
+| Hand off | `finish` | Requires a clean tree with no review owed, summarizes the request and closes it. Not owed by a request that opened clean and committed nothing: a read. |
 
 The other verbs keep their meanings: `check` (validator), `review` (record a
 dependency review), `show`, `neighbors`, `impact` (inspection) and `mv`
@@ -78,14 +84,36 @@ Git metadata. With a request already open (after context compaction, or in a new
 conversation) it reports that request instead of resetting it: its start commit,
 any uncommitted work and how many answers are recorded. Opening a request keeps
 a subject and body already set with `reconcile`, and drops recorded answers. If the request was not
-opened in this conversation, ask the user before continuing it.
+opened in this conversation, ask the user before continuing it. One request closes
+itself: a request that opened with nothing owed and has since committed nothing,
+recorded no answer and left no edit was an observation — a question answered from
+the spec — and the next `start` closes it and says so, because nothing of it reads
+as spec or belongs to another session. Such a request owes no `finish`. The tool
+cannot tell a read from an edit reverted before any commit: a session that undoes
+an out-of-band change and leaves nothing behind looks like an observation and
+closes the same way, and the incident is invisible in history (bench #4 saw two).
+The methodology's answer is the witnessed event — file the watch entry, which is a
+commit — and that is a rubric criterion, not something the gate can see.
 
 The output lists every file in the collection with its line count, main's word
 count and its change since the last `audit:` commit and since its first commit
 (size is shown, not capped; the second delta is the one an audit cannot zero),
 the sealed claims, and the open obligations: structural failures, `REVIEW OWED`,
 every watch entry with its date, expired ones flagged, and gate hooks that are
-missing or from an older lspec. `finish` shows the same obligations.
+missing or from an older lspec. `finish` shows the same obligations. One line is
+advisory, never an obligation: claims with no `depends-on` edge in or out that
+state the same number-with-unit literal as another such claim (`'88 mm':
+a.html#bore, b.html#piston`). One-hop reconciliation catches only edges that
+exist; a shared value is the cheapest surface an unencoded dependency leaves, so
+the pair is a candidate for an edge, or a copy to collapse (P1).
+
+In a shallow clone (`--depth 1`) review clearance cannot be established, and the
+tool says so once: one `CLEARANCE UNKNOWN` line naming the fetch command, with no
+obligation rows beneath it — nothing is owed and nothing is cleared until the
+history is complete, and `reconcile` holds commits on that one condition rather
+than on each edge. Before the first commit, nothing is owed yet. An edge the
+available history is ambiguous about (a target renamed under identical text) keeps
+its `[unknown]` row, because the remedy there is a `review:` commit, not a fetch.
 
 A watch entry is a table row whose id starts with `watch-`. An optional
 `data-watch-until="YYYY-MM-DD"` on it dates the closing condition; `check` fails the
@@ -137,12 +165,15 @@ never mistaken for one.
 | `caveat` | an added or changed claim with an inline `as of <date>` | fix the file · `quoted --reason` (a source's words in provenance or a quotation) · `historical --reason` (the date is part of what the claim states) |
 | `placeholder` | an added or changed claim whose id or text looks like a placeholder | fix the file · `literal --reason` (a real value that happens to match) |
 | `empty` | an added or changed block element with no text | fix the file · `structural --reason` (an anchor, a table the seed ships without rows) |
-| `sealed` | each `data-sealed` claim the commit changes, deletes, renames, unmarks or drops from the collection | `decision --ref ROW` (a `dl-` row added or changed in this commit) · `correction --reason` |
+| `sealed` | each `data-sealed` claim the commit changes, deletes, renames, unmarks or drops from the collection | `decision --ref ROW` (a `dl-` row added or changed in this commit) · `correction --ref ROW --reason` (the existing decision row the corrected text restores) · `correction --reason` (held: `SEALED CORRECTION AWAITING CONFIRMATION` until a later session confirms it) |
+| `reseed` | a `seed:` subject on a collection file that already has a `seed:` boundary — the re-seed discards that file's review baselines, so it is asked, never a first seed | `reseed --reason` (a deliberate re-instantiation; a change to a live instance takes an ordinary type) |
+| `confirm` | each sealed correction a previous session recorded without a decision row, not yet confirmed, decided or re-corrected with a row; asked of every commit of a later request, never of the correcting one | `confirmed --reason` (what was checked) · fix the file (a sealed change of its own) |
 | `removed` | each decision row the commit removes | `replaced --ref ROW` (added or changed in this commit) · `retired --reason` |
 | `cause` | every `fix:` commit | `established --ref WATCH --reason` · `unverified --ref WATCH` · `recurrence --ref ROW` |
 | `watched` | every commit except a `review:` or a `fix:` (whose cause item asks it): did the work surface anything to watch? | `watched --ref WATCH` (a `watch-` row added or changed in this commit) · `none` |
 | `decided` | every commit except a `review:`: did the work decide anything, in the files or in conversation? | `decided --ref ROW` (a `dl-` row added or changed in this commit) · `none` |
-| `neighbor` | each unchanged claim one hop from a changed claim (cites it or is cited by it), and each claim linked from changed text outside every id'd element | `holds` (if not, fix it in the files) |
+| `derived` | every commit but a `review:` that adds, changes or removes a watch entry, a decision row or a sealed claim — the sources the bootloader is derived from (P14) | `rederived` (the status line regenerated whole, in the files) · `unaffected --reason` |
+| `neighbor` | each unchanged claim one hop from a changed claim (cites it or is cited by it), and each claim linked from changed text outside every id'd element | `holds` (if not, fix it in the files). On a claim that `depends-on` a target this commit changes, `holds` is the review: the commit carries `Reconciled: reviewed PATH#ID`, and that trailer is the edge's baseline, as a `review:` commit would be |
 
 The first three are waivers: a check that infers a defect from a surface form
 can be wrong about the claim, so it takes an answer, recorded as
@@ -178,7 +209,14 @@ and 1 while anything is open.
 
 The commit carries `Reconciled:` trailers: a checklist digest with the number of
 answers, plus one line per decision, correction, replacement, retirement, cause,
-waiver, and what the commit watched and decided (or that it did neither).
+waiver, each dependent a `holds` answer reviewed, each sealed correction
+confirmed, and what the commit watched and decided (or that it did neither). A
+sealed correction without `--ref` is a seal changed unopposed, which is the harm
+a seal exists to prevent; the second session is the cheapest opposition, so the
+correction is recorded as awaiting and `start`, `finish` and the next request's
+`reconcile` carry it until that session confirms it or fixes the claim. A
+confirming trailer in the correcting commit itself is refused with any other
+trailer the receipt did not issue.
 
 ### Hooks
 
@@ -212,11 +250,14 @@ clone; run `python3 lspec.py check` in CI.
 
 ### `finish`
 
-`finish` requires a clean working tree; otherwise it lists the leftovers and exits
+`finish` requires a clean working tree and no review owed; otherwise it lists the
+leftovers or the owed edges (with the `review` command that clears them) and exits
 1, leaving the request open. Asking the user "should I commit this?" is a pause
-partway through the request, not a handoff. On a clean tree it lists the request's
-commits since its start commit, the open obligations and specific accounting
-questions, closes the request and prints the handoff commit and the
+partway through the request, not a handoff; and review debt handed off is a lie
+the next session inherits, so it is cleared here. Incomplete history (a shallow
+clone) is a condition, not debt, and does not block. On a clean tree it lists the
+request's commits since its start commit, the open obligations and specific
+accounting questions, closes the request and prints the handoff commit and the
 `start --resume` command for a follow-up.
 
 ### Validation and inspection
@@ -224,7 +265,10 @@ questions, closes the request and prints the handoff commit and the
 - `check [MAIN]` validates structure in the working tree: anchors, ids, counts,
   cell caps, and that every `dl-` and `watch-` row opens its first cell with its
   own id as a `<code>` label (the row's visible name; not counted against the
-  cap). `--staged` validates the
+  cap). It notes an `.html` file under main's directory that the collection does
+  not reach, unless that file declares its own `data-commit-types`: only a main
+  may, so the file and what its split rows reach are another instance, independent
+  by construction (`bench/bench-spec.html` here). `--staged` validates the
   index; `--template` skips the unresolved `[ADAPT]`/`[PROJECT]` gate;
   `--diff BASE` and `--neighborhood TARGET` print neighborhoods; `--clean` lists
   staged, unstaged and untracked files repo-wide (silent and 0 when there are none).
@@ -233,7 +277,11 @@ questions, closes the request and prints the handoff commit and the
   is clear; otherwise it prints the checklist (exit 1) and committing it later
   works the same. It refuses (exit 2) when those files hold a change to any
   claim it does not name: a review commit carries only the claims it names, so
-  other work is committed first under its own type.
+  other work is committed first under its own type. It also refuses when nothing
+  is owed, naming the commit that already reviewed the claim — a target change
+  committed through the gate is normally reviewed there by the dependent's
+  `holds` answer, so a `review:` commit is for a dependent that had to change, or
+  debt from an edit that landed outside the protocol.
 - `show FILE_OR_CLAIM`, `show --graph`, `neighbors CLAIM`, `impact [BASE]` inspect
   the collection; `mv OLD NEW` renames a file or anchor and repairs references,
   a renamed row's label included.
@@ -255,6 +303,11 @@ This is a cooperative local gate, not a signature. An agent with a shell can for
 a token or bypass hooks; that is deliberate circumvention, outside the gate. Green
 means the checks ran and the questions were answered, not that the answers are
 right. `git commit --amend` is refused by the hooks; merges are not reconciled.
+Two clones need no coordination beyond git: review obligations are derived from
+the merged history, so a review recorded in either clone clears the edge once
+merged, both clones reviewing the same edge merge clean, and `lspec/` metadata
+copied from one clone into another changes no report there (its receipt predates
+that HEAD, its request is reported as open, never trusted).
 
 ### Upgrading an instance
 
@@ -276,11 +329,23 @@ ignored, and `review:` history keeps its meaning. Old hooks that still call
 
 ## Working on this repo
 
-An agent session starts with AGENTS.md. Every session-event is a commit; every full
+This repo lives to serve the development of `live-spec.html`. Only here does a
+session have the authority to move a little outside the premise and rules of
+`live-spec.html` with its proposed edits. Don't fall into its depths when working
+on it — that's how you eff it up. Stay grounded, stay cool. It's dangerous to go
+alone; take this. :)
+
+An agent session starts with AGENTS.md, which holds one entry per main and
+nothing else (the spec is the state). Every session-event is a commit; every full
 sweep takes an `audit:` commit; a recorded review is a `review:` commit naming the
 dependent claims it clears. Commit types come from `data-commit-types` in
 live-spec.html; never use `seed:` here. History lives in git, never in the
-document body. Tests: `python3 -m unittest tests.test_lspec`.
+document body. Tests run in tiers: `python3 tests/run.py --tier fast` (no git;
+seconds) before every commit, `--tier git` (scratch repositories) before a push,
+`--tier acceptance` (real hooks and commits) nightly, or `--tier all`; the runner
+shards classes across CPUs. Plain `python3 -m unittest tests.test_lspec` honors
+`LSPEC_TIER` the same way. The fast tier is derived, not marked: a test that
+creates a repository is skipped there, so a fast test cannot drift into git.
 
 The evaluation harness lives in `bench/` and is governed by its own living
 specification, `bench/bench-spec.html` — an independent instance of the pattern, not a

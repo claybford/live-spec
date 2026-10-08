@@ -11,13 +11,23 @@ Reporting review debt does not itself fail start, finish, impact, or
 neighbors. Mechanical checks cannot establish semantic correctness or review
 adequacy; reconcile records that an answer was given, not that it was right.
 
+One file by design: the hooks run the staged copy and instances carry their
+own. Inside, the sections are layers — parsing (Spec), git history (trees,
+review events, baselines), collection (the split-row graph), checks
+(structure), obligations (review debt), the commit gate (reconcile: one
+function per question), the cli surface, the verbs and main — and no
+function runs past a hundred lines, so a gate's stage can be tested alone.
+
 Implementation details beyond the seed's operating rules:
 
 * Review baselines belong to typed edges: dependent id plus target address.
   Unrelated occurrences of an href do not reset introduction; upgrading a
   plain link to depends-on introduces the edge at that commit. Comparison
   uses normalized target text in committed trees: block and cell boundaries
-  separate words, inline tags join them.
+  separate words, inline tags join them. A review event is a `review:`
+  subject naming the claim or a `Reconciled: reviewed PATH#ID` trailer, which
+  the gate writes when a dependent's neighbor item is answered `holds` at the
+  commit changing its target.
 
 * The lineage floor is the newest commit whose subject types seed: and
   touches the dependent file. Edges present at that floor start there.
@@ -42,9 +52,14 @@ Implementation details beyond the seed's operating rules:
   forge one, which is deliberate circumvention, like bypassing hooks.
 
 * A sealed change is a decision change (a dl- row added, or its cells
-  changed, in the same commit) or a correction (a stated reason, carried in a
-  Reconciled: trailer). data-changes attributes from older instances are
-  reported as retired and otherwise ignored.
+  changed, in the same commit) or a correction with a stated reason, carried
+  in a Reconciled: trailer: `correction NAME per ROW` names the existing
+  decision row the text restores; `correction NAME (awaiting confirmation)`
+  is pending until a later request's commit carries `confirmed NAME`, a
+  `decision NAME by ROW`, or a correction per a row. Trailers of the old form
+  (`correction NAME — reason`) predate the rule and are neither. data-changes
+  attributes from older instances are reported as retired and otherwise
+  ignored.
 
 * Count checks recognize digits and number words, but matching cardinality
   cannot establish item identity or completeness. Change reports also detect
@@ -262,11 +277,22 @@ def git(*args, check=True, cwd=None):
     return r.stdout
 
 
+_ROOTS = {}   # cwd -> repo root; a directory inside a repository stays inside it
+
+
 def repo_root():
-    try:
-        return git("rev-parse", "--show-toplevel").strip()
-    except (RuntimeError, OSError):
-        return None
+    """The checkout's top level for the current directory, or None. Memoized
+    per cwd for found roots only (a later `git init` is still seen): nearly
+    every git-reading helper asks, and one command asked eighty times."""
+    cwd = os.getcwd()
+    root = _ROOTS.get(cwd)
+    if root is None:
+        try:
+            root = git("rev-parse", "--show-toplevel").strip()
+        except (RuntimeError, OSError):
+            return None
+        _ROOTS[cwd] = root
+    return root
 
 
 def posix(path):
@@ -300,8 +326,75 @@ def subject_type(subject, type_):
     return subject[len(prefix):].strip() if subject.startswith(prefix) else None
 
 
+REVIEWED_RE = re.compile(r"^Reconciled: reviewed (.+?)\s*$", re.M)
+
+
+def reviewed_claims(subject, body=""):
+    """-> {name: how} of dependent claims a commit records as reviewed: a
+    `review:` subject naming them ("review"), or `Reconciled: reviewed NAME`
+    trailers written when the gate's neighbor check confirmed a dependent
+    unchanged at the commit that changed its target ("reviewed")."""
+    out = {}
+    for m in REVIEWED_RE.finditer(body or ""):
+        for n in m.group(1).split(","):
+            if n.strip():
+                out[n.strip()] = "reviewed"
+    claims = subject_type(subject, "review")
+    if claims is not None:
+        for n in claims.split(","):
+            if n.strip():
+                out[n.strip()] = "review"
+    return out
+
+
+def pending_corrections(root, before=None):
+    """[(name, sha, reason)] of sealed corrections recorded without a decision
+    row and not yet confirmed, superseded or decided by a later commit. With
+    BEFORE (a commit), only corrections at or before it count: a session does
+    not confirm its own correction."""
+    settled, out = set(), []
+    for rec in git("log", "--format=%H%x1f%b%x1e", cwd=root).split("\x1e"):
+        if not rec.strip():
+            continue
+        sha, _, body = rec.strip("\n").partition("\x1f")
+        sha = sha.strip()
+        for m in CONFIRMED_RE.finditer(body):
+            settled.add(m.group(1) or m.group(2))
+        for m in CORRECTION_RE.finditer(body):
+            name, row, reason = m.groups()
+            if row:
+                settled.add(name)
+            elif name not in settled:
+                settled.add(name)
+                if before is None or sha == before or subprocess.run(
+                        ["git", "merge-base", "--is-ancestor", sha, before],
+                        cwd=root, check=False, capture_output=True).returncode == 0:
+                    out.append((name, sha, reason))
+    return out
+
+
+def review_log(root):
+    """[(sha, {name: how})] for every commit recording a review, newest first."""
+    out = []
+    for rec in git("log", "--format=%H%x1f%s%x1f%b%x1e", cwd=root).split("\x1e"):
+        if not rec.strip():
+            continue
+        sha, _, rest = rec.strip("\n").partition("\x1f")
+        subject, _, body = rest.partition("\x1f")
+        named = reviewed_claims(subject, body)
+        if named:
+            out.append((sha.strip(), named))
+    return out
+
+
 class HistoryUnavailable(RuntimeError):
     """Required git evidence could not be read; never equivalent to absence."""
+
+
+class HistoryIncomplete(HistoryUnavailable):
+    """History is truncated (a shallow clone): fetching completes it. Reported
+    once, as a condition with its fetch command, never as per-edge
+    obligations — rows a cold agent would "clear" with spurious reviews."""
 
 
 def file_at(commit, path):
@@ -417,113 +510,159 @@ def uncommitted(rels):
     return line, paths
 
 
+def shallow_boundaries(root):
+    """The shallow-clone boundary commits (grafted roots), empty when complete."""
+    if git("rev-parse", "--is-shallow-repository", cwd=root).strip() != "true":
+        return set()
+    shallow_path = git("rev-parse", "--git-path", "shallow", cwd=root).strip()
+    if not os.path.isabs(shallow_path):
+        shallow_path = os.path.join(root, shallow_path)
+    with open(shallow_path, encoding="ascii") as fh:
+        return set(fh.read().split())
+
+
+def lineage_floor(root, a_path):
+    """The newest commit whose SUBJECT types `seed:` and touches A_PATH — a
+    deliberate lineage boundary, so a re-instantiation under a reused filename
+    inherits neither a prior lineage's introductions nor its reviews. A body
+    line can never type a commit. None when the lineage has no seed."""
+    for line in git("log", "--format=%H%x00%s", "--", repo_rel(a_path), cwd=root).splitlines():
+        sha, _, subject = line.partition("\x00")
+        if subject_type(subject, "seed") is not None:
+            return sha
+    return None
+
+
+def recorded_review(root, name, floor, boundaries):
+    """-> (sha, how) of the newest review event naming NAME in this lineage,
+    or None. Raises HistoryIncomplete when a shallow boundary after the
+    candidate could hide a newer review."""
+    for sha, named in review_log(root):
+        if name not in named:
+            continue
+        if floor and sha != floor and subprocess.run(
+                ["git", "merge-base", "--is-ancestor", sha, floor],
+                cwd=root, check=False).returncode == 0:
+            continue              # a prior lineage's review: not a baseline
+        after = set(git("rev-list", "HEAD", "^" + sha, cwd=root).split())
+        if boundaries & after:
+            raise HistoryIncomplete("shallow clone")
+        return sha, named[name]
+    return None
+
+
+def has_edge(spec, src, hrefs):
+    """The edge itself: element SRC carrying a depends-on link to one of HREFS."""
+    return spec is not None and any(
+        l["rel"] == "depends-on" and l["src"] == src and l["href"] in hrefs for l in spec.links)
+
+
+def target_text_at(commit, a_path, link_href):
+    """Normalized target text at COMMIT, None when the target is absent."""
+    tp, fr = resolve(a_path, link_href)
+    if fr is None:
+        return None
+    tspec = file_at(commit, tp or a_path)
+    return tspec.text(fr) if tspec is not None and fr in tspec.elems else None
+
+
+def edge_introduction(root, a_path, src, href, floor):
+    """The commit that introduced the edge SRC -> HREF in A_PATH, searching
+    forward from the lineage floor. Introduction is keyed to the edge itself
+    — the dependent claim's id plus its typed target — so an unrelated link
+    sharing the href cannot move another claim's baseline. A re-point to a
+    target with different text is a birth. The same text under a new address
+    (a rename repaired in the same commit, or a switch between twins) is not
+    followed: it raises UNKNOWN, and a review: commit records the baseline.
+    108 bench sessions never exercised the tracing this replaced."""
+    floor_spec = file_at(floor, a_path) if floor else None
+    if has_edge(floor_spec, src, {href}):
+        return floor                         # present at the seed boundary: starts there
+    args = ["log", "--format=%H", "--reverse"]
+    if floor:
+        args.append(f"{floor}..HEAD")
+    args += ["--", repo_rel(a_path)]
+    for sha in git(*args, cwd=root).split():
+        if not has_edge(file_at(sha, a_path), src, {href}):
+            continue
+        # Root is parent metadata: zero parents. A declared but unreadable
+        # parent raises — unavailable evidence, never a root.
+        parents = git("rev-list", "--parents", "-n", "1", sha, cwd=root).split()[1:]
+        parent = file_at(parents[0], a_path) if parents else None
+        pedges = [l for l in (parent.links if parent else [])
+                  if l["rel"] == "depends-on" and l["src"] == src]
+        if any(l["href"] == href for l in pedges):
+            continue                         # the edge already existed
+        new_text = target_text_at(sha, a_path, href)
+        still = {l["href"] for l in file_at(sha, a_path).links
+                 if l["rel"] == "depends-on" and l["src"] == src}
+        for l in pedges:
+            if l["href"] in still:
+                continue                     # that edge survives: this one is a birth
+            if new_text is not None and target_text_at(parents[0], a_path, l["href"]) == new_text:
+                raise HistoryUnavailable(
+                    f"{l['href']} -> {href} at {sha[:7]}: the target's address changed "
+                    "under identical text (rename or re-point); record a review")
+        return sha
+    raise HistoryUnavailable("committed link has no established introduction baseline")
+
+
 def review_baseline(a_path, src, href):
-    """Return (commit, provenance); raise if history cannot establish a baseline."""
+    """-> (commit, provenance) the edge SRC -> HREF in A_PATH is compared
+    against: the newest review event naming the claim ("review" or
+    "reviewed"), else the edge's introduction ("introduced"); (None,
+    "uncommitted") for an edge HEAD does not carry. Raises HistoryUnavailable
+    (HistoryIncomplete for a shallow clone) when history cannot establish it."""
     root = repo_root()
     if root is None:
         raise HistoryUnavailable("not a git checkout")
     name = f"{repo_rel(a_path)}#{src}"
     try:
-        shallow = git("rev-parse", "--is-shallow-repository", cwd=root).strip() == "true"
-        boundaries = set()
-        if shallow:
-            shallow_path = git("rev-parse", "--git-path", "shallow", cwd=root).strip()
-            if not os.path.isabs(shallow_path):
-                shallow_path = os.path.join(root, shallow_path)
-            with open(shallow_path, encoding="ascii") as fh:
-                boundaries = set(fh.read().split())
-        # Floor the whole lineage at the newest commit whose SUBJECT types
-        # `seed:` for this file — a deliberate lineage boundary — so a
-        # re-instantiation under a reused filename inherits neither a prior
-        # lineage's introductions nor its reviews. A body line can never type
-        # a commit.
-        floor = None
-        for line in git("log", "--format=%H%x00%s", "--",
-                        repo_rel(a_path), cwd=root).splitlines():
-            sha, _, subject = line.partition("\x00")
-            if subject_type(subject, "seed") is not None:
-                floor = sha
-                break
-        out = git("log", "--format=%H%x00%s", cwd=root)
-        for line in out.splitlines():
-            sha, _, subject = line.partition("\x00")
-            claims = subject_type(subject, "review")
-            if claims is None:
-                continue
-            named = [n.strip() for n in claims.split(",")]
-            if name not in named:
-                continue
-            if floor and sha != floor:
-                prior = subprocess.run(["git", "merge-base", "--is-ancestor", sha, floor],
-                                       cwd=root, check=False).returncode == 0
-                if prior:
-                    continue          # a prior lineage's review: not a baseline
-            # Missing ancestry after this review could hide a newer review.
-            after = set(git("rev-list", "HEAD", "^" + sha, cwd=root).split())
-            if boundaries & after:
-                raise HistoryUnavailable("history after candidate review is incomplete")
-            return sha, "review"
-        def _has_edge(spec, hrefs):
-            """The edge itself: element SRC carrying a depends-on link to one of HREFS."""
-            return spec is not None and any(
-                l["rel"] == "depends-on" and l["src"] == src and l["href"] in hrefs
-                for l in spec.links)
-
-        def _target_text(commit, link_href):
-            """Normalized target text at COMMIT, None when the target is absent."""
-            tp, fr = resolve(a_path, link_href)
-            if fr is None:
-                return None
-            tspec = file_at(commit, tp or a_path)
-            return tspec.text(fr) if tspec is not None and fr in tspec.elems else None
-
-        current = file_at("HEAD", a_path)
-        if not _has_edge(current, {href}):
+        boundaries = shallow_boundaries(root)
+        floor = lineage_floor(root, a_path)
+        reviewed = recorded_review(root, name, floor, boundaries)
+        if reviewed:
+            return reviewed
+        if not has_edge(file_at("HEAD", a_path), src, {href}):
             return None, "uncommitted"
-        if shallow:
-            raise HistoryUnavailable("shallow history cannot establish link introduction")
-        # Seed boundary first: an edge already present at the floor starts there.
-        floor_spec = file_at(floor, a_path) if floor else None
-        if floor_spec is not None and _has_edge(floor_spec, {href}):
-            return floor, "introduced"
-        # Introduction is keyed to the edge itself — the dependent claim's id
-        # plus its typed target — so an unrelated link sharing the href cannot
-        # move another claim's baseline. A re-point to a target with different
-        # text is a birth. The same text under a new address (a rename repaired
-        # in the same commit, or a switch between twins) is not followed: it
-        # raises UNKNOWN, and a review: commit records the baseline. 108 bench
-        # sessions never exercised the tracing this replaced.
-        args = ["log", "--format=%H", "--reverse"]
-        if floor:
-            args.append(f"{floor}..HEAD")
-        args += ["--", repo_rel(a_path)]
-        for sha in git(*args, cwd=root).split():
-            if not _has_edge(file_at(sha, a_path), {href}):
-                continue
-            # Root is parent metadata: zero parents. A declared but
-            # unreadable parent raises — unavailable evidence, never a root.
-            parents = git("rev-list", "--parents", "-n", "1", sha, cwd=root).split()[1:]
-            parent = file_at(parents[0], a_path) if parents else None
-            pedges = [l for l in (parent.links if parent else [])
-                      if l["rel"] == "depends-on" and l["src"] == src]
-            if any(l["href"] == href for l in pedges):
-                continue                     # the edge already existed
-            new_text = _target_text(sha, href)
-            still = {l["href"] for l in file_at(sha, a_path).links
-                     if l["rel"] == "depends-on" and l["src"] == src}
-            for l in pedges:
-                if l["href"] in still:
-                    continue                 # that edge survives: this one is a birth
-                if new_text is not None and _target_text(parents[0], l["href"]) == new_text:
-                    raise HistoryUnavailable(
-                        f"{l['href']} -> {href} at {sha[:7]}: the target's address changed "
-                        "under identical text (rename or re-point); record a review")
-            return sha, "introduced"
-        raise HistoryUnavailable("committed link has no established introduction baseline")
+        if boundaries:
+            raise HistoryIncomplete("shallow clone")
+        return edge_introduction(root, a_path, src, href, floor), "introduced"
     except HistoryUnavailable:
         raise
     except (RuntimeError, OSError) as e:
         raise HistoryUnavailable(str(e)) from e
+
+
+def head_status():
+    """HEAD state: "ok", "unborn" (HEAD is a symref to a branch with no
+    commits — the first-commit state), or "broken" (HEAD unresolvable any
+    other way: unavailable or damaged evidence, never assumed unborn)."""
+    try:
+        git("rev-parse", "--verify", "--quiet", "HEAD")
+        return "ok"
+    except (RuntimeError, OSError):
+        pass
+    try:
+        # Read the symref with its own return code: a failed read is broken
+        # evidence, not an unborn branch. Only a resolvable symref naming a
+        # branch that has no commits is unborn.
+        r = subprocess.run(["git", "symbolic-ref", "-q", "HEAD"],
+                           capture_output=True, text=True, check=False)
+        ref = r.stdout.strip()
+        if r.returncode != 0 or not ref:
+            return "broken"
+        try:
+            git("show-ref", "--verify", "--quiet", ref)
+            return "broken"     # the branch exists but HEAD did not resolve
+        except (RuntimeError, OSError):
+            return "unborn"
+    except (RuntimeError, OSError):
+        return "broken"
+
+
+def head_sha():
+    return git("rev-parse", "HEAD").strip() if head_status() == "ok" else None
 
 
 # ============================================================ collection
@@ -595,9 +734,20 @@ class Collection:
             self.fails.append(f"[split] {rel(o)} is linked from the collection "
                               f"but has no split row (orphan)")
         root = os.path.dirname(self.main)
-        for fp in html_files(root, self.basis):
-            if fp not in self.specs and fp not in self.orphans:
-                self.disconnected.append(fp)
+        stray = [fp for fp in html_files(root, self.basis)
+                 if fp not in self.specs and fp not in self.orphans]
+        # A stray file declaring its own commit vocabulary is another
+        # collection's main (a supporting spec may not declare one), so it and
+        # what its split rows reach are independent by construction: nothing to
+        # note, and no manifest needed to say so (dl-graphderived).
+        independent = set()
+        for fp in stray:
+            if fp in independent:
+                continue
+            s, err = self._read(fp)
+            if s is not None and not err and commit_type_decls(s):
+                independent |= set(Collection(fp, basis=self.basis).specs)
+        self.disconnected = [fp for fp in stray if fp not in independent]
 
     # ---- addressing
     def parse_target(self, target):
@@ -946,7 +1096,9 @@ def shorten(s, n=70):
     return s if s is None or len(s) <= n else s[:n - 1] + "…"
 
 
-# =============================================================== reviews
+# =========================================================== obligations
+# Review debt derived from typed edges and git history: what is owed, why,
+# and what retires it. Nothing here writes state.
 
 def target_dirty(path, frag, cache):
     """Compare claim existence/text in HEAD, index and worktree independently.
@@ -979,6 +1131,11 @@ def owed_reviews(col, dirty_paths=None, basis="HEAD", pending_seeds=()):
         return [{"dependent": (fp, l["src"]), "target": (tp, fr), "kind": "unknown",
                  "baseline": None, "note": "not a git checkout"}
                 for fp, l, tp, fr in col.depends_on_edges()]
+    if head_status() == "unborn":
+        # No committed state: nothing is owed against, and nothing is unknown.
+        return [{"dependent": (fp, l["src"]), "target": (tp, fr), "kind": "unknown",
+                 "baseline": None, "note": "no commits yet", "incomplete": "no commits yet"}
+                for fp, l, tp, fr in col.depends_on_edges() if l["src"] is not None]
     cache, seen, dirty_cache = {}, {}, {}
     for fp, l, tp, fr in col.depends_on_edges():
         if l["src"] is None:
@@ -1035,6 +1192,8 @@ def owed_reviews(col, dirty_paths=None, basis="HEAD", pending_seeds=()):
                 owed.remove(seen.pop(pair))
             rec = {"dependent": (fp, l["src"]), "target": (tp, fr),
                    "baseline": None, "kind": "unknown", "note": str(e)}
+            if isinstance(e, HistoryIncomplete):
+                rec["incomplete"] = str(e)
             if dirty_paths and tp in dirty_paths:
                 rec["dirty"] = True
             owed.append(rec); seen[pair] = rec
@@ -1050,15 +1209,82 @@ def owed_reviews(col, dirty_paths=None, basis="HEAD", pending_seeds=()):
     return owed
 
 
+FETCH_HINT = "git fetch --unshallow (or --deepen=N) and rerun"
+
+
+def incomplete_line(owed, prefix="REVIEW"):
+    """The one line an incomplete history gets, or None. Shallow: a condition
+    naming the fetch, with no rows beneath it (nothing is owed, nothing is
+    cleared). Unborn: nothing is owed yet. Rows that fetching cannot cure —
+    a rename under identical text — are not here; they keep their rows."""
+    rows = [r for r in owed if r.get("incomplete")]
+    if not rows:
+        return None
+    if rows[0]["incomplete"] == "no commits yet":
+        return f"{prefix} OWED: none yet — no commits; obligations begin at the first commit"
+    dirty = sum(1 for r in rows if r.get("dirty"))
+    return (f"{prefix} CLEARANCE UNKNOWN — shallow clone: {len(rows)} depends-on edge(s) "
+            f"not evaluated; nothing is owed or cleared until history is complete: {FETCH_HINT}"
+            + (f"; {dirty} target(s) have uncommitted changes" if dirty else ""))
+
+
+# A value: a number followed by a unit-like word ("88 mm", "120 kW", "40 words").
+LITERAL_RE = re.compile(r"(?<![\w.,/-])(\d+(?:[.,]\d+)?)\s?([A-Za-z%°µ][A-Za-z%°µ/]*)\b")
+CONTAINERS = {"html", "body", "main", "nav", "section", "article", "table", "tbody", "thead",
+              "ul", "ol", "div", "h1", "h2", "h3", "h4", "h5", "h6"}
+
+
+def shared_literals(col):
+    """Advisory (B3): claims with no depends-on edge in or out whose own text
+    states the same number-with-unit literal as another such claim. A real
+    dependency that was never encoded is the failure one-hop reconciliation
+    cannot catch; sharing a value is the cheapest surface it leaves. Count
+    nouns are excluded (they are wired as count checksums). -> [(literal,
+    [(path, id), ...])], never an obligation."""
+    edged = set()
+    for fp, l, tp, fr in col.depends_on_edges():
+        edged.add((fp, l["src"])); edged.add((tp, fr))
+    counted = set()
+    for s in col.specs.values():
+        counted |= set(derive(s))
+    by_literal = {}
+    for p, s in col.specs.items():
+        for eid in s.elems:
+            if (p, eid) in edged or s.tags.get(eid) in CONTAINERS:
+                continue
+            own, _ = own_parts(s, eid)
+            for m in LITERAL_RE.finditer(own):
+                unit = m.group(2).lower()
+                if unit in counted or unit.rstrip("s") in counted:
+                    continue
+                by_literal.setdefault(f"{m.group(1)} {unit}", set()).add((p, eid))
+    return sorted((lit, sorted(claims)) for lit, claims in by_literal.items() if len(claims) > 1)
+
+
+def print_shared_literals(col):
+    pairs = shared_literals(col)
+    if not pairs:
+        return
+    print(f"ADVISORY — edgeless claims sharing a literal ({len(pairs)}); a shared value may be "
+          "an unencoded dependency, or a copy:")
+    for lit, claims in pairs:
+        print(f"  {lit!r}: " + ", ".join(addr(*c) for c in claims))
+
+
 def print_owed(owed, prefix="REVIEW", col=None):
+    line = incomplete_line(owed, prefix)
+    if line:
+        print(line)
+    owed = [r for r in owed if not r.get("incomplete")]
     if not owed:
-        print(f"{prefix} OWED: none")
+        if not line:
+            print(f"{prefix} OWED: none")
         return
     print(f"{prefix} OWED ({len(owed)})")
     if any(r["kind"] == "unknown" for r in owed):
-        print("  CLEARANCE UNKNOWN: fetch sufficient history (git fetch --unshallow for a shallow clone),")
         hint = command(col, "review", "CLAIM") if col else "lspec review CLAIM"
-        print(f"  or explicitly review against committed state and record it with {hint}.")
+        print(f"  CLEARANCE UNKNOWN: the available history is ambiguous about these edges; "
+              f"review each against committed state and record it with {hint}.")
     for r in owed:
         d, t = r["dependent"], r["target"]
         line = f"  {addr(*d)}  depends-on {addr(*t)}  [{r['kind']}]"
@@ -1073,81 +1299,6 @@ def print_owed(owed, prefix="REVIEW", col=None):
             print(line + (f"  {r['note']}" if r.get("note") else ""))
         if r.get("baseline"):
             print(f"      baseline {r['baseline'][:7]} ({r['how']})")
-
-
-# ================================================================= verbs
-
-def deliver(path, raw):
-    """Print a spec whole between header and end lines (show FILE)."""
-    r = rel(path)
-    print(f"==== {r} — {len(raw.splitlines())} lines ====")
-    print(raw)
-    print(f"==== end {r} ====")
-
-
-def command(col, verb, *args):
-    """Runnable hints retain MAIN and quote paths; no persistent session state."""
-    return shlex.join(["python3", "lspec.py", "--main", rel(col.main), verb, *args])
-
-
-def load_hint(col, *paths):
-    """Suffix naming every non-main file the line touches, so a crossing tells
-    the agent to read that file whole at the moment it would otherwise skim."""
-    seen = [p for i, p in enumerate(paths) if p != col.main and p not in paths[:i]]
-    return "".join(f"  (read whole: {rel(p)})" for p in seen)
-
-
-def default_main():
-    """The open request's MAIN, else live-spec.html when present."""
-    if repo_root() is not None:
-        request = read_state("request.json")
-        if request and request.get("main"):
-            return os.path.join(repo_root(), request["main"])
-    return "live-spec.html" if os.path.exists("live-spec.html") else None
-
-
-def load(args, basis="worktree"):
-    main = args.main or default_main()
-    if basis == "worktree":
-        if main is None or not os.path.exists(main):
-            print("lspec: no MAIN (pass --main PATH)", file=sys.stderr)
-            sys.exit(2)
-    else:
-        if main is None or repo_root() is None:
-            print("lspec: --staged requires a git checkout and MAIN", file=sys.stderr)
-            sys.exit(2)
-        if spec_at_basis(main, "staged") is None:
-            print(f"lspec: {main} is not in the index (nothing staged to check)",
-                  file=sys.stderr)
-            sys.exit(2)
-    return Collection(main, basis=basis)
-
-
-def head_status():
-    """HEAD state: "ok", "unborn" (HEAD is a symref to a branch with no
-    commits — the first-commit state), or "broken" (HEAD unresolvable any
-    other way: unavailable or damaged evidence, never assumed unborn)."""
-    try:
-        git("rev-parse", "--verify", "--quiet", "HEAD")
-        return "ok"
-    except (RuntimeError, OSError):
-        pass
-    try:
-        # Read the symref with its own return code: a failed read is broken
-        # evidence, not an unborn branch. Only a resolvable symref naming a
-        # branch that has no commits is unborn.
-        r = subprocess.run(["git", "symbolic-ref", "-q", "HEAD"],
-                           capture_output=True, text=True, check=False)
-        ref = r.stdout.strip()
-        if r.returncode != 0 or not ref:
-            return "broken"
-        try:
-            git("show-ref", "--verify", "--quiet", ref)
-            return "broken"     # the branch exists but HEAD did not resolve
-        except (RuntimeError, OSError):
-            return "unborn"
-    except (RuntimeError, OSError):
-        return "broken"
 
 
 def head_edges(col, root):
@@ -1214,11 +1365,6 @@ def disappear_cause(r, col):
         return "clearance cannot be established (text differs without a baseline)", True
     except HistoryUnavailable as e:
         return f"clearance cannot be established ({e})", True
-
-
-def row_decision(row):
-    """Decision-cell text only: attributes and presentation are not a decision."""
-    return tuple(norm(cell) for cell in re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S))
 
 
 def renamed_from(root, new_abs):
@@ -1306,6 +1452,60 @@ def retired_dependencies(col):
             and (fp, l["src"], tp, fr) not in current]
 
 
+# =================================================================== cli
+# Shared surface of the verbs: loading MAIN, runnable hints, reports.
+
+def deliver(path, raw):
+    """Print a spec whole between header and end lines (show FILE)."""
+    r = rel(path)
+    print(f"==== {r} — {len(raw.splitlines())} lines ====")
+    print(raw)
+    print(f"==== end {r} ====")
+
+
+def command(col, verb, *args):
+    """Runnable hints retain MAIN and quote paths; no persistent session state."""
+    return shlex.join(["python3", "lspec.py", "--main", rel(col.main), verb, *args])
+
+
+def load_hint(col, *paths):
+    """Suffix naming every non-main file the line touches, so a crossing tells
+    the agent to read that file whole at the moment it would otherwise skim."""
+    seen = [p for i, p in enumerate(paths) if p != col.main and p not in paths[:i]]
+    return "".join(f"  (read whole: {rel(p)})" for p in seen)
+
+
+def default_main():
+    """The open request's MAIN, else live-spec.html when present."""
+    if repo_root() is not None:
+        request = read_state("request.json")
+        if request and request.get("main"):
+            return os.path.join(repo_root(), request["main"])
+    return "live-spec.html" if os.path.exists("live-spec.html") else None
+
+
+def load(args, basis="worktree"):
+    main = args.main or default_main()
+    if basis == "worktree":
+        if main is None or not os.path.exists(main):
+            print("lspec: no MAIN (pass --main PATH)", file=sys.stderr)
+            sys.exit(2)
+    else:
+        if main is None or repo_root() is None:
+            print("lspec: --staged requires a git checkout and MAIN", file=sys.stderr)
+            sys.exit(2)
+        if spec_at_basis(main, "staged") is None:
+            print(f"lspec: {main} is not in the index (nothing staged to check)",
+                  file=sys.stderr)
+            sys.exit(2)
+    return Collection(main, basis=basis)
+
+
+def row_decision(row):
+    """Decision-cell text only: attributes and presentation are not a decision."""
+    return tuple(norm(cell) for cell in re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S))
+
+
 # ============================================================ commit gate
 # reconcile runs every check against the staged candidate and lists what is
 # open. Mechanical items clear when the files are fixed. Judgment items are
@@ -1334,6 +1534,9 @@ ANSWERS = {
     "read": {"read-whole": (False, False)},
     "neighbor": {"holds": (False, False)},
     "sealed": {"decision": (True, False), "correction": (False, True)},
+    "confirm": {"confirmed": (False, True)},
+    "reseed": {"reseed": (False, True)},
+    "derived": {"rederived": (False, False), "unaffected": (False, True)},
     "removed": {"replaced": (True, False), "retired": (False, True)},
     "cause": {"established": (True, True), "unverified": (True, False),
               "recurrence": (True, False)},
@@ -1349,10 +1552,17 @@ ANSWERS = {
 }
 REF_NAMES = {"decision": "ROW", "replaced": "ROW", "established": "WATCH",
              "unverified": "WATCH", "recurrence": "ROW", "watched": "WATCH",
-             "decided": "ROW"}
+             "decided": "ROW", "correction": "ROW"}
+# A correction names the decision row it restores, or is held for a later
+# session's confirmation: --ref is optional, and the two forms differ in effect.
+REF_OPTIONAL = {"correction"}
 WAIVABLE = ("caveat", "placeholder", "empty")
-QUESTION_ORDER = ("read", "caveat", "placeholder", "empty", "sealed", "removed", "cause",
-                  "watched", "decided", "neighbor")
+QUESTION_ORDER = ("read", "reseed", "caveat", "placeholder", "empty", "sealed", "confirm",
+                  "removed", "cause", "watched", "decided", "derived", "neighbor")
+# Sealed records in commit trailers, newest first decides a claim's state.
+CORRECTION_RE = re.compile(r"^Reconciled: correction (\S+) (?:per (\S+)|\(awaiting confirmation\))"
+                           r" \u2014 (.*)$", re.M)
+CONFIRMED_RE = re.compile(r"^Reconciled: (?:confirmed (\S+) \u2014 .*|decision (\S+) by \S+)$", re.M)
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
@@ -1475,48 +1685,55 @@ def gather(col, subject, request):
     return ctx
 
 
-def mechanical_items(ctx, today):
-    items = []
-    col, subject = ctx.staged, ctx.subject
-    head = head_sha() or "unborn"          # waivers are asked of each commit afresh
+def request_items(ctx):
+    """No open request for MAIN: start first, then read."""
+    col = ctx.staged
     main_rel = repo_rel(col.main)
-    req = ctx.request
-    if req is None or req.get("main") != main_rel:
-        items.append(item("request", "open", "no open request for " + main_rel, True,
-                          detail="run " + command(col, "start") + " and read every governing "
-                                 "spec whole before committing"))
-    for f in check_structure(col):
-        items.append(item("structure", f, f, True))
-    if ctx.baseline_error:
-        items.append(item("baseline", "head", "HEAD collection unreadable: "
-                          + ctx.baseline_error, True,
-                          detail="sealed claims and obligations cannot be evaluated; "
-                                 "fetch or repair history"))
-    # subject: vocabulary and shape
+    if ctx.request is None or ctx.request.get("main") != main_rel:
+        return [item("request", "open", "no open request for " + main_rel, True,
+                     detail="run " + command(col, "start") + " and read every governing "
+                            "spec whole before committing")]
+    return []
+
+
+def subject_items(ctx):
+    """The subject's vocabulary and shape: a declared `type:`, one transition,
+    at most SUBJECT_MAX characters (a review: lists its claims)."""
+    col, subject = ctx.staged, ctx.subject
     main = col.specs.get(col.main)
     decls = commit_type_decls(main) if main else []
     if not subject:
-        items.append(item("subject", "missing", "no subject", True,
-                          detail="run " + command(col, "reconcile", "--subject", "type: transition")))
-    else:
-        prefix, sep, rest = subject.partition(":")
-        if len(decls) != 1:
-            ctx.notes.append("commit vocabulary not enforced (no single data-commit-types "
-                             "declaration in main)")
-        elif not sep or not prefix.strip():
-            items.append(item("subject", "type", f"subject {subject!r} has no `type:` prefix",
-                              True, detail="declared types: " + decls[0]))
-        elif prefix.strip() not in decls[0].split():
-            items.append(item("subject", "type", f"type {prefix.strip()!r} is not declared",
-                              True, detail="declared types: " + decls[0]))
-        if subject_type(subject, "review") is None and len(subject) > SUBJECT_MAX:
-            items.append(item("subject", "long", f"subject is {len(subject)} characters "
-                              f"(> {SUBJECT_MAX})", True,
-                              detail="one transition per subject; rationale lives in the spec"))
-        if ";" in subject:
-            items.append(item("subject", "chain", "subject chains clauses with ';'", True,
-                              detail="one transition per commit; split the commit"))
-    # content shape of claims this commit adds or changes
+        return [item("subject", "missing", "no subject", True,
+                     detail="run " + command(col, "reconcile", "--subject", "type: transition"))]
+    out = []
+    prefix, sep, rest = subject.partition(":")
+    if len(decls) != 1:
+        ctx.notes.append("commit vocabulary not enforced (no single data-commit-types "
+                         "declaration in main)")
+    elif not sep or not prefix.strip():
+        out.append(item("subject", "type", f"subject {subject!r} has no `type:` prefix",
+                        True, detail="declared types: " + decls[0]))
+    elif prefix.strip() not in decls[0].split():
+        out.append(item("subject", "type", f"type {prefix.strip()!r} is not declared",
+                        True, detail="declared types: " + decls[0]))
+    if subject_type(subject, "review") is None and len(subject) > SUBJECT_MAX:
+        out.append(item("subject", "long", f"subject is {len(subject)} characters "
+                        f"(> {SUBJECT_MAX})", True,
+                        detail="one transition per subject; rationale lives in the spec"))
+    if ";" in subject:
+        out.append(item("subject", "chain", "subject chains clauses with ';'", True,
+                        detail="one transition per commit; split the commit"))
+    return out
+
+
+def shape_items(ctx, head):
+    """Content shape of the claims this commit adds or changes. Waivable items
+    (placeholder, empty, caveat) infer a defect from a surface form, so they
+    take an answer with a reason; where the form is the defect (an empty
+    cell, an unlinked [WATCH], a provisional value with no link) the item is
+    mechanical. Evidence is the element's text, so an edit reopens it."""
+    col = ctx.staged
+    out = []
     for (p, eid), kind in sorted(ctx.changed.items()):
         if kind == "removed" or p not in col.specs:
             continue
@@ -1526,59 +1743,72 @@ def mechanical_items(ctx, today):
         tag = s.tags.get(eid)
         raw = s.element(eid)
         visible = re.sub(r"<code\b[^>]*>.*?</code>", " ", raw, flags=re.S)
-        # Waivable: the form suggests a defect; the agent may fix the file or
-        # answer with a reason. Evidence is the element's text, so an edit
-        # reopens the item (and usually removes it).
         if PLACEHOLDER_ID.match(eid) or (text and PLACEHOLDER_TEXT.fullmatch(text)):
-            items.append(item("placeholder", name, f"{name} looks like a placeholder", False,
-                              evidence=digest(head, "placeholder", name, text or ""),
-                              excerpt=f"{name}: id {eid!r}, text {shorten(text or '', 200)!r}",
-                              question="Is this a placeholder (commit real content or nothing: fix "
-                                       "the file) or a real value that happens to match (answer "
-                                       "literal, with the reason)?"))
+            out.append(item("placeholder", name, f"{name} looks like a placeholder", False,
+                            evidence=digest(head, "placeholder", name, text or ""),
+                            excerpt=f"{name}: id {eid!r}, text {shorten(text or '', 200)!r}",
+                            question="Is this a placeholder (commit real content or nothing: fix "
+                                     "the file) or a real value that happens to match (answer "
+                                     "literal, with the reason)?"))
         elif tag in EMPTY_CHECKED and not text:
-            items.append(item("empty", name, f"{name} is empty", False,
-                              evidence=digest(head, "empty", name, tag or ""),
-                              excerpt=f"{name}: <{tag}> with no text",
-                              question="An element carries a complete claim or is not committed. "
-                                       "Is this empty by mistake (fix the file) or structural, "
-                                       "such as an anchor or a table the seed ships without rows "
-                                       "(answer structural, with the reason)?"))
+            out.append(item("empty", name, f"{name} is empty", False,
+                            evidence=digest(head, "empty", name, tag or ""),
+                            excerpt=f"{name}: <{tag}> with no text",
+                            question="An element carries a complete claim or is not committed. "
+                                     "Is this empty by mistake (fix the file) or structural, "
+                                     "such as an anchor or a table the seed ships without rows "
+                                     "(answer structural, with the reason)?"))
         if tag == "tr" and text:
             cells = [claim_text(c) for c in re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", raw, re.S)]
             if any(not c or PLACEHOLDER_TEXT.fullmatch(c) for c in cells):
-                items.append(item("empty", name + " cell", f"{name} has an empty or "
-                                  f"placeholder cell", True))
+                out.append(item("empty", name + " cell", f"{name} has an empty or "
+                                f"placeholder cell", True))
         own_text, own_links = own_parts(s, eid)
         provisional = PROVISIONAL_ROW_RE if tag == "tr" else PROVISIONAL_RE
         if provisional.search(own_text) and not own_links:
-            items.append(item("provisional", name, f"{name} states a provisional value "
-                              "without linking the item that closes it", True,
-                              detail="link the open item (P6)"))
+            out.append(item("provisional", name, f"{name} states a provisional value "
+                            "without linking the item that closes it", True,
+                            detail="link the open item (P6)"))
         m = CAVEAT_RE.search(own_text)
         if m:
             phrase = own_text[max(0, m.start() - 60):m.end() + 40]
-            items.append(item("caveat", name, f"{name} carries an inline temporal caveat", False,
-                              evidence=digest(head, "caveat", name, own_text),
-                              excerpt=f"{name}: …{phrase}…",
-                              question="Caveats live in watch entries, not inline. Is this a "
-                                       "freshness caveat on the claim (mark [WATCH], link a watch "
-                                       "entry: fix the file), a source's own words inside provenance "
-                                       "or a quotation (answer quoted), or a date that is part of "
-                                       "what the claim states, such as a named tier or edition "
-                                       "(answer historical)? Each takes a reason."))
+            out.append(item("caveat", name, f"{name} carries an inline temporal caveat", False,
+                            evidence=digest(head, "caveat", name, own_text),
+                            excerpt=f"{name}: …{phrase}…",
+                            question="Caveats live in watch entries, not inline. Is this a "
+                                     "freshness caveat on the claim (mark [WATCH], link a watch "
+                                     "entry: fix the file), a source's own words inside provenance "
+                                     "or a quotation (answer quoted), or a date that is part of "
+                                     "what the claim states, such as a named tier or edition "
+                                     "(answer historical)? Each takes a reason."))
         if "[WATCH]" in norm(visible) and not links_watch(col, p, own_links):
-            items.append(item("caveat", name + " watch", f"{name} has a [WATCH] marker "
-                              f"without a link to its watch entry (a row whose id starts "
-                              f"with {WATCH_PREFIX})", True))
+            out.append(item("caveat", name + " watch", f"{name} has a [WATCH] marker "
+                            f"without a link to its watch entry (a row whose id starts "
+                            f"with {WATCH_PREFIX})", True))
         # a watch entry named in prose that no row carries: a reference typed
         # instead of a row filed ("( watch-leapday )" with no such id)
         for m in re.finditer(rf"(?<![\w-]){WATCH_PREFIX}[A-Za-z0-9][\w-]*", norm(visible)):
             wid = m.group(0).rstrip("-_")
             if not any(wid in sp.ids for sp in col.specs.values()):
-                items.append(item("caveat", f"{name} {wid}", f"{name} mentions {wid}, which is no "
-                                  "watch entry in the collection", True,
-                                  detail="file the row with that id and link it, or reword"))
+                out.append(item("caveat", f"{name} {wid}", f"{name} mentions {wid}, which is no "
+                                "watch entry in the collection", True,
+                                detail="file the row with that id and link it, or reword"))
+    return out
+
+
+def mechanical_items(ctx, today):
+    """Everything that clears only when the files (or the subject) change,
+    plus the waivable shape items. Waivers are asked of each commit afresh."""
+    col = ctx.staged
+    head = head_sha() or "unborn"
+    items = request_items(ctx)
+    items += [item("structure", f, f, True) for f in check_structure(col)]
+    if ctx.baseline_error:
+        items.append(item("baseline", "head", "HEAD collection unreadable: "
+                          + ctx.baseline_error, True,
+                          detail="sealed claims and obligations cannot be evaluated; "
+                                 "fetch or repair history"))
+    items += subject_items(ctx) + shape_items(ctx, head)
     items += watch_items(col, today)
     items += obligation_items(ctx)
     for p, s in col.specs.items():
@@ -1638,101 +1868,128 @@ def watch_line(col):
         addr(p, eid) + (f" (until {until})" if until else "") for p, eid, until in entries)
 
 
-def obligation_items(ctx):
-    """The review gate: debt already outstanding at HEAD, retirement of a
-    surviving claim's dependency, and unknown history block unless this is a
-    review: commit naming the claim or a seed: boundary for its file."""
+def edge_key(r):
+    return (r["dependent"][0], r["target"][0], r["target"][1])
+
+
+def dep_name(r):
+    return f"{repo_rel(r['dependent'][0])}#{r['dependent'][1]}"
+
+
+def edge_label(r):
+    return f"{dep_name(r)} depends-on {addr(*r['target'])}"
+
+
+def review_hint(col, dependent):
+    return "clear it with " + command(col, "review", addr(*dependent))
+
+
+def retirement_items(ctx, named, pending):
+    """Edges at HEAD this commit removes or redirects while their claim
+    survives: each takes a recorded review. -> (items, retired edges)."""
     col = ctx.staged
-    root = ctx.root
-    named, is_seed = subject_claims(ctx.subject)
     out = []
-    if ctx.head_state != "ok":
-        for fp, l, tp, fr in col.depends_on_edges():
-            if l["src"] is not None and ctx.head_state == "unborn":
-                ctx.notes.append(f"first commit: {addr(fp, l['src'])} depends-on "
-                                 f"{addr(tp, fr)} is new (no committed state to owe against)")
-        if ctx.head_state == "broken":
-            out.append(item("baseline", "broken", "HEAD is unresolvable", True,
-                            detail="fetch or repair history"))
-        return out
-    pending = set()
-    if is_seed:
-        for n in git("diff", "--cached", "--name-only", "HEAD", cwd=root).split():
-            p = canon(os.path.join(root, n))
-            if p in col.specs:
-                pending.add(p)
-    review_hint = lambda d: "clear it with " + command(col, "review", addr(*d))
     try:
         retired = retired_dependencies(col)
     except HistoryUnavailable as e:
         out.append(item("review", "retirement", f"dependency retirement cannot be "
                         f"established: {e}", True))
-        retired = []
+        return out, []
     for fp, link, tp, fr in retired:
         name = f"{repo_rel(fp)}#{link['src']}"
         if fp not in pending and name not in named:
             out.append(item("review", name + " retired", f"{name}: dependency on "
                             f"{addr(tp, fr)} removed or redirected", True,
                             detail="assess the surviving claim; "
-                                   + review_hint((fp, link["src"]))))
-    if named:
-        # A review names dependent claims: sources of a depends-on edge at HEAD
-        # or in the candidate, or claims whose edge this commit retires. A
-        # container named around one would exempt everything nested in it.
-        sources = {f"{repo_rel(fp)}#{l['src']}" for fp, l, _, _ in col.depends_on_edges()
-                   if l["src"]}
-        sources |= {f"{repo_rel(fp)}#{l['src']}" for fp, l, _, _ in retired}
-        if ctx.head is not None:
-            sources |= {f"{repo_rel(fp)}#{l['src']}" for fp, l, _, _ in ctx.head.depends_on_edges()
-                       if l["src"]}
-        for name in sorted(named - sources):
-            out.append(item("review", name + " named", f"review commit names {name}, which "
-                            "carries no depends-on link", True,
-                            detail="name the dependent claim itself (the id holding the link)"))
-        for name, kind in review_offenders(named, ctx.changed, ctx.head_specs,
-                                           col.specs, retired):
-            out.append(item("review", name + " scope", f"review commit changes {name} "
-                            f"({kind}), which it does not name", True,
-                            detail="a review changes only the claims it names; commit "
-                                   "this change separately, under its own type"))
-    cand = owed_reviews(col, basis="staged", pending_seeds=pending)
+                                   + review_hint(col, (fp, link["src"]))))
+    return out, retired
+
+
+def review_subject_items(ctx, named, retired):
+    """A review: subject names dependent claims — sources of a depends-on
+    edge at HEAD or in the candidate, or claims whose edge this commit
+    retires (a container named around one would exempt everything nested in
+    it) — and changes nothing it does not name."""
+    col = ctx.staged
+    out = []
+    sources = {f"{repo_rel(fp)}#{l['src']}" for fp, l, _, _ in col.depends_on_edges() if l["src"]}
+    sources |= {f"{repo_rel(fp)}#{l['src']}" for fp, l, _, _ in retired}
+    if ctx.head is not None:
+        sources |= {f"{repo_rel(fp)}#{l['src']}" for fp, l, _, _ in ctx.head.depends_on_edges()
+                    if l["src"]}
+    for name in sorted(named - sources):
+        out.append(item("review", name + " named", f"review commit names {name}, which "
+                        "carries no depends-on link", True,
+                        detail="name the dependent claim itself (the id holding the link)"))
+    for name, kind in review_offenders(named, ctx.changed, ctx.head_specs, col.specs, retired):
+        out.append(item("review", name + " scope", f"review commit changes {name} ({kind}), "
+                        "which it does not name", True,
+                        detail="a review changes only the claims it names; commit this change "
+                               "separately, under its own type"))
+    return out
+
+
+def head_obligations(ctx):
+    """Obligations as of HEAD's own edges (files changed or deleted by the
+    candidate read from HEAD), or one unknown record per edge when history
+    cannot be read."""
+    col = ctx.staged
     try:
-        head_owed = owed_reviews(SimpleNamespace(
-            depends_on_edges=lambda: iter(head_edges(col, root))))
+        return owed_reviews(SimpleNamespace(depends_on_edges=lambda: iter(head_edges(col, ctx.root))))
     except HistoryUnavailable as e:
-        head_owed = [{"dependent": (fp, l["src"]), "target": (tp, fr), "kind": "unknown",
-                      "baseline": None, "note": str(e)}
-                     for fp, l, tp, fr in col.depends_on_edges() if l["src"] is not None]
+        return [{"dependent": (fp, l["src"]), "target": (tp, fr), "kind": "unknown",
+                 "baseline": None, "note": str(e),
+                 **({"incomplete": str(e)} if isinstance(e, HistoryIncomplete) else {})}
+                for fp, l, tp, fr in col.depends_on_edges() if l["src"] is not None]
 
-    def key(r):
-        return (r["dependent"][0], r["target"][0], r["target"][1])
 
-    def dep_name(r):
-        return f"{repo_rel(r['dependent'][0])}#{r['dependent'][1]}"
+def debt_items(ctx, named, pending):
+    """Debt outstanding at HEAD (owed before this commit, so it blocks unless
+    the commit is a review naming the claim), debt this commit creates (a
+    note: the dependent's holds answer reviews it), and incomplete history
+    (one condition). Obligations HEAD had and the candidate lacks must have
+    left for a proven reason."""
+    col = ctx.staged
+    out = []
+    cand = owed_reviews(col, basis="staged", pending_seeds=pending)
+    head_owed = head_obligations(ctx)
     head_by_key = {}
     for r in head_owed:
-        head_by_key.setdefault(key(r), []).append(r)
-    cand_keys = {key(r) for r in cand}
+        head_by_key.setdefault(edge_key(r), []).append(r)
+    incomplete = []
     for r in sorted(cand, key=lambda r: (dep_name(r), addr(*r["target"]))):
-        priors = head_by_key.get(key(r), [])
-        label = f"{dep_name(r)} depends-on {addr(*r['target'])}"
+        priors = head_by_key.get(edge_key(r), [])
+        label = edge_label(r)
         if r["kind"] == "unknown" or any(p["kind"] == "unknown" for p in priors):
-            if dep_name(r) not in named:
-                why = r["note"] if r["kind"] == "unknown" else priors[0]["note"]
-                out.append(item("review", label, f"{label}: clearance cannot be established "
-                                f"(unknown history: {why})", True,
-                                detail="fetch sufficient history (git fetch --unshallow for a "
-                                       "shallow clone), or " + review_hint(r["dependent"])))
+            if dep_name(r) in named:
+                continue
+            if r.get("incomplete") or any(p.get("incomplete") for p in priors):
+                incomplete.append(r)         # one condition, not one item per edge
+                continue
+            why = r["note"] if r["kind"] == "unknown" else priors[0]["note"]
+            it = item("review", label, f"{label}: clearance cannot be established "
+                      f"(ambiguous history: {why})", True, detail=review_hint(col, r["dependent"]))
+            it["dependent"] = dep_name(r)
+            out.append(it)
         elif priors:
             if dep_name(r) not in named:
-                out.append(item("review", label, f"REVIEW OWED {label} [{r['kind']}]", True,
-                                detail=review_hint(r["dependent"])))
+                it = item("review", label, f"REVIEW OWED {label} [{r['kind']}]", True,
+                          detail=review_hint(col, r["dependent"]))
+                it["dependent"] = dep_name(r)
+                out.append(it)
         else:
             ctx.notes.append(f"this commit creates a review obligation {label} [{r['kind']}]")
+    if incomplete:
+        claims = [addr(*r["dependent"]) for r in incomplete]
+        out.append(item("review", "history incomplete", f"shallow clone: clearance cannot be "
+                        f"established for {len(incomplete)} depends-on edge(s)", True,
+                        detail=FETCH_HINT + "; only without more history, review each against "
+                               "committed state: " + command(col, "review", *claims)))
+    cand_keys = {edge_key(r) for r in cand}
     for r in sorted(head_owed, key=lambda r: (dep_name(r), addr(*r["target"]))):
-        if key(r) in cand_keys:
+        if edge_key(r) in cand_keys:
             continue
-        label = f"{dep_name(r)} depends-on {addr(*r['target'])}"
+        label = edge_label(r)
         if r["dependent"][0] in pending:
             ctx.notes.append(f"{label} is discarded by this commit's seed boundary")
             continue
@@ -1741,138 +1998,302 @@ def obligation_items(ctx):
             continue
         if blocks:
             out.append(item("review", label + " left", f"{label}: {cause}", True,
-                            detail=review_hint(r["dependent"])))
+                            detail=review_hint(col, r["dependent"])))
         else:
             ctx.notes.append(f"{label} left at HEAD: {cause}")
     return out
 
 
-def judgment_items(ctx):
-    items = []
+def obligation_items(ctx):
+    """The review gate: debt already outstanding at HEAD, retirement of a
+    surviving claim's dependency, and unknown history block unless this is a
+    review: commit naming the claim or a seed: boundary for its file."""
+    col = ctx.staged
+    named, is_seed = subject_claims(ctx.subject)
+    if ctx.head_state != "ok":
+        if ctx.head_state == "unborn":
+            for fp, l, tp, fr in col.depends_on_edges():
+                if l["src"] is not None:
+                    ctx.notes.append(f"first commit: {addr(fp, l['src'])} depends-on "
+                                     f"{addr(tp, fr)} is new (no committed state to owe against)")
+            return []
+        return [item("baseline", "broken", "HEAD is unresolvable", True,
+                     detail="fetch or repair history")]
+    pending = set()      # files a seed: commit re-instantiates: their debt is discarded
+    if is_seed:
+        pending = {p for p in (canon(os.path.join(ctx.root, n)) for n in staged_paths(ctx))
+                   if p in col.specs}
+    out, retired = retirement_items(ctx, named, pending)
+    if named:
+        out += review_subject_items(ctx, named, retired)
+    return out + debt_items(ctx, named, pending)
+
+
+def staged_paths(ctx):
+    """Repo-relative paths the candidate changes against HEAD ([] when unborn)."""
+    if ctx.head_state != "ok":
+        return []
+    return git("diff", "--cached", "--name-only", "HEAD", cwd=ctx.root).splitlines()
+
+
+def read_items(ctx):
+    """Read whole: main, every collection file this commit edits, and the
+    files holding targets of dependencies declared in edited files. Evidence
+    is the request's start commit, so a read answered once holds for the
+    request and is asked again by the next."""
     col = ctx.staged
     start = (ctx.request or {}).get("start") or "unborn"
-    # read whole: main, every collection file this commit edits, and files
-    # holding targets of dependencies declared in edited files
     edited = {p for (p, _), _ in ctx.changed.items() if p in col.specs}
-    if ctx.head_state == "ok":
-        for n in git("diff", "--cached", "--name-only", "HEAD", cwd=ctx.root).splitlines():
-            p = canon(os.path.join(ctx.root, n))
-            if p in col.specs:
-                edited.add(p)
+    for n in staged_paths(ctx):
+        p = canon(os.path.join(ctx.root, n))
+        if p in col.specs:
+            edited.add(p)
     governing = {col.main} | edited
     for fp, l, tp, fr in col.depends_on_edges():
         if fp in edited and tp in col.specs:
             governing.add(tp)
+    out = []
     for p in sorted(governing, key=lambda p: (p != col.main, rel(p))):
         lines = len(col.specs[p].raw.splitlines())
-        items.append(item("read", rel(p), f"read {rel(p)} whole", False,
-                          evidence=digest(repo_rel(p), start),
-                          excerpt=f"{rel(p)} — {lines} lines as staged",
-                          question=f"Have you read {rel(p)} whole in this request — every line, "
-                                   "in sequential pages, with no skipped ranges and no search "
-                                   "standing in for reading?"))
-    # sealed claims: decision change or correction
-    if ctx.head_state == "ok" and not ctx.baseline_error:
-        for p, s in ctx.head.specs.items():
-            for i in s.sealed:
-                name = f"{repo_rel(p)}#{i}"
-                try:
-                    staged = file_staged(p)
-                except HistoryUnavailable as e:
-                    items.append(item("baseline", name, f"staged tree unreadable for {name}: {e}",
-                                      True))
-                    continue
-                cause = None
-                if staged is None:
-                    cause = "file deleted"
-                elif p not in col.specs:
-                    cause = "file leaves the collection (its split row is gone)"
-                elif i not in staged.elems:
-                    cause = "claim deleted or id changed"
-                elif i not in staged.sealed:
-                    cause = "data-sealed marker removed"
-                elif staged.text(i) != s.text(i):
-                    cause = "content changed"
-                if cause:
-                    now = staged.text(i) if staged is not None and i in staged.elems else ""
-                    items.append(item("sealed", name, f"sealed claim {name}: {cause}", False,
-                                      evidence=digest(cause, s.text(i) or "", now or ""),
-                                      excerpt=sealed_excerpt(s.text(i), now),
-                                      question=f"{name} is sealed and this commit changes it "
-                                               f"({cause}). Is this a decision change (a decision "
-                                               "row added or changed in this commit) or a "
-                                               "correction (state the reason)?"))
-    # removed decision rows
+        out.append(item("read", rel(p), f"read {rel(p)} whole", False,
+                        evidence=digest(repo_rel(p), start),
+                        excerpt=f"{rel(p)} — {lines} lines as staged",
+                        question=f"Have you read {rel(p)} whole in this request — every line, "
+                                 "in sequential pages, with no skipped ranges and no search "
+                                 "standing in for reading?"))
+    return out
+
+
+def sealed_cause(ctx, p, i, staged):
+    """Why a HEAD-sealed claim P#I counts as changed by the candidate, or None."""
+    if staged is None:
+        return "file deleted"
+    if p not in ctx.staged.specs:
+        return "file leaves the collection (its split row is gone)"
+    if i not in staged.elems:
+        return "claim deleted or id changed"
+    if i not in staged.sealed:
+        return "data-sealed marker removed"
+    if staged.text(i) != ctx.head_specs[p].text(i):
+        return "content changed"
+    return None
+
+
+def sealed_items(ctx):
+    """Each data-sealed claim at HEAD the candidate edits, deletes, renames,
+    unmarks or drops from the collection: a decision change or a correction."""
+    out = []
+    if ctx.head_state != "ok" or ctx.baseline_error:
+        return out
+    for p, s in ctx.head.specs.items():
+        for i in s.sealed:
+            name = f"{repo_rel(p)}#{i}"
+            try:
+                staged = file_staged(p)
+            except HistoryUnavailable as e:
+                out.append(item("baseline", name, f"staged tree unreadable for {name}: {e}", True))
+                continue
+            cause = sealed_cause(ctx, p, i, staged)
+            if not cause:
+                continue
+            now = staged.text(i) if staged is not None and i in staged.elems else ""
+            out.append(item("sealed", name, f"sealed claim {name}: {cause}", False,
+                            evidence=digest(cause, s.text(i) or "", now or ""),
+                            excerpt=sealed_excerpt(s.text(i), now),
+                            question=f"{name} is sealed and this commit changes it ({cause}). "
+                                     "Is this a decision change (a decision row added or "
+                                     "changed in this commit) or a correction (state the reason)?"))
+    return out
+
+
+def confirm_items(ctx):
+    """Sealed corrections a previous request recorded without a decision row,
+    still awaiting confirmation: asked of every commit of a later request,
+    never of the correcting one (its start commit bounds the search)."""
+    col = ctx.staged
+    out = []
+    if ctx.head_state != "ok" or subject_type(ctx.subject, "review") is not None \
+            or not (ctx.request or {}).get("start"):
+        return out
+    for name, sha, reason in pending_corrections(ctx.root, ctx.request["start"]):
+        found = find_id(ctx, name)
+        if found is None or found[1] not in col.specs[found[0]].sealed:
+            continue
+        now = col.specs[found[0]].text(found[1]) or ""
+        it = item("confirm", name, f"sealed correction awaiting confirmation: {name}", False,
+                  evidence=digest(name, sha, now),
+                  excerpt=f"{name} corrected at {sha[:7]} without a decision row \u2014 {reason}\n"
+                          f"now: {shorten(now, 300)}",
+                  question=f"A previous session corrected sealed claim {name} without naming "
+                           "the decision it restores. Does its current text agree with the "
+                           "decision it is sealed under? Answer confirmed, stating what you "
+                           "checked; if not, fix the file (a sealed change of its own).")
+        it["claim"] = name
+        out.append(it)
+    return out
+
+
+def reseed_items(ctx):
+    """A seed: subject on a collection file that already has a seed: boundary
+    in its history: the re-seed discards that file's review baselines, so it
+    is asked for its reason (bench #4: mid-life changes rode seed: past the
+    fix gate). A first seed is not asked."""
+    col = ctx.staged
+    out = []
+    if ctx.head_state != "ok" or subject_type(ctx.subject, "seed") is None:
+        return out
+    for n in staged_paths(ctx):
+        p = canon(os.path.join(ctx.root, n))
+        if p not in col.specs:
+            continue
+        floor = lineage_floor(ctx.root, p)
+        if floor is None:
+            continue
+        name = repo_rel(p)
+        edges = [l for l in col.specs[p].links if l["rel"] == "depends-on" and l["src"]]
+        baselines = 0
+        for l in edges:
+            try:
+                if review_baseline(p, l["src"], l["href"])[0]:
+                    baselines += 1
+            except HistoryUnavailable:
+                pass
+        it = item("reseed", name, f"re-seed of {name}", False,
+                  evidence=digest(floor, name),
+                  excerpt=f"{name} already has a seed: boundary at {floor[:7]}; this commit "
+                          f"starts a new lineage, discarding {baselines} review baseline(s) "
+                          f"on {len(edges)} depends-on edge(s)",
+                  question=f"A seed: commit re-instantiates {name}: its review history stops "
+                           "counting. Is this a deliberate re-instantiation (answer reseed, "
+                           "with the reason)? A change to a live instance takes an ordinary "
+                           "type instead.")
+        it["claim"] = name
+        out.append(it)
+    return out
+
+
+def removed_row_items(ctx):
+    """Each decision row at HEAD the candidate drops (a row moved whole under
+    the same id and text is not removed): replaced or retired."""
+    col = ctx.staged
     current = {(p, rid) for p, sp in col.specs.items() for rid, _ in sp.rows()}
     moved = {(rid, norm(row)) for sp in col.specs.values() for rid, row in sp.rows()}
+    out = []
     for p, sp in sorted(ctx.head_specs.items()):
         for rid, row in sp.rows():
-            if (p, rid) not in current and (rid, norm(row)) not in moved:
-                name = addr(p, rid)
-                items.append(item("removed", name, f"decision row {name} removed", False,
-                                  evidence=digest(norm(row)),
-                                  excerpt=shorten(norm(row), 400),
-                                  question=f"Decision {name} was removed. Was it replaced "
-                                           "(name the successor row, which keeps the displaced "
-                                           "choice in its rejected cell), or retired (no fresh "
-                                           "session would re-propose its alternative)?"))
-    # a fix: is the cause established?
-    head = head_sha() or "unborn"
-    records = cause_records(ctx)
-    if subject_type(ctx.subject, "fix") is not None:
-        paths = sorted({n for n in git("diff", "--cached", "--name-only", "HEAD", cwd=ctx.root)
-                        .splitlines()} if ctx.head_state == "ok" else [])
-        excerpt = f"subject: {ctx.subject}\nfiles: {', '.join(paths) or 'none'}"
-        excerpt += "".join(f"\n{label} {addr(p, eid)} ({kind}): {shorten(text, 240)}"
-                           for label, p, eid, kind, text in records) or \
-            "\nno watch entry or diagnostic-register row is added or changed in this commit"
-        items.append(item("cause", "fix", "is the cause established?", False,
-                          evidence=digest(head, ctx.subject, *paths,
-                                          *[f"{addr(p, e)}={t}" for _, p, e, _, t in records]),
-                          excerpt=excerpt,
-                          question="This commit is typed fix. A failure seen once gets a watch "
-                                   "entry, added or updated in this commit, recording symptom, "
-                                   "date, diagnosis, fix and the condition that closes it. Is "
-                                   "the cause established (name the entry and what established "
-                                   "it) or unverified (name the entry)? If this failure recurred "
-                                   "with the same diagnosis, name the diagnostic-register row "
-                                   "added or updated in this commit."))
-    # what the work surfaced: a watch entry, a decision. Asked of every commit
-    # but a review (which changes only the claims it names); a fix answers the
-    # watch question in its cause item. Evidence is bound to HEAD, so each
-    # commit is asked afresh; a prose rule asked nowhere is the rule that gets
-    # dropped.
-    if subject_type(ctx.subject, "review") is None:
+            if (p, rid) in current or (rid, norm(row)) in moved:
+                continue
+            name = addr(p, rid)
+            out.append(item("removed", name, f"decision row {name} removed", False,
+                            evidence=digest(norm(row)),
+                            excerpt=shorten(norm(row), 400),
+                            question=f"Decision {name} was removed. Was it replaced (name the "
+                                     "successor row, which keeps the displaced choice in its "
+                                     "rejected cell), or retired (no fresh session would "
+                                     "re-propose its alternative)?"))
+    return out
+
+
+def cause_item(ctx, head, records):
+    """A fix: is the cause established? Its evidence binds the subject, the
+    changed paths and the text of every watch entry and diagnostic row the
+    commit adds or changes, so rewriting one reopens the answer."""
+    paths = sorted(set(staged_paths(ctx)))
+    excerpt = f"subject: {ctx.subject}\nfiles: {', '.join(paths) or 'none'}"
+    excerpt += "".join(f"\n{label} {addr(p, eid)} ({kind}): {shorten(text, 240)}"
+                       for label, p, eid, kind, text in records) or \
+        "\nno watch entry or diagnostic-register row is added or changed in this commit"
+    return item("cause", "fix", "is the cause established?", False,
+                evidence=digest(head, ctx.subject, *paths,
+                                *[f"{addr(p, e)}={t}" for _, p, e, _, t in records]),
+                excerpt=excerpt,
+                question="This commit is typed fix. A failure seen once gets a watch entry, "
+                         "added or updated in this commit, recording symptom, date, diagnosis, "
+                         "fix and the condition that closes it. Is the cause established (name "
+                         "the entry and what established it) or unverified (name the entry)? "
+                         "If this failure recurred with the same diagnosis, name the "
+                         "diagnostic-register row added or updated in this commit.")
+
+
+def asked_items(ctx, head, records):
+    """What the work surfaced — a watch entry, a decision — asked of every
+    commit but a review (which changes only the claims it names); a fix
+    answers the watch question in its cause item. Evidence is bound to HEAD,
+    so each commit is asked afresh: a prose rule asked nowhere is the rule
+    that gets dropped (dl-asked)."""
+    col = ctx.staged
+    out = []
+    if subject_type(ctx.subject, "review") is not None:
+        return out
+    if subject_type(ctx.subject, "fix") is None:
         watches = [(p, e, k, t) for label, p, e, k, t in records if label == "watch entry"]
-        if subject_type(ctx.subject, "fix") is None:
-            excerpt = "".join(f"watch entry {addr(p, e)} ({k}): {shorten(t, 240)}\n"
-                              for p, e, k, t in watches) or \
-                "no watch entry is added or changed in this commit\n"
-            items.append(item("watched", "commit", "anything to watch?", False,
-                              evidence=digest(head, *[f"{addr(p, e)}={t}" for p, e, _, t in watches]),
-                              excerpt=excerpt.rstrip(),
-                              question="Did the work in this commit surface anything to watch: a "
-                                       "failure, a surprise, a one-off, something routed around or "
-                                       "resolved by assumption? Name the watch entry added or changed "
-                                       "in this commit, or answer none."))
-        rows = sorted((addr(p, rid), col.specs[p].text(rid) or "") for rid, p in ctx.rows.items())
-        excerpt = "".join(f"decision row {name}: {shorten(t, 240)}\n" for name, t in rows) or \
-            "no decision row is added or changed in this commit\n"
-        items.append(item("decided", "commit", "anything decided?", False,
-                          evidence=digest(head, *[f"{n}={t}" for n, t in rows]),
-                          excerpt=excerpt.rstrip(),
-                          question="Did the work in this commit decide anything: a choice made "
-                                   "against an alternative, in the files or in conversation? Name "
-                                   "the decision row added or changed in this commit, or answer none."))
-    # one-hop neighbors of changed claims and of changed text outside any claim
+        excerpt = "".join(f"watch entry {addr(p, e)} ({k}): {shorten(t, 240)}\n"
+                          for p, e, k, t in watches) or \
+            "no watch entry is added or changed in this commit\n"
+        out.append(item("watched", "commit", "anything to watch?", False,
+                        evidence=digest(head, *[f"{addr(p, e)}={t}" for p, e, _, t in watches]),
+                        excerpt=excerpt.rstrip(),
+                        question="Did the work in this commit surface anything to watch: a "
+                                 "failure, a surprise, a one-off, something routed around or "
+                                 "resolved by assumption? Name the watch entry added or changed "
+                                 "in this commit, or answer none."))
+    rows = sorted((addr(p, rid), col.specs[p].text(rid) or "") for rid, p in ctx.rows.items())
+    excerpt = "".join(f"decision row {name}: {shorten(t, 240)}\n" for name, t in rows) or \
+        "no decision row is added or changed in this commit\n"
+    out.append(item("decided", "commit", "anything decided?", False,
+                    evidence=digest(head, *[f"{n}={t}" for n, t in rows]),
+                    excerpt=excerpt.rstrip(),
+                    question="Did the work in this commit decide anything: a choice made "
+                             "against an alternative, in the files or in conversation? Name "
+                             "the decision row added or changed in this commit, or answer none."))
+    return out
+
+
+def derived_item(ctx, head):
+    """The bootloader is a derived view of the lock, open and risk lists
+    (P14, dl-bootloader): when a source moves — a watch entry, a decision row,
+    a sealed claim added, changed or removed — the line is regenerated whole,
+    or the commit says why it is unaffected. Asked of every commit but a
+    review; bench #4 left the line stale in 2/6 cells (dl-asked)."""
+    col = ctx.staged
+    if subject_type(ctx.subject, "review") is not None:
+        return None
+    sources = []
+    for (p, eid), kind in sorted(ctx.changed.items()):
+        spec = col.specs.get(p) or ctx.head_specs.get(p)
+        label = ("watch entry" if eid.startswith(WATCH_PREFIX) else
+                 "decision row" if eid.startswith("dl-") else
+                 "sealed claim" if spec is not None and eid in spec.sealed else None)
+        if label and eid != "status":
+            sources.append(f"{label} {addr(p, eid)} ({kind})")
+    if not sources:
+        return None
+    status = [(p, s) for p, s in col.specs.items() if "status" in s.elems]
+    view = "".join(f"\nbootloader {addr(p, 'status')}"
+                   f"{' (' + ctx.changed[(p, 'status')] + ')' if (p, 'status') in ctx.changed else ''}: "
+                   f"{shorten(s.text('status') or '', 300)}" for p, s in status) \
+        or "\nbootloader: the top matter (no element with id status)"
+    return item("derived", "bootloader", "is the bootloader re-derived?", False,
+                evidence=digest(head, *sources),
+                excerpt="\n".join(sources) + view,
+                question="These sources of the bootloader moved. Was the status line re-derived "
+                         "whole from the locked list, open table and top-risk source (answer "
+                         "rederived, after doing it in the files), or is it unaffected by this "
+                         "change (state why)?")
+
+
+def neighbor_relations(ctx):
+    """{(path, id): {(label, excerpt, evidence)}} — every unchanged claim one
+    hop from a changed claim (cites it or is cited by it), plus the claims
+    linked from changed text outside every id'd element."""
+    col = ctx.staged
     neighbors = {}
     for tp, fr, label, snippet in unanchored_links(ctx):
         neighbors.setdefault((tp, fr), set()).add((label, snippet, snippet))
     for (p, eid), kind in ctx.changed.items():
         if kind == "removed" or p not in col.specs:
             continue
-        s = col.specs[p]
-        for l in s.links:
+        for l in col.specs[p].links:
             if l["src"] != eid:
                 continue
             tp, fr = resolve(p, l["href"])
@@ -1889,20 +2310,66 @@ def judgment_items(ctx):
             tp = tp or q
             if ctx.changed.get((tp, fr)) in ("added", "changed"):
                 neighbors.setdefault((q, l["src"]), set()).add(claim_rel(ctx, tp, fr, "cites"))
-    for (np_, nid), rels in sorted(neighbors.items(), key=lambda kv: addr(*kv[0])):
-        if (np_, nid) in ctx.changed:
+    return {k: v for k, v in neighbors.items() if k not in ctx.changed}
+
+
+def changed_dependencies(ctx, np_, nid):
+    """Targets of NP_#NID's depends-on links whose rendered text this commit
+    changes. The obligation follows rendered text (owed_reviews), so the
+    review a holds answer records does too: a link-only change owes nothing."""
+    col = ctx.staged
+    out = []
+    for l in col.specs[np_].links_in(nid):
+        tp, fr = resolve(np_, l["href"])
+        tp = tp or np_
+        if l["rel"] != "depends-on" or l["src"] != nid or not fr:
             continue
-        ns = col.specs[np_]
-        ntext = ns.text(nid) or ""
+        was = ctx.head_specs[tp].text(fr) if tp in ctx.head_specs else None
+        if ctx.changed.get((tp, fr)) in ("added", "changed") and was != col.specs[tp].text(fr):
+            out.append(addr(tp, fr))
+    return out
+
+
+def neighbor_items(ctx):
+    """One item per neighbor. A dependent of a target this commit changes is
+    asked the review question here, so `holds` records the review (A1)
+    instead of leaving an obligation for an empty review: commit to clear."""
+    col = ctx.staged
+    out = []
+    for (np_, nid), rels in sorted(neighbor_relations(ctx).items(), key=lambda kv: addr(*kv[0])):
+        ntext = col.specs[np_].text(nid) or ""
         rels = sorted(rels)
         name = addr(np_, nid)
         lines = [f"{name}: {shorten(ntext, 300)}"]
         lines += [f"  {label}: {snippet}" for label, snippet, _ in rels]
-        items.append(item("neighbor", name, f"neighbor {name}", False,
-                          evidence=digest(ntext, *[ev for _, _, ev in rels]),
-                          excerpt="\n".join(lines),
-                          question=f"Does {name} still hold against the changed claims it "
-                                   "cites or is cited by? If not, fix it in the files."))
+        it = item("neighbor", name, f"neighbor {name}", False,
+                  evidence=digest(ntext, *[ev for _, _, ev in rels]),
+                  excerpt="\n".join(lines),
+                  question=f"Does {name} still hold against the changed claims it "
+                           "cites or is cited by? If not, fix it in the files.")
+        targets = changed_dependencies(ctx, np_, nid)
+        if targets:
+            it["claim"] = f"{repo_rel(np_)}#{nid}"
+            it["question"] += (f" It depends on {', '.join(targets)}: holds records this "
+                               f"commit as its review (Reconciled: reviewed {it['claim']}); "
+                               "a fix to the claim itself takes a review: commit.")
+        out.append(it)
+    return out
+
+
+def judgment_items(ctx):
+    """Every question the candidate is asked, in QUESTION_ORDER."""
+    head = head_sha() or "unborn"
+    records = cause_records(ctx)
+    items = read_items(ctx) + reseed_items(ctx) + sealed_items(ctx) + confirm_items(ctx)
+    items += removed_row_items(ctx)
+    if subject_type(ctx.subject, "fix") is not None:
+        items.append(cause_item(ctx, head, records))
+    items += asked_items(ctx, head, records)
+    derived = derived_item(ctx, head)
+    if derived:
+        items.append(derived)
+    items += neighbor_items(ctx)
     order = {k: n for n, k in enumerate(QUESTION_ORDER)}
     return sorted(items, key=lambda it: (it["mech"], order.get(it["kind"], 99)))
 
@@ -2043,10 +2510,6 @@ def short(sha):
     """A 12-char commit prefix, or the unborn-HEAD phrase whole."""
     return sha[:12] if sha else "the first commit"
 
-def head_sha():
-    return git("rev-parse", "HEAD").strip() if head_status() == "ok" else None
-
-
 def file_sha256(path):
     digest_ = hashlib.sha256()
     with open(path, "rb") as f:
@@ -2076,6 +2539,8 @@ def legal_forms(kind):
             form += " --ref " + REF_NAMES[answer]
         if needs_reason:
             form += ' --reason "TEXT"'
+        if answer in REF_OPTIONAL:
+            forms.append(form.replace("--answer " + answer, f"--answer {answer} --ref {REF_NAMES[answer]}"))
         forms.append(form)
     return forms
 
@@ -2098,9 +2563,10 @@ def diagnostic_spans(spec):
     return spans
 
 
-def validate(it, given, ctx, other_reasons):
-    """GIVEN is {"answer", "ref", "reason"}. -> (answer list, trailer or None)
-    for a legal answer; raise ValueError naming what is wrong."""
+def answer_shape(it, given, other_reasons):
+    """The answer's form: a legal word for the item kind, a --ref iff it takes
+    one (optional for a correction), a --reason iff it takes one, of at
+    least three words and not another item's. -> (answer, ref, reason)."""
     kind = it["kind"]
     answer = (given.get("answer") or "").strip()
     ref = (given.get("ref") or "").strip()
@@ -2113,80 +2579,127 @@ def validate(it, given, ctx, other_reasons):
     needs_ref, needs_reason = ANSWERS[kind][answer]
     if needs_ref and not ref:
         raise ValueError(f"{answer} needs --ref {REF_NAMES[answer]}")
-    if ref and not needs_ref:
+    if ref and not needs_ref and answer not in REF_OPTIONAL:
         raise ValueError(f"{answer} takes no --ref")
     if needs_reason and not text:
         raise ValueError(f'{answer} needs --reason "TEXT"')
     if text and not needs_reason:
         raise ValueError(f"{answer} takes no --reason")
-    name = it["key"].split(":", 1)[1]
     if needs_reason:
         if len(text.split()) < 3:
             raise ValueError("a reason of at least three words is required")
         if text.casefold() in other_reasons:
             raise ValueError("this reason is already recorded for another item; "
                              "each answer states its own reason")
+    return answer, ref, text
 
-    def changed_row(what):
-        """REF as an id'd table row added or changed in this commit."""
-        found = find_id(ctx, ref)
-        if found is None:
-            raise ValueError(f"no {what} {ref!r} in the staged collection")
-        p, eid = found
-        if ctx.staged.specs[p].tags.get(eid) != "tr":
-            raise ValueError(f"{ref} is not a table row; a {what} is a row")
-        if ctx.changed.get(found) not in ("added", "changed"):
-            raise ValueError(f"{ref} is not added or changed in this commit; record the "
-                             f"{what} in the same commit")
-        return found
 
-    if kind in ("read", "neighbor"):
-        return [answer], None
-    if kind in WAIVABLE:
-        return [answer, text], f"Reconciled: waived {kind} {name} ({answer}) — {text}"
-    if kind in ("watched", "decided"):
-        if answer == "none":
-            return ["none"], ("Reconciled: nothing watched" if kind == "watched"
-                              else "Reconciled: nothing decided")
-        if kind == "watched":
-            p, wid = changed_row("watch entry")
-            if not wid.startswith(WATCH_PREFIX):
-                raise ValueError(f"{ref} is not a watch entry: a watch entry is a row whose id "
-                                 f"starts with {WATCH_PREFIX}")
-            return [answer, addr(p, wid)], f"Reconciled: watched at {addr(p, wid)}"
-        p, rid = changed_row("decision row")
-        if not rid.startswith("dl-"):
-            raise ValueError(f"{ref} is not a decision row (dl- id)")
-        return [answer, addr(p, rid)], f"Reconciled: decided at {addr(p, rid)}"
-    if kind in ("sealed", "removed"):
-        if needs_reason:
-            verb = "correction" if kind == "sealed" else "retired"
-            trailer = (f"Reconciled: correction {name} \u2014 {text}" if kind == "sealed"
-                       else f"Reconciled: {name} retired \u2014 {text}")
-            return [verb, text], trailer
-        p, rid = changed_row("decision row")
-        if not rid.startswith("dl-"):
-            raise ValueError(f"{ref} is not a decision row (dl- id)")
-        if kind == "sealed":
-            return [answer, rid], f"Reconciled: decision {name} by {rid}"
-        return [answer, rid], f"Reconciled: {name} replaced by {rid}"
-    # cause
+def changed_row(ctx, ref, what, prefix=None):
+    """REF as an id'd table row added or changed in this commit -> (path, id);
+    with PREFIX, a row whose id starts with it (dl-, watch-)."""
+    found = find_id(ctx, ref)
+    if found is None:
+        raise ValueError(f"no {what} {ref!r} in the staged collection")
+    p, eid = found
+    if ctx.staged.specs[p].tags.get(eid) != "tr":
+        raise ValueError(f"{ref} is not a table row; a {what} is a row")
+    if ctx.changed.get(found) not in ("added", "changed"):
+        raise ValueError(f"{ref} is not added or changed in this commit; record the "
+                         f"{what} in the same commit")
+    if prefix == WATCH_PREFIX and not eid.startswith(WATCH_PREFIX):
+        raise ValueError(f"{ref} is not a watch entry: a watch entry is a row whose id "
+                         f"starts with {WATCH_PREFIX}")
+    if prefix == "dl-" and not eid.startswith("dl-"):
+        raise ValueError(f"{ref} is not a decision row (dl- id)")
+    return found
+
+
+def existing_decision_row(ctx, ref):
+    """REF as a decision row present in the staged collection -> its id."""
+    found = find_id(ctx, ref)
+    if found is None:
+        raise ValueError(f"no decision row {ref!r} in the staged collection")
+    p, rid = found
+    if ctx.staged.specs[p].tags.get(rid) != "tr" or not rid.startswith("dl-"):
+        raise ValueError(f"{ref} is not a decision row (dl- id); a correction names the "
+                         "decision it restores")
+    return rid
+
+
+def answer_sealed(ctx, name, answer, ref, text):
+    """A sealed change: a decision row changed here, or a correction naming
+    the row it restores, else held for a later session's confirmation."""
+    if answer == "correction":
+        if not ref:
+            return [answer, text], f"Reconciled: correction {name} (awaiting confirmation) \u2014 {text}"
+        rid = existing_decision_row(ctx, ref)
+        return [answer, rid, text], f"Reconciled: correction {name} per {rid} \u2014 {text}"
+    _, rid = changed_row(ctx, ref, "decision row", "dl-")
+    return [answer, rid], f"Reconciled: decision {name} by {rid}"
+
+
+def answer_removed(ctx, name, answer, ref, text):
+    if answer == "retired":
+        return ["retired", text], f"Reconciled: {name} retired \u2014 {text}"
+    _, rid = changed_row(ctx, ref, "decision row", "dl-")
+    return [answer, rid], f"Reconciled: {name} replaced by {rid}"
+
+
+def answer_asked(ctx, kind, answer, ref):
+    """watched / decided: none, or a row of the right kind changed here."""
+    if answer == "none":
+        return ["none"], "Reconciled: nothing watched" if kind == "watched" else "Reconciled: nothing decided"
+    if kind == "watched":
+        p, wid = changed_row(ctx, ref, "watch entry", WATCH_PREFIX)
+        return [answer, addr(p, wid)], f"Reconciled: watched at {addr(p, wid)}"
+    p, rid = changed_row(ctx, ref, "decision row", "dl-")
+    return [answer, addr(p, rid)], f"Reconciled: decided at {addr(p, rid)}"
+
+
+def answer_cause(ctx, answer, ref, text):
+    """A fix's cause: established or unverified at a watch entry changed
+    here, or a recurrence at a diagnostic-register row changed here."""
     if answer == "recurrence":
-        p, rid = changed_row("diagnostic-register row")
+        p, rid = changed_row(ctx, ref, "diagnostic-register row")
         off = ctx.staged.specs[p].elems[rid][0]
         if not any(a <= off < b for a, b in diagnostic_spans(ctx.staged.specs[p])):
             raise ValueError(f"{ref} is not inside a diagnostic register (an element with id "
                              "diagnostic, or a heading titled Diagnostic register)")
         return [answer, addr(p, rid)], f"Reconciled: recurrence recorded at {addr(p, rid)}"
-    p, wid = changed_row("watch entry")
-    if not wid.startswith(WATCH_PREFIX):
-        raise ValueError(f"{ref} is not a watch entry: a watch entry is a row whose id "
-                         f"starts with {WATCH_PREFIX}")
+    p, wid = changed_row(ctx, ref, "watch entry", WATCH_PREFIX)
     where = addr(p, wid)
     if answer == "established":
-        return [answer, where, text], (f"Reconciled: cause established, watched at {where} "
-                                        f"\u2014 {text}")
+        return [answer, where, text], f"Reconciled: cause established, watched at {where} \u2014 {text}"
     return [answer, where], f"Reconciled: cause unverified, watched at {where}"
+
+
+def validate(it, given, ctx, other_reasons):
+    """GIVEN is {"answer", "ref", "reason"}. -> (answer list, trailer or None)
+    for a legal answer; raise ValueError naming what is wrong."""
+    kind = it["kind"]
+    answer, ref, text = answer_shape(it, given, other_reasons)
+    name = it["key"].split(":", 1)[1]
+    if kind == "neighbor" and it.get("claim"):
+        return [answer], f"Reconciled: reviewed {it['claim']}"
+    if kind in ("read", "neighbor"):
+        return [answer], None
+    if kind in WAIVABLE:
+        return [answer, text], f"Reconciled: waived {kind} {name} ({answer}) — {text}"
+    if kind in ("watched", "decided"):
+        return answer_asked(ctx, kind, answer, ref)
+    if kind == "confirm":
+        return [answer, text], f"Reconciled: confirmed {it['claim']} \u2014 {text}"
+    if kind == "reseed":
+        return [answer, text], f"Reconciled: reseed {it['claim']} \u2014 {text}"
+    if kind == "derived":
+        if answer == "rederived":
+            return [answer], "Reconciled: bootloader rederived"
+        return [answer, text], f"Reconciled: bootloader unaffected \u2014 {text}"
+    if kind == "sealed":
+        return answer_sealed(ctx, name, answer, ref, text)
+    if kind == "removed":
+        return answer_removed(ctx, name, answer, ref, text)
+    return answer_cause(ctx, answer, ref, text)
 
 
 def tick_given(tick):
@@ -2227,6 +2740,12 @@ def evaluate(col, subject=None, today=None):
         it["status"], it["answer"], it["trailer"] = "answered", answer, trailer
         if tick_reason(tick):
             reasons[it["key"]] = tick_reason(tick)
+    # A holds answer on a dependent is its review at this commit: the same
+    # edge's outstanding debt is discharged by it, and the note says so.
+    reviewed = {it["claim"] for it in items if it.get("claim") and it["status"] == "answered"}
+    items = [it for it in items if it.get("dependent") not in reviewed]
+    ctx.notes = [n + " — reviewed by this commit (holds)" if n.startswith("this commit creates a "
+                 "review obligation ") and n.split()[6] in reviewed else n for n in ctx.notes]
     return ctx, items, state
 
 
@@ -2324,9 +2843,10 @@ def report_structure(col, markers=True):
     for d in col.disconnected:
         print(f"  note: {rel(d)} is not linked from the collection (disconnected)")
     fails = check_structure(col, markers=markers)
-    for p, s in col.specs.items():
-        if not s.count_decls:
-            print(f"  note: {rel(p)} declares no count checksums (data-count)")
+    # A supporting spec without counts is the normal case (detail split off);
+    # main holds the enumerations a dropped item would silently shrink.
+    if col.main in col.specs and not col.specs[col.main].count_decls:
+        print(f"  note: {rel(col.main)} declares no count checksums (data-count)")
     rc = 0
     if fails:
         print(f"FAIL — {len(fails)} issue(s):")
@@ -2340,6 +2860,9 @@ def report_structure(col, markers=True):
         print(f"PASS — {len(col.specs)} file(s); {rel(col.main)}: {counts}; "
               f"all structural checks green")
     return rc
+
+
+# ================================================================= verbs
 
 
 def cmd_check(args):
@@ -2777,23 +3300,41 @@ def size_line(col):
     return f"{now} words ({'; '.join(parts)})"
 
 
-def obligations_report(col, today=None):
-    """Obligations computed from files and git history, never from memory."""
-    today = today or datetime.now().date()
-    rc = report_structure(col)
+def owed_now(col):
+    """Review obligations against the working tree, incomplete history excluded."""
     if repo_root() is not None:
         _, dirty = uncommitted([rel(x) for x in col.specs])
-        print_owed(owed_reviews(col, dirty), col=col)
+        owed = owed_reviews(col, dirty)
     else:
-        print_owed(owed_reviews(col), col=col)
+        owed = owed_reviews(col)
+    return owed, [r for r in owed if not r.get("incomplete")]
+
+
+def obligations_report(col, today=None):
+    """Obligations computed from files and git history, never from memory.
+    -> (structure rc, True when nothing is owed: green, no review owed, no
+    watch entry expired)."""
+    today = today or datetime.now().date()
+    rc = report_structure(col)
+    owed, established = owed_now(col)
+    print_owed(owed, col=col)
     print(watch_line(col))
-    for it in watch_items(col, today):
+    expired = watch_items(col, today)
+    for it in expired:
         print(f"WATCH — {it['title']}" + (f": {it['detail']}" if it["detail"] else ""))
+    awaiting = []
+    if repo_root() is not None and head_status() == "ok":
+        sealed = {f"{repo_rel(p)}#{i}" for p, s in col.specs.items() for i in s.sealed}
+        awaiting = [(n, sha, why) for n, sha, why in pending_corrections(repo_root()) if n in sealed]
+        if awaiting:
+            print(f"SEALED CORRECTIONS AWAITING CONFIRMATION ({len(awaiting)}): " + "; ".join(
+                f"{n} (commit {sha[:7]} \u2014 {why})" for n, sha, why in awaiting))
+            print("  a later session confirms each in reconcile, or fixes the claim")
     for p, s in col.specs.items():
         if s.retired_changes:
             print(f"  note: {rel(p)}: data-changes is retired and ignored; sealed changes are "
                   "answered in reconcile as a decision change or a correction")
-    return rc
+    return rc, rc == 0 and not established and not expired and not awaiting
 
 
 GATE_HOOKS = ("pre-commit", "prepare-commit-msg", "commit-msg")
@@ -2853,6 +3394,14 @@ def cmd_start(args):
     resume_lines, refusal = [], None
     if in_git:
         request = read_state("request.json")
+        if request and observation_only(request):
+            # Opened clean, committed nothing, answered nothing, left nothing:
+            # a read. There is nothing to hand off, so no finish was owed (B4).
+            print(f"REQUEST — the request opened at {short(request.get('start'))} was an "
+                  "observation (opened clean; no commit, answer or edit): closed")
+            for name in ("request.json", "reconcile.json", "receipt.json"):
+                remove_state(name)
+            request = None
         if request and request.get("main") != repo_rel(col.main):
             print(f"REQUEST — an open request belongs to {request.get('main')}; "
                   f"ask the user before opening one for {rel(col.main)}")
@@ -2919,7 +3468,11 @@ def cmd_start(args):
     print(f"SEALED ({len(sealed)}): " + (", ".join(sealed) or "none"))
     print(f"DEPENDS-ON EDGES: {len(deps)}")
     print("OBLIGATIONS")
-    rc = obligations_report(col)
+    rc, clean = obligations_report(col)
+    print_shared_literals(col)
+    if in_git and (request := read_state("request.json")) and request.get("start") == head_sha() \
+            and "clean" not in request:
+        write_state("request.json", {**request, "clean": clean})
     missing = missing_hooks() if in_git else []
     if missing:
         print("HOOKS — not installed, or from an older lspec: " + ", ".join(missing)
@@ -2928,6 +3481,17 @@ def cmd_start(args):
           "type: one transition") + ", work the checklist, `git commit --no-edit`. "
           "Hand off with " + command(col, "finish") + " on a clean tree.")
     return rc
+
+
+def observation_only(request):
+    """An open request that opened with nothing owed and has since committed,
+    answered and edited nothing. It reads as spec to nobody and owns no
+    answers, so the next start closes it instead of asking (dl-openask)."""
+    if not request.get("clean") or request.get("start") != head_sha():
+        return False
+    if working_changes(repo_root()):
+        return False
+    return not (read_state("reconcile.json") or {}).get("ticks")
 
 
 def cmd_finish(args):
@@ -2944,6 +3508,15 @@ def cmd_finish(args):
             print(f"  {kind}: {path}")
         print("Reconcile and commit this work, or discard it. Asking the user whether to "
               "commit is a pause partway through the request, not a handoff.")
+        return 1
+    owed, established = owed_now(col)
+    if established:
+        # Debt handed off is a lie the next session inherits (B2). Incomplete
+        # history is a condition, not debt, and does not block.
+        print(f"NOT HANDED OFF — review owed ({len(established)}); finish requires none:")
+        print_owed(owed, col=col)
+        print("Review each dependent against committed state and record it: "
+              + command(col, "review", *sorted({addr(*r["dependent"]) for r in established})))
         return 1
     request = read_state("request.json")
     head = head_sha()
@@ -2969,7 +3542,9 @@ def cmd_finish(args):
           "as an open item?")
     print("  - Did a failure appear for the first time without a watch entry carrying its "
           "closing condition?")
-    print("  - Is anything above (REVIEW OWED, WATCH, FAIL) yours to clear now?")
+    print("  - A sealed correction above awaits a later session: did it name the decision it "
+          "restores, if there is one?")
+    print("  - Is anything above (WATCH, FAIL) yours to clear now?")
     if request is not None:
         remove_state("request.json")
         remove_state("reconcile.json")
@@ -3095,27 +3670,28 @@ def after_mv(main):
     return rc
 
 
-def cmd_review(args):
-    col = load(args)
-    if repo_root() is None:
-        print("lspec review: not a git checkout", file=sys.stderr); return 2
-    retired = retired_dependencies(col)
+class ReviewRefused(Exception):
+    """A review verb refusal: the message, printed to stderr, exits 2."""
+
+
+def review_claims(col, targets, retired):
+    """Resolve the claims a review names -> (names, (path, id) pairs, files
+    the commit carries: each claim's file, its targets' files, and the target
+    of any edge the commit retires). The claim itself, not a container around
+    one: the edge's source id."""
     retiring = {(fp, link["src"]) for fp, link, tp, fr in retired}
     names, files, claims = [], set(), []
-    for t in args.claims:
+    for t in targets:
         try:
             p, frag = col.parse_target(t)
         except ValueError as e:
-            print(f"lspec review: {e}", file=sys.stderr); return 2
+            raise ReviewRefused(str(e))
         if not frag:
-            print(f"lspec review: {t} names a file; name the dependent claim", file=sys.stderr)
-            return 2
-        # the claim itself, not a container around one: the edge's source id
+            raise ReviewRefused(f"{t} names a file; name the dependent claim")
         deps = [l for l in col.specs[p].links_in(frag)
                 if l["rel"] == "depends-on" and l["src"] == frag]
         if not deps and (p, frag) not in retiring:
-            print(f"lspec review: {addr(p, frag)} has no depends-on link; nothing to review",
-                  file=sys.stderr); return 2
+            raise ReviewRefused(f"{addr(p, frag)} has no depends-on link; nothing to review")
         names.append(f"{repo_rel(p)}#{frag}")
         claims.append((p, frag))
         files.add(repo_rel(p))
@@ -3125,57 +3701,87 @@ def cmd_review(args):
         for fp, link, tp, fr in retired:
             if (fp, link["src"]) == (p, frag):
                 files.add(repo_rel(tp))
+    return names, claims, files
+
+
+def already_reviewed(col, claims):
+    """Lines naming the recorded review of each claim that owes nothing."""
+    out = []
+    for p, f in claims:
+        for l in col.specs[p].links_in(f):
+            if l["rel"] != "depends-on" or l["src"] != f:
+                continue
+            try:
+                sha, how = review_baseline(p, f, l["href"])
+            except HistoryUnavailable:
+                continue
+            if sha and how in ("review", "reviewed"):
+                record = (f"Reconciled: reviewed {repo_rel(p)}#{f}" if how == "reviewed"
+                          else f"review: {repo_rel(p)}#{f}")
+                out.append(f"  {addr(p, f)}: reviewed at {sha[:7]} ({record})")
+    return out
+
+
+def review_preflight(col, names, claims, files, retired):
+    """Everything that refuses a review before it stages: a red tree, a claim
+    that owes nothing, unrelated staged changes, and — since the verb stages
+    whole files — a change in a named file to a claim the review does not
+    name, which would ride into history under review:, unasked."""
     fails = check_structure(col)
     if fails:
-        print("lspec review: collection is red; a review must land on a green tree:",
-              file=sys.stderr)
-        for f in fails:
-            print("  " + f, file=sys.stderr)
-        return 2
-    # Include edge retirement even when HEAD had no outstanding debt.
+        raise ReviewRefused("collection is red; a review must land on a green tree:\n"
+                            + "\n".join("  " + f for f in fails))
+    retiring = {(fp, link["src"]) for fp, link, tp, fr in retired}
     _, dpaths = uncommitted([rel(x) for x in col.specs])
     owed = {r["dependent"] for r in owed_reviews(col, dpaths)} | retiring
-    clear = [addr(p, f) for p, f in claims if (p, f) not in owed]
+    clear = [(p, f) for p, f in claims if (p, f) not in owed]
     if clear:
-        print("lspec review: nothing is owed for " + ", ".join(clear)
-              + " — a review names the obligation it clears", file=sys.stderr)
-        return 2
-    # The commit carries the named claims and their targets, nothing else.
+        raise ReviewRefused("nothing is owed for " + ", ".join(addr(p, f) for p, f in clear)
+                            + " — a review names the obligation it clears"
+                            + "".join("\n" + l for l in already_reviewed(col, clear)))
     extra = set(git("diff", "--cached", "--name-only").splitlines()) - files
     if extra:
-        print("lspec review: unrelated changes are staged (" + ", ".join(sorted(extra))
-              + "); commit or unstage them first", file=sys.stderr)
-        return 2
+        raise ReviewRefused("unrelated changes are staged (" + ", ".join(sorted(extra))
+                            + "); commit or unstage them first")
+    if head_status() != "ok":
+        return
     root = repo_root()
-    # The verb stages whole files, so it looks at them claim by claim first: a
-    # change in a named file to a claim the review does not name would ride
-    # into history under review:, unasked. Refuse that before staging.
-    if head_status() == "ok":
-        head_specs, work_specs = {}, {}
-        for f in files:
-            p = canon(os.path.join(root, f))
-            try:
-                head_specs[p] = file_at("HEAD", p)
-            except HistoryUnavailable:
-                head_specs[p] = None
-            work_specs[p] = col.specs.get(p)
-            if work_specs[p] is None and os.path.exists(p) and p.endswith(".html"):
-                work_specs[p] = Spec(p)
-        changed = changed_claims({p: s for p, s in head_specs.items() if s},
-                                 {p: s for p, s in work_specs.items() if s})
-        offenders = review_offenders(set(names), changed, head_specs, work_specs, retired)
-        if offenders:
-            print("lspec review: these files hold changes to claims the review does not name:",
-                  file=sys.stderr)
-            for name, kind in offenders:
-                print(f"  {name} ({kind})", file=sys.stderr)
-            print("commit them separately under their own type, then review", file=sys.stderr)
-            return 2
+    head_specs, work_specs = {}, {}
+    for f in files:
+        p = canon(os.path.join(root, f))
+        try:
+            head_specs[p] = file_at("HEAD", p)
+        except HistoryUnavailable:
+            head_specs[p] = None
+        work_specs[p] = col.specs.get(p)
+        if work_specs[p] is None and os.path.exists(p) and p.endswith(".html"):
+            work_specs[p] = Spec(p)
+    changed = changed_claims({p: s for p, s in head_specs.items() if s},
+                             {p: s for p, s in work_specs.items() if s})
+    offenders = review_offenders(set(names), changed, head_specs, work_specs, retired)
+    if offenders:
+        raise ReviewRefused("these files hold changes to claims the review does not name:\n"
+                            + "\n".join(f"  {name} ({kind})" for name, kind in offenders)
+                            + "\ncommit them separately under their own type, then review")
+
+
+def cmd_review(args):
+    col = load(args)
+    root = repo_root()
+    if root is None:
+        print("lspec review: not a git checkout", file=sys.stderr); return 2
+    retired = retired_dependencies(col)
+    try:
+        names, claims, files = review_claims(col, args.claims, retired)
+        review_preflight(col, names, claims, files, retired)
+    except ReviewRefused as e:
+        print(f"lspec review: {e}", file=sys.stderr)
+        return 2
+    # A retired target may already be deleted from both index and worktree.
+    # Its staged deletion belongs in the commit but cannot be git-added again.
     stageable = [f for f in sorted(files)
                  if os.path.exists(os.path.join(root, f))
                  or exists_at(os.path.join(root, f), "staged")]
-    # A retired target may already be deleted from both index and worktree.
-    # Its staged deletion belongs in the commit but cannot be git-added again.
     if stageable:
         git("add", "--", *stageable, cwd=root)
     subject = "review: " + ", ".join(names)

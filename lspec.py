@@ -1551,7 +1551,7 @@ ANSWERS = {
     "placeholder": {"literal": (False, True)},
     "empty": {"structural": (False, True)},
 }
-REF_NAMES = {"decision": "ROW", "replaced": "ROW", "established": "WATCH",
+REF_NAMES = {"read-whole": "ID", "decision": "ROW", "replaced": "ROW", "established": "WATCH",
              "unverified": "WATCH", "recurrence": "ROW", "watched": "WATCH",
              "decided": "ROW", "correction": "ROW"}
 # A correction names the decision row it restores, or is held for a later
@@ -2059,15 +2059,39 @@ def read_items(ctx):
         if fp in edited and tp in col.specs:
             governing.add(tp)
     out = []
+    probes = getattr(ctx, "probes", {}) or {}
     for p in sorted(governing, key=lambda p: (p != col.main, rel(p))):
-        lines = len(col.specs[p].raw.splitlines())
-        out.append(item("read", rel(p), f"read {rel(p)} whole", False,
-                        evidence=digest(repo_rel(p), start),
-                        excerpt=f"{rel(p)} — {lines} lines as staged",
-                        question=f"Have you read {rel(p)} whole in this request — every line, "
-                                 "in sequential pages, with no skipped ranges and no search "
-                                 "standing in for reading?"))
+        spec = col.specs[p]
+        lines = len(spec.raw.splitlines())
+        it = item("read", rel(p), f"read {rel(p)} whole", False,
+                  evidence=digest(repo_rel(p), start),
+                  excerpt=f"{rel(p)} — {lines} lines as staged",
+                  question=f"Have you read {rel(p)} whole in this request — every line, "
+                           "in sequential pages, with no skipped ranges and no search "
+                           "standing in for reading?")
+        probe = read_probe(spec, start, repo_rel(p), probes.get(it["key"], 0))
+        if probe:
+            it["probe"], it["expect"] = probe
+            it["excerpt"] += (f"\nprobe: the id'd element that directly follows #{probe[0]} "
+                              "in document order")
+            it["question"] += (f" Name, as --ref, the id of the element that directly follows "
+                               f"#{probe[0]}; a wrong id moves the probe.")
+        out.append(it)
     return out
+
+
+def read_probe(spec, start, name, attempt):
+    """A question only the file answers: (probe id, the id that directly
+    follows it in document order), chosen from the worktree secret, the
+    request and the file, and moved by each wrong answer. None when the file
+    has fewer than two id'd elements. It raises a skipped read from free to
+    one look at the file; it does not prove the read (dl-wholeload)."""
+    ids = [i for i, _ in sorted(spec.elems.items(), key=lambda kv: kv[1][0])]
+    if len(ids) < 2:
+        return None
+    h = hmac.new(secret(), f"read\0{start}\0{name}\0{attempt}".encode(), hashlib.sha256).hexdigest()
+    i = int(h, 16) % (len(ids) - 1)
+    return ids[i], ids[i + 1]
 
 
 def sealed_cause(ctx, p, i, staged):
@@ -2541,10 +2565,12 @@ def index_sha256():
 
 # ---- answers
 
-def legal_forms(kind):
-    """Printable legal answers for an item kind."""
+def legal_forms(kind, probe=False):
+    """Printable legal answers for an item kind; a probed read takes --ref."""
     forms = []
     for answer, (needs_ref, needs_reason) in ANSWERS[kind].items():
+        if kind == "read":
+            needs_ref = probe
         form = "--answer " + answer
         if needs_ref:
             form += " --ref " + REF_NAMES[answer]
@@ -2588,9 +2614,11 @@ def answer_shape(it, given, other_reasons):
     if answer not in ANSWERS[kind]:
         raise ValueError(f"{answer!r} is not a legal answer here; legal answers: " + forms)
     needs_ref, needs_reason = ANSWERS[kind][answer]
+    if kind == "read":
+        needs_ref = bool(it.get("probe"))
     if needs_ref and not ref:
         raise ValueError(f"{answer} needs --ref {REF_NAMES[answer]}")
-    if ref and not needs_ref and answer not in REF_OPTIONAL:
+    if ref and not needs_ref and answer not in REF_OPTIONAL and kind != "read":
         raise ValueError(f"{answer} takes no --ref")
     if needs_reason and not text:
         raise ValueError(f'{answer} needs --reason "TEXT"')
@@ -2692,7 +2720,12 @@ def validate(it, given, ctx, other_reasons):
     name = it["key"].split(":", 1)[1]
     if kind == "neighbor" and it.get("claim"):
         return [answer], f"Reconciled: reviewed {it['claim']}"
-    if kind in ("read", "neighbor"):
+    if kind == "read":
+        if it.get("probe") and ref != it["expect"]:
+            raise ValueError(f"#{ref or '?'} does not directly follow #{it['probe']}; the probe "
+                             "has moved — run --next and read the file")
+        return [answer], None
+    if kind == "neighbor":
         return [answer], None
     if kind in WAIVABLE:
         return [answer, text], f"Reconciled: waived {kind} {name} ({answer}) — {text}"
@@ -2733,6 +2766,7 @@ def evaluate(col, subject=None, today=None):
         state["subject"] = subject
     ctx = gather(col, state.get("subject"), request)
     ctx.body = state.get("body") or ""
+    ctx.probes = state.get("probes") or {}
     today = today or datetime.now().date()
     items = mechanical_items(ctx, today) + judgment_items(ctx)
     ticks = state.get("ticks", {})
@@ -2744,6 +2778,8 @@ def evaluate(col, subject=None, today=None):
         if it["mech"] or not tick or tick.get("evidence") != it["evidence"]:
             continue
         others = {r for k, r in reasons.items() if k != it["key"]}
+        if it["kind"] == "read":
+            it.pop("probe", None)       # answered once in this request: the tick holds
         try:
             answer, trailer = validate(it, tick_given(tick), ctx, others)
         except ValueError as e:
@@ -3171,7 +3207,7 @@ def cmd_reconcile(args):
             tok = token(it)
             print(f"  token: {tok}")
             print("  answer with one of:")
-            for form in legal_forms(it["kind"]):
+            for form in legal_forms(it["kind"], bool(it.get("probe"))):
                 print("    " + command(col, "reconcile", "--tick", tok) + " " + form)
             return 0
     if args.tick:
@@ -3192,6 +3228,10 @@ def cmd_reconcile(args):
             try:
                 answer, _ = validate(it, given, ctx, others)
             except ValueError as e:
+                if it["kind"] == "read" and it.get("probe") and given.get("ref"):
+                    probes = state.setdefault("probes", {})
+                    probes[it["key"]] = probes.get(it["key"], 0) + 1
+                    write_state("reconcile.json", state)
                 print(f"lspec reconcile: {e}", file=sys.stderr)
                 return 1
             state.setdefault("ticks", {})[it["key"]] = {
@@ -3895,7 +3935,10 @@ per legal answer; --tick TOKEN --answer ANSWER answers it, with --ref ID or
 --reason "TEXT" where the answer needs one (reasons: three words or more, not
 another item's). Each answer is recorded as a Reconciled: trailer.
   read         main, every edited collection file, and files holding targets of
-               their dependencies: read-whole
+               their dependencies: read-whole --ref ID, the id directly after the
+               probed id in document order; a wrong id moves the probe. One
+               look at the file answers it: it prices a skipped read, it does
+               not prove a whole one
   reseed       a seed: subject on a file that already has a seed: boundary (its
                review baselines are discarded): reseed --reason
   caveat       an inline "as of <date>": fix the file | quoted --reason |

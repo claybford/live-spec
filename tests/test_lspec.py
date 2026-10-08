@@ -410,10 +410,27 @@ def answer_all(d, answers=None, limit=400):
             return log
         kind = re.search(r"ITEM \d+ of \d+ \[(\w+)\]", out).group(1)
         reply = answers.get(kind) or DEFAULT_ANSWERS[kind](n)
-        rc, out = cli(d, "reconcile", "--tick", tok.group(1), *tick_argv(reply))
+        rc, out = cli(d, "reconcile", "--tick", tok.group(1), *reply_argv(d, out, reply))
         assert "answered [" in out, out
         log += out
     raise AssertionError("checklist did not converge")
+
+
+def reply_argv(d, shown, reply):
+    """tick_argv for REPLY, plus the --ref a read probe in SHOWN (the --next
+    output) asks for, when the reply carries none."""
+    argv = tick_argv(reply)
+    probe = re.search(r"probe: the id'd element that directly follows #(\S+)", shown)
+    if probe and "--ref" not in argv and re.search(r"\[read\]", shown):
+        path = re.search(r"read (\S+) whole", shown).group(1)
+        argv += ["--ref", following_id(os.path.join(d, path), probe.group(1))]
+    return argv
+
+
+def following_id(path, probe):
+    """The id directly after PROBE in document order — what a read probe asks."""
+    ids = [i for i, _ in sorted(lspec.Spec(path).elems.items(), key=lambda kv: kv[1][0])]
+    return ids[ids.index(probe) + 1]
 
 
 def settle(d, subject, body=None, answers=None):
@@ -2661,6 +2678,59 @@ class SealCorrection(unittest.TestCase):
         self.assertIn('already open', cli(d, 'start')[1])  # not an observation
 
 
+# ------------------------------------------------ read probe (dl-wholeload)
+
+class ReadProbe(unittest.TestCase):
+    """The read item asks one thing only the file answers: the id that
+    directly follows a chosen id. A wrong id moves the probe; a right one
+    holds for the request, across later edits."""
+
+    def fixture(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        ensure_request(d)
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        return d
+
+    def probe(self, d):
+        out = cli(d, 'reconcile', '--subject', 'docs: derate', '--next')[1]
+        self.assertIn('[read] read main.html whole', out)
+        tok = re.search(r'token: (\w+)', out).group(1)
+        probe = re.search(r"follows #(\S+) in document order", out).group(1)
+        self.assertIn('--answer read-whole --ref ID', out)
+        return tok, probe
+
+    def test_wrong_id_moves_the_probe_and_the_right_one_holds(self):
+        d = self.fixture()
+        tok, probe = self.probe(d)
+        rc, out = cli(d, 'reconcile', '--tick', tok, '--answer', 'read-whole')
+        self.assertEqual(rc, 1); self.assertIn('needs --ref ID', out)
+        rc, out = cli(d, 'reconcile', '--tick', tok, '--answer', 'read-whole', '--ref', 'nowhere')
+        self.assertEqual(rc, 1); self.assertIn('does not directly follow', out)
+        tok2, probe2 = self.probe(d)
+        self.assertEqual(tok, tok2)                       # same item, same evidence
+        self.assertNotEqual(probe, probe2)                # a different question
+        rc, out = cli(d, 'reconcile', '--tick', tok2, '--answer', 'read-whole', '--ref',
+                      following_id(os.path.join(d, 'main.html'), probe2))
+        self.assertEqual(rc, 1, out); self.assertIn('answered [read]', out)
+        edit(d, 'main.html', '<h1 id="top">Main</h1>', '<h1 id="top">Main</h1><p id="new">New claim.</p>')
+        sh('git', 'add', '-A', cwd=d)
+        out = cli(d, 'reconcile', '--next')[1]
+        self.assertNotIn('read main.html whole', out)     # holds for the request, ids moved or not
+        self.assertIn('read motor.html whole', out)       # the other governing file is still owed
+
+    def test_a_tiny_file_is_asked_without_a_probe(self):
+        d = self.fixture()
+        Path(d, 'main.html').write_text('<!DOCTYPE html><html><body><main><h1 id="top">Main</h1>'
+                                        '<p>Types: <code data-commit-types>docs seed audit review</code></p>'
+                                        '</main></body></html>')
+        sh('git', 'add', '-A', cwd=d)
+        out = cli(d, 'reconcile', '--subject', 'docs: shrink', '--next')[1]
+        self.assertIn('[read] read main.html whole', out)
+        self.assertNotIn('probe:', out)
+        self.assertIn('--answer read-whole\n', out)
+
+
 # ------------------------------------------------ derived view (bench #4 D stale)
 
 class DerivedView(unittest.TestCase):
@@ -3438,7 +3508,7 @@ class Checklist(unittest.TestCase):
                 break
             kind = re.search(r'\[(\w+)\]', out).group(1)
             reply = same if kind == 'sealed' else DEFAULT_ANSWERS[kind](0)
-            rc, out = cli(d, 'reconcile', '--tick', tok.group(1), *tick_argv(reply))
+            rc, out = cli(d, 'reconcile', '--tick', tok.group(1), *reply_argv(d, out, reply))
             if kind == 'sealed':
                 results.append('refused' if 'already recorded for another item' in out else 'ok')
         self.assertEqual(results, ['ok', 'refused'])
@@ -3671,8 +3741,8 @@ class Checklist(unittest.TestCase):
         edit(d, 'motor.html', 'closes after a week quiet', 'unverified: diagnosis unconfirmed')
         sh('git', 'add', '-A', cwd=d)
         out = cli(d, 'reconcile')[1]
-        self.assertIn('judgment open: 1', out)
-        self.assertIn('cause 1', out)
+        self.assertIn('judgment open: 2', out)
+        self.assertIn('cause 1, derived 1', out)   # the rewritten entry is a bootloader source too
         self.assertIn('watch entry motor.html#watch-noise (added): watch-noise noise 2026-10-04 unverified',
                       cli(d, 'reconcile', '--next')[1])
 
@@ -3785,9 +3855,11 @@ class Checklist(unittest.TestCase):
         out = cli(d, 'reconcile', '--next')[1]
         self.assertIn('--answer read-whole', out)
         tok = re.search(r'token: (\w+)', out).group(1)
+        probe = re.search(r"follows #(\S+) in document order", out).group(1)
         rc, out = cli(d, 'reconcile', '--tick', tok, 'read-whole')
         self.assertEqual(rc, 2); self.assertIn('takes its answer as --answer', out)
-        rc, out = cli(d, 'reconcile', '--tick', tok, '--answer', 'read-whole', 'main.html')
+        rc, out = cli(d, 'reconcile', '--tick', tok, '--answer', 'read-whole', '--ref',
+                      following_id(os.path.join(d, 'main.html'), probe), 'main.html')
         self.assertIn('answered [read]', out)
         rc, out = cli(d, 'reconcile', '--answer', 'holds')
         self.assertEqual(rc, 2); self.assertIn('need --tick', out)
@@ -3920,7 +3992,7 @@ class Receipts(unittest.TestCase):
             if not tok:
                 break
             kind = re.search(r'ITEM \d+ of \d+ \[(\w+)\]', out).group(1)
-            tool('reconcile', '--tick', tok.group(1), *tick_argv(DEFAULT_ANSWERS[kind](0)))
+            tool('reconcile', '--tick', tok.group(1), *reply_argv(d, out, DEFAULT_ANSWERS[kind](0)))
         r = subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit',
                             '--no-edit', '-m', 'x'], cwd=d, env=env, text=True, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

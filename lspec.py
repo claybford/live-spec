@@ -2308,13 +2308,22 @@ def derived_item(ctx, head):
     # The answer is bound to what it reviewed: the sources' staged text and the
     # status line itself, so a later edit to either reopens the question.
     bound = texts + [s.text("status") or "" for _, s in status]
-    return item("derived", "bootloader", "is the bootloader re-derived?", False,
+    # A status line that links a changed source is affected by construction:
+    # unaffected is refused for it (bench watch-unaffected).
+    changed_ids = {addr(p, eid) for (p, eid) in ctx.changed if (p, eid) != (p, "status")}
+    cited = sorted({addr(p, l["href"][1:]) for p, s in status for l in s.links_in("status")
+                    if l["href"].startswith("#") and addr(p, l["href"][1:]) in changed_ids})
+    it = item("derived", "bootloader", "is the bootloader re-derived?", False,
                 evidence=digest(head, *sources, *bound),
                 excerpt="\n".join(sources) + view,
                 question="These sources of the bootloader moved. Was the status line re-derived "
                          "whole from the locked list, open table and top-risk source (answer "
                          "rederived, after doing it in the files), or is it unaffected by this "
                          "change (state why)?")
+    if cited:
+        it["cited"] = cited
+        it["excerpt"] += "\nthe status line links changed source(s): " + ", ".join(cited)
+    return it
 
 
 def neighbor_relations(ctx):
@@ -2738,6 +2747,9 @@ def validate(it, given, ctx, other_reasons):
     if kind == "derived":
         if answer == "rederived":
             return [answer], "Reconciled: bootloader rederived"
+        if it.get("cited"):
+            raise ValueError("the status line links " + ", ".join(it["cited"]) + ", which this "
+                             "commit changed: unaffected is refused; re-derive it and answer rederived")
         return [answer, text], f"Reconciled: bootloader unaffected \u2014 {text}"
     if kind == "sealed":
         return answer_sealed(ctx, name, answer, ref, text)
@@ -3957,7 +3969,8 @@ another item's). Each answer is recorded as a Reconciled: trailer.
   watched      every commit but review: and fix:: watched --ref WATCH | none
   decided      every commit but review:: decided --ref ROW | none
   derived      a watch entry, decision row or sealed claim changed: was the
-               bootloader re-derived whole? rederived | unaffected --reason
+               bootloader re-derived whole? rederived | unaffected --reason;
+               unaffected is refused when a status element links a changed source
   neighbor     each unchanged claim one hop from a changed one: holds (else fix the
                file). On a dependent of a target this commit changed, holds is the
                review: the trailer Reconciled: reviewed PATH#ID is the edge's

@@ -2717,7 +2717,7 @@ class BenchDriver(unittest.TestCase):
         self.assertEqual(self.done(ev, 'absent'), 1)
 
     def test_driver_delegates_tdone_to_briefs(self):
-        driver = open(os.path.join(os.path.dirname(self.BRIEFS), 'driver.sh')).read()
+        driver = Path(os.path.dirname(self.BRIEFS), 'driver.sh').read_text()
         self.assertRegex(driver, r'tdone\(\) \{ python3 "\$HERE/briefs.py" done')   # one implementation
 
     def test_skeleton_lists_sessions_without_paths(self):
@@ -2727,7 +2727,7 @@ class BenchDriver(unittest.TestCase):
         out = os.path.join(ev, 'skeleton.html')
         r = subprocess.run([sys.executable, self.BRIEFS, 'skeleton', ev, out], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        html_ = open(out).read()
+        html_ = Path(out).read_text()
         self.assertIn('<td>ae86-1</td><td>O1</td><td>done</td>', html_)
         self.assertIn('0.012', html_)
         self.assertIn('<td>C12</td>', html_)
@@ -2845,6 +2845,35 @@ class DerivedView(unittest.TestCase):
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
         rc, out = cli(d, 'reconcile')
         self.assertNotIn('derived 1', out)                             # an unrelated edit keeps it
+
+    def test_unaffected_is_refused_when_the_status_line_links_the_changed_row(self):
+        """bench watch-unaffected: a locked clause linking the changed row is
+        affected by construction."""
+        d = self.fixture()
+        decision_row(d, 'dl-x'); commit(d, 'docs: decide')
+        edit(d, 'main.html', 'Open: none.', 'Open: none. Locked: <a href="#dl-x">dl-x</a>.')
+        commit(d, 'docs: lock')
+        edit(d, 'main.html', '<code>dl-x</code> s', '<code>dl-x</code> s, changed'); sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: change the locked row')
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertIn('the status line links changed source(s): main.html#dl-x', it['excerpt'])
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            with self.assertRaisesRegex(ValueError, 'unaffected is refused'):
+                lspec.validate(it, given(['unaffected', 'nothing', 'cites', 'it']), ctx, set())
+            self.assertEqual(lspec.validate(it, {'answer': 'rederived'}, ctx, set())[1],
+                             'Reconciled: bootloader rederived')
+        finally:
+            os.chdir(cwd)
+        edit(d, 'motor.html', '</main>', '<table><tr id="dl-y"><td><code>dl-y</code> y</td><td>r</td><td>w</td></tr></table></main>')
+        sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: an unlinked row')
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertIn('dl-x', it['excerpt'])                 # still cited: dl-x is still changed
+        edit(d, 'main.html', '<code>dl-x</code> s, changed', '<code>dl-x</code> s'); sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: an unlinked row')
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertNotIn('changed source(s)', it['excerpt'])  # dl-y alone: unaffected stays legal
 
     def test_not_asked_without_a_source_change_or_on_a_review(self):
         d = self.fixture()

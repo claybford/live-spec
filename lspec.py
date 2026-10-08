@@ -82,6 +82,7 @@ from html.parser import HTMLParser
 from types import SimpleNamespace
 
 CELL_WORD_CAP = 40
+WORDS_MARK = 8000           # start names main past this size; advisory, never a check
 WATCH_PREFIX = "watch-"     # a watch entry is a table row whose id starts with this
 # Word numerals resolve through ninety-nine and round hundreds (spaced or
 # hyphenated composites): units to twenty, tens, tens-units, "hundred".
@@ -3308,7 +3309,11 @@ def size_line(col):
             parts.append(f"{now - then:+d} since {name} {ref[:7]}")
     if sha is None:
         parts.insert(0, "no audit: commit yet")
-    return f"{now} words ({'; '.join(parts)})"
+    line = f"{now} words ({'; '.join(parts)})"
+    if now > WORDS_MARK:
+        line += (f" \u2014 past the {WORDS_MARK}-word mark: every session reads it whole; "
+                 "an audit removes or relocates, never elaborates")
+    return line
 
 
 def owed_now(col):
@@ -3845,7 +3850,9 @@ resetting it — if you did not open it in this conversation, ask the user. A
 request that opened with nothing owed and has committed, answered and edited
 nothing was an observation: the next start closes it and owes no finish. (An
 edit reverted before any commit looks the same; the witnessed event's watch
-entry is the record.) The output lists every collection file with its size,
+entry is the record.) The output lists every collection file with its size (main's word count
+against the last audit and the first commit, named past the %d-word mark:
+shown, not capped),
 the sealed claims, the depends-on edges, and the obligations: structural
 failures, REVIEW OWED, watch entries (expired ones flagged), sealed corrections
 awaiting a later session's confirmation, missing or old hooks; plus one
@@ -3976,7 +3983,7 @@ def main(argv):
         sp.add_argument("--main", default=argparse.SUPPRESS,
                         help="main spec (same as the global --main)")
     s = sub.add_parser("start", help="open or report the request; list what to read",
-                       formatter_class=raw, epilog=HELP["start"] % RESUME_MAX_LINES)
+                       formatter_class=raw, epilog=HELP["start"] % (WORDS_MARK, RESUME_MAX_LINES))
     s.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(s)
     s.add_argument("--resume", metavar="COMMIT",
                    help="follow-up in the same conversation: the handoff commit finish printed")

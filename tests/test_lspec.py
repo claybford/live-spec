@@ -3169,6 +3169,16 @@ class Requests(unittest.TestCase):
         audit = head(d)[:7]
         out = cli(d, 'start')[1]
         self.assertIn(f'+0 since audit {audit}; +6 since first commit {first}', out)
+        self.assertNotIn('word mark', out)
+
+    def test_size_line_names_main_past_the_mark(self):
+        d = self.fixture()
+        edit(d, 'main.html', '<h1 id="top">Main</h1>',
+             '<h1 id="top">Main</h1><p>' + ' '.join(['word'] * (lspec.WORDS_MARK + 1)) + '</p>')
+        commit(d, 'docs: grow')
+        rc, out = cli(d, 'start')
+        self.assertEqual(rc, 0, out)                           # advisory, never a check
+        self.assertIn(f'past the {lspec.WORDS_MARK}-word mark', out)
 
     def test_start_refuses_a_request_open_for_another_main(self):
         d = self.fixture()

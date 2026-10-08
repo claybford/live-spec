@@ -1873,7 +1873,8 @@ class HookIntegration(unittest.TestCase):
             sh('git', 'add', '--', *add, cwd=d)
         log = ''
         if settle_:
-            log = settle(d, msg)[1]
+            body = 'Dependencies: the one edge is wired. Seals: none.' if msg.startswith('seed:') else None
+            log = settle(d, msg, body=body)[1]
         r = subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t',
                             'commit', '--allow-empty', '--no-edit', '-m', msg],
                            cwd=d, capture_output=True, text=True, check=False)
@@ -2369,6 +2370,17 @@ class CommitTypes(unittest.TestCase):
         rc, out = self.gate(d, 'review: main.html#claim')
         self.assertEqual(rc, 0, out)
 
+    def test_seed_subject_requires_a_body(self):
+        d = self.drepo()
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        rc, out = self.gate(d, 'seed: motor lineage')
+        self.assertEqual(rc, 1, out); self.assertIn('seed: commit has no body', out)
+        out = cli(d, 'reconcile', '--subject', 'seed: motor lineage',
+                  '--body', 'Dependencies: none qualify, motor states no claim resting on another. Seals: none.')[1]
+        self.assertNotIn('seed: commit has no body', out)
+        out = cli(d, 'reconcile', '--subject', 'docs: derate', '--body', '')[1]
+        self.assertNotIn('no body', out)      # only seed: owes an assessment
+
 
 # ------------------------------------------------- seal gate
 
@@ -2732,7 +2744,8 @@ class Reseed(unittest.TestCase):
                              'Reconciled: reseed main.html \u2014 the frame is redesigned')
         finally:
             os.chdir(cwd)
-        rc, out = settle(d, 'seed: main v2', answers={'reseed': ['reseed', 'the', 'frame', 'is', 'redesigned']})
+        rc, out = settle(d, 'seed: main v2', body='Dependencies: none qualify. Seals: none.',
+                         answers={'reseed': ['reseed', 'the', 'frame', 'is', 'redesigned']})
         self.assertEqual(rc, 0, out)
 
     def test_ordinary_commits_and_first_seeds_are_not_asked(self):

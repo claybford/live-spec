@@ -1723,6 +1723,11 @@ def subject_items(ctx):
     if ";" in subject:
         out.append(item("subject", "chain", "subject chains clauses with ';'", True,
                         detail="one transition per commit; split the commit"))
+    if subject_type(subject, "seed") is not None and not getattr(ctx, "body", "").strip():
+        out.append(item("subject", "seedbody", "seed: commit has no body", True,
+                        detail="the seed commit body carries the dependency and seal "
+                               "assessment, including why none qualified: "
+                               + command(col, "reconcile", "--body", "ASSESSMENT")))
     return out
 
 
@@ -2721,6 +2726,7 @@ def evaluate(col, subject=None, today=None):
     if subject is not None:
         state["subject"] = subject
     ctx = gather(col, state.get("subject"), request)
+    ctx.body = state.get("body") or ""
     today = today or datetime.now().date()
     items = mechanical_items(ctx, today) + judgment_items(ctx)
     ticks = state.get("ticks", {})
@@ -3858,7 +3864,8 @@ Mechanical items clear only when the files (or the subject) change:
   request      no request is open for MAIN (run start)
   structure    a check failure in the staged collection
   subject      no subject; a type outside main's data-commit-types; over %d
-               characters (review: excepted); clauses chained with ';'
+               characters (review: excepted); clauses chained with ';'; a seed:
+               with no --body (the dependency and seal assessment)
   review       debt outstanding at HEAD, ambiguous history, or a removed or
                redirected dependency of a surviving claim, unless the subject is a
                review: naming the claim or a seed: boundary for its file; a review:

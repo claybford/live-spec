@@ -14,7 +14,7 @@ better.
 
 ## What's here
 
-- **`live-spec.html`** — the methodology itself: four cornerstones, nineteen
+- **`live-spec.html`** — the methodology itself: the cornerstones and their
   principles, the session protocol, the seed a new spec is copied from, and its
   own decision log. It is also its own example: a live-system spec applying the
   pattern to itself, with its git history as the external record. Open it in a

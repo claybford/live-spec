@@ -2223,6 +2223,26 @@ class HookIntegration(unittest.TestCase):
         r = self.gcommit(d, 'docs: derate')                      # rerun keeps unchanged answers
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_receipt_dies_with_the_request_that_earned_it(self):
+        """A receipt is bound to the request open when it was issued: a session
+        that finds another session's request open cannot commit on its
+        answers (the bench's open-requests finding)."""
+        d = self.hrepo()
+        edit(d, 'motor.html', '120 kW', '125 kW')
+        sh('git', 'add', '-A', cwd=d)
+        self.assertEqual(settle(d, 'docs: uprate')[0], 0)
+        req = state_file(d, 'request.json')
+        data = json.loads(req.read_text())
+        data['opened_at'] = '2026-01-01T00:00:00+00:00'      # another session's request
+        req.write_text(json.dumps(data))
+        r = self.gcommit(d, 'docs: uprate', settle_=False)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('no longer open', r.stdout + r.stderr)
+        # reconciling again as this session re-issues the receipt and the commit lands
+        self.assertEqual(settle(d, 'docs: uprate')[0], 0)
+        r = self.gcommit(d, 'docs: uprate', settle_=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_hook_enforces_declared_vocabulary(self):
         d = self.hrepo()
         edit(d, 'main.html', '<table>',
@@ -3979,7 +3999,7 @@ class Checklist(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         receipt = lspec.json.loads(state_file(d, 'receipt.json').read_text())
         self.assertEqual(set(receipt), {'format', 'main', 'head', 'index_sha256', 'checker_sha256',
-                                        'subject', 'body', 'trailers', 'issued_at'})
+                                        'subject', 'body', 'trailers', 'issued_at', 'request_opened_at'})
         self.assertEqual(receipt['head'], head(d))
         self.assertEqual(receipt['subject'], 'docs: derate')
         edit(d, 'main.html', '<h1 id="top">Main</h1>', '<h1 id="top"></h1>'); sh('git', 'add', '-A', cwd=d)

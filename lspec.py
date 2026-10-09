@@ -48,6 +48,9 @@ Implementation details beyond the seed's operating rules:
 * State lives in Git metadata (per worktree) under lspec/: request.json
   (MAIN and the request's start commit), reconcile.json (subject, body and
   answers keyed by item and evidence), receipt.json, and a random secret.
+  A receipt names the request that earned it (its opened_at); once a
+  different request is open the hooks refuse it, so a session never commits
+  on another session's answers.
   Tokens are an HMAC of item and evidence under that secret; a shell can
   forge one, which is deliberate circumvention, like bypassing hooks.
 
@@ -2823,10 +2826,11 @@ def issue_or_clear(col, ctx, items, state):
     check = digest(*sorted(f"{it['key']}={' '.join(it['answer'])}" for it in answered))[:10]
     trailers = [f"Reconciled: checklist {check} ({len(answered)} answered)"]
     trailers += [it["trailer"] for it in answered if it["trailer"]]
-    receipt = {"format": 2, "main": repo_rel(col.main), "head": head_sha(),
+    receipt = {"format": 3, "main": repo_rel(col.main), "head": head_sha(),
                "index_sha256": index_sha256(), "checker_sha256": file_sha256(__file__),
                "subject": ctx.subject, "body": state.get("body") or "",
-               "trailers": trailers, "issued_at": now_iso()}
+               "trailers": trailers, "issued_at": now_iso(),
+               "request_opened_at": (ctx.request or {}).get("opened_at")}
     write_state("receipt.json", receipt)
     return receipt
 
@@ -2837,9 +2841,13 @@ def receipt_problem():
     if receipt is None:
         return "no reconcile receipt for this candidate"
     fields = {"format", "main", "head", "index_sha256", "checker_sha256", "subject",
-              "body", "trailers", "issued_at"}
-    if set(receipt) != fields or receipt["format"] != 2:
+              "body", "trailers", "issued_at", "request_opened_at"}
+    if set(receipt) != fields or receipt["format"] != 3:
         return "malformed reconcile receipt"
+    request = read_state("request.json") or {}
+    if receipt["request_opened_at"] != request.get("opened_at"):
+        return ("the receipt belongs to a request that is no longer open — another session "
+                "earned it; rerun reconcile and answer as this session")
     try:
         if receipt["head"] != head_sha():
             return "no reconcile receipt for this candidate (the last one predates HEAD)"

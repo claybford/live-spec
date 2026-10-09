@@ -15,7 +15,7 @@
 <p>A document pattern for advancing one technical design across many separate, stateless AI chat sessions: the document, not the conversation, holds the whole state of the work, and each session loads it, advances it, and writes it back. It applies to any solution type (<a href="background.html#generalize">the type mapping</a>) and to either <a href="#regimes">regime</a> &mdash; a thing still converging toward done, or one already running and maintained.</p>
 
 <header>
-<p><strong>Status:</strong> live-system, maintained (<a href="#dl-selfregime">dl-selfregime</a>) &mdash; this document is applied and follows its own pattern; its indexed external artifact is the file's git history (<a href="#dl-snapshots">dl-snapshots</a>).<br>
+<p id="status"><strong>Status:</strong> live-system, maintained (<a href="#dl-selfregime">dl-selfregime</a>) &mdash; this document is applied and follows its own pattern; its indexed external artifact is the file's git history (<a href="#dl-snapshots">dl-snapshots</a>).<br>
 <strong>Locked:</strong> the four cornerstones / nineteen principles (<a href="#cornerstones">Cornerstones I&ndash;IV</a>), the collection rule among them (<a href="#p19">P19</a>, <a href="#dl-unlock">dl-unlock</a>); the HTML + water.css <a href="#substrate">substrate</a>; the <a href="#regimes">two-regime framing</a>; git as the sole record (<a href="#dl-snapshots">dl-snapshots</a>); one typed edge (<a href="#dl-dependson">dl-dependson</a>).<br>
 <strong>Open:</strong> one watch entry (<a href="#watch-derivedtick">watch-derivedtick</a>); <code data-literal>[ADAPT]</code> slots resolve in the reader's instance, not here (<a href="#dl-noopen">dl-noopen</a>).<br>
 <strong>Top risk:</strong> drift-by-accretion &mdash; this document out-growing its own compression rules (<a href="background.html#antipatterns">anti-patterns</a>, <a href="#dl-twohomes">dl-twohomes</a>).<br>
@@ -394,6 +394,7 @@
 <thead><tr><th>Markup</th><th>Contract</th></tr></thead>
 <tbody>
 <tr><td><code>id</code> and <code>href</code></td><td>Unique, resolving anchors; dependency anchors enclose complete claims (<a href="#p3">P3</a>).</td></tr>
+<tr><td><code>p id="status"</code></td><td>The bootloader; every main carries it. The commit gate's derived-view item reads it and refuses <em>unaffected</em> when it links a changed source (<a href="#dl-bootloader">dl-bootloader</a>).</td></tr>
 <tr><td><code>tr id="dl-…"</code></td><td>Decision row; its first cell opens with its id as a <code>&lt;code&gt;</code> label, uncounted; each cell is capped at 40 words.</td></tr>
 <tr><td><code>data-count="differences"</code> / <code>data-count="p=principles"</code></td><td>Declare the counted list or id series. Link retained count assertions to the enumeration (<a href="#dl-counts">dl-counts</a>).</td></tr>
 <tr><td><code>data-commit-types</code></td><td>One code element in main declares allowed types; retain seed/audit/review. Absence is reported as unenforced (<a href="#dl-committypes">dl-committypes</a>).</td></tr>
@@ -413,7 +414,7 @@
 <table>
 <thead><tr><th>Item</th><th>Gates</th><th>Resolves when</th></tr></thead>
 <tbody>
-<tr id="watch-derivedtick"><td><code>watch-derivedtick</code> 2026-10-08, outside critique: the bootloader gate item bound its answer to the changed sources' names, not their text or the status line's, so an edit after answering kept the tick. Diagnosis: the evidence digest omitted what the answer reviewed. Fix: the digest binds the sources' staged text and the status line</td><td>The <a href="#dl-reconcile">dl-reconcile</a> claim that ticks follow their evidence</td><td>A later session finds no gate item whose digest omits the text its question shows, or a recurrence promotes this to a diagnostic row</td></tr>
+<tr id="watch-derivedtick"><td><code>watch-derivedtick</code> 2026-10-08, outside critique: the bootloader gate item bound its answer to the changed sources' names, not their text or the status line's, so an edit after answering kept the tick. Diagnosis: the evidence digest omitted what the answer reviewed. Fix: the digest binds the sources' staged text and the status line; second finding, same day: this file's status paragraph carried no <code>id="status"</code>, so the digest bound nothing &mdash; the id is restored and <code>check</code> requires it of every main</td><td>The <a href="#dl-reconcile">dl-reconcile</a> claim that ticks follow their evidence</td><td>A later session finds no gate item whose digest omits the text its question shows, or a recurrence promotes this to a diagnostic row</td></tr>
 </tbody>
 </table>
 

@@ -78,6 +78,7 @@ class Guards(unittest.TestCase):
 
 MAIN = """<html><body><main>
 <h1 id="top">Main</h1>
+<p id="status">Status: forward design. Locked: nothing. Open: nothing. Top risk: none.</p>
 <p>Four cornerstones and two principles; five regime differences, the five differences.</p>
 <h2 data-count="c=cornerstones p=principles">C</h2>
 <h3 id="c1">I</h3><h3 id="c2">II</h3><h3 id="c3">III</h3><h3 id="c4">IV</h3>
@@ -139,7 +140,7 @@ class T(unittest.TestCase):
         """A4: a disconnected file that declares its own commit vocabulary is
         another collection's main (a supporting spec may not declare one), so
         it and its collection are independent by construction — no note."""
-        other = ('<html><body><main><p id="c">Types: <code data-commit-types>docs fix seed audit review'
+        other = ('<html><body><main><p id="status">Status: other.</p><p id="c">Types: <code data-commit-types>docs fix seed audit review'
                  '</code></p><table><tr id="dl-split-sub"><td><code>dl-split-sub</code> <a href="sub.html">sub.html</a>'
                  ' holds it</td><td>keep</td><td>why.</td></tr></table></main></body></html>')
         files = {"bench/other.html": other, "bench/sub.html": '<p id="s">sub</p>',
@@ -1153,7 +1154,7 @@ class L(unittest.TestCase):
         d = repo(); rc, out = cli(d, "start")
         self.assertEqual(rc, 0, out)
         self.assertNotIn('id="power"', out)                    # the agent reads the specs
-        self.assertIn("main.html (main) — 13 lines, 40 words", out)
+        self.assertIn("main.html (main) — 14 lines, 50 words", out)
         self.assertIn("motor.html — 5 lines; split from main.html (dl-split-motor)", out)
         self.assertLess(len(out.splitlines()), 25, out)        # short enough never to truncate
 
@@ -2326,6 +2327,24 @@ class CommitTypes(unittest.TestCase):
         out = reconcile_out(d, subject)
         return int('OPEN [subject]' in out or 'OPEN [review]' in out), out
 
+    def test_main_without_status_fails_seed_shape(self):
+        """A main (a file declaring the commit vocabulary) carries the bootloader
+        as p id="status"; the derived gate item reads it (dl-bootloader)."""
+        decl = '</table><p>' + DECL.format('docs fix seed audit review') + '</p><table>'
+        rc, out = run(main_extra=decl); self.assertEqual(rc, 0, out)
+        d = tempfile.mkdtemp()
+        Path(d, "main.html").write_text(MAIN.format(extra=decl).replace(
+            '<p id="status">Status: forward design. Locked: nothing. Open: nothing. Top risk: none.</p>', ''))
+        Path(d, "motor.html").write_text(MOTOR.format(extra=""))
+        cwd = os.getcwd(); os.chdir(d)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = lspec.cmd_check(argparse.Namespace(main="main.html", diff=None, neighborhood=None))
+        os.chdir(cwd)
+        self.assertEqual(rc, 1, buf.getvalue()); self.assertIn('[seed-shape]', buf.getvalue())
+        # a supporting spec declares nothing and needs no status line
+        rc, out = run(main_extra=decl, motor_extra='<p>no status here</p>'); self.assertEqual(rc, 0, out)
+
     def test_declaration_validation(self):
         ok = '</table><p>' + DECL.format('docs fix seed audit review') + '</p><table>'
         rc, out = run(main_extra=ok); self.assertEqual(rc, 0, out)
@@ -2797,7 +2816,8 @@ class DerivedView(unittest.TestCase):
     def fixture(self):
         d = repo()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
-        edit(d, 'main.html', '<h1 id="top">Main</h1>', '<h1 id="top">Main</h1><p id="status">Status: live. Open: none.</p>')
+        edit(d, 'main.html', '<p id="status">Status: forward design. Locked: nothing. Open: nothing. Top risk: none.</p>',
+             '<p id="status">Status: live. Open: none.</p>')
         commit(d, 'docs: status line')
         ensure_request(d)
         return d

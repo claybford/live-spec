@@ -981,6 +981,10 @@ def check_structure(col, specimens=True, markers=True):
     fails = list(col.fails)
     commit_types(col, fails)
     for p, s in col.specs.items():
+        if commit_type_decls(s) and "status" not in s.elems:
+            fails.append(f"[seed-shape] {rel(p)}: no element id=status — a main carries "
+                         f"the bootloader (p id=\"status\"); the derived gate item reads it")
+    for p, s in col.specs.items():
         r = rel(p)
         idset = set(s.ids)
         for i in sorted(idset):

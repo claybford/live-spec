@@ -3396,6 +3396,21 @@ class Requests(unittest.TestCase):
         rc, out = cli(d, 'start', '--adopt', '--reason', 'nothing is open now')
         self.assertEqual(rc, 2); self.assertIn('no request is open', out)
 
+    def test_next_and_tick_wait_for_an_open_request(self):
+        """Answers given before start are discarded by it, so --next and --tick
+        refuse until a request is open, naming start."""
+        d = self.fixture()
+        edit(d, 'main.html', '<h1 id="top">Main</h1>', '<h1 id="top">Main heading</h1>'); sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'reconcile', '--subject', 'docs: retitle')
+        self.assertIn('OPEN [request]', out)
+        rc, out = cli(d, 'reconcile', '--next')
+        self.assertEqual(rc, 1); self.assertIn('run python3 lspec.py --main main.html start first', out)
+        rc, out = cli(d, 'reconcile', '--tick', 'deadbeef', '--answer', 'holds')
+        self.assertEqual(rc, 1); self.assertIn('start first', out)
+        cli(d, 'start')
+        rc, out = cli(d, 'reconcile', '--next')
+        self.assertEqual(rc, 0, out); self.assertIn('ITEM 1 of', out)
+
     def test_start_keeps_a_subject_set_before_it(self):
         """reconcile --subject, then obeying its 'run start' item, must not
         silently lose the subject."""

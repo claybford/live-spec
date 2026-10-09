@@ -3222,6 +3222,12 @@ def cmd_reconcile(args):
     write_state("reconcile.json", state)
     ctx, items, state = evaluate(col)
     judged = [it for it in items if not it["mech"]]
+    if (args.next or args.tick) and any(it["kind"] == "request" and it["status"] == "open"
+                                         for it in items):
+        print(f"lspec reconcile: no open request for {repo_rel(col.main)} — run "
+              + command(col, "start") + " first; answers given now would be discarded by it",
+              file=sys.stderr)
+        return 1
     if args.next:
         open_j = [it for it in judged if it["status"] == "open"]
         if not open_j:
@@ -4003,7 +4009,8 @@ the body and the answers. Any later change to the index means rerunning
 reconcile, which keeps every answer whose evidence is unchanged.
 
 Mechanical items clear only when the files (or the subject) change:
-  request      no request is open for MAIN (run start)
+  request      no request is open for MAIN (run start); --next and --tick wait
+               for it, since start discards answers given before it
   structure    a check failure in the staged collection
   subject      no subject; a type outside main's data-commit-types; over %d
                characters (review: excepted); clauses chained with ';'; a seed:

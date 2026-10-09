@@ -51,6 +51,10 @@ Implementation details beyond the seed's operating rules:
   A receipt names the request that earned it (its opened_at); once a
   different request is open the hooks refuse it, so a session never commits
   on another session's answers.
+  `start --adopt --reason TEXT` takes over an open request: start commit,
+  candidate and subject kept; ticks, probes, receipt and secret dropped;
+  adopted_from, adopt_reason and adopted_head recorded; the receipt of the
+  first commit after adoption carries `Reconciled: adopted request SHA`.
   Tokens are an HMAC of item and evidence under that secret; a shell can
   forge one, which is deliberate circumvention, like bypassing hooks.
 
@@ -2825,6 +2829,10 @@ def issue_or_clear(col, ctx, items, state):
     answered = [it for it in items if not it["mech"]]
     check = digest(*sorted(f"{it['key']}={' '.join(it['answer'])}" for it in answered))[:10]
     trailers = [f"Reconciled: checklist {check} ({len(answered)} answered)"]
+    request = ctx.request or {}
+    if request.get("adopt_reason") and request.get("adopted_head") == head_sha():
+        trailers.append(f"Reconciled: adopted request {short(request.get('start'))} — "
+                        f"{request['adopt_reason']}")
     trailers += [it["trailer"] for it in answered if it["trailer"]]
     receipt = {"format": 3, "main": repo_rel(col.main), "head": head_sha(),
                "index_sha256": index_sha256(), "checker_sha256": file_sha256(__file__),
@@ -3467,6 +3475,45 @@ def resume_diff(col, commit):
 RESUME_MAX_LINES = 120
 
 
+def adopt_problem(args, request):
+    """Why --adopt cannot proceed, or None."""
+    if request is None:
+        return "no request is open; a plain start opens one"
+    if args.resume:
+        return "--resume is a follow-up to your own handoff; --adopt takes over another's request"
+    if not args.reason or len(args.reason.split()) < 3:
+        return 'it needs --reason "TEXT" (three words or more: the user\'s say-so, quoted)'
+    return None
+
+
+def adopt_request(request, reason):
+    """Take over an open request as this session: keep its start commit, the
+    candidate and the subject; drop the prior session's answers, probes and
+    receipt; rotate the secret so every token it holds is dead. The next
+    commit's receipt carries a Reconciled: adopted trailer (issue_or_clear)."""
+    prior = read_state("reconcile.json") or {}
+    dropped = len(prior.get("ticks", {}))
+    kept = {k: prior[k] for k in ("subject", "body") if prior.get(k)}
+    remove_state("reconcile.json")
+    remove_state("receipt.json")
+    remove_state("secret")
+    if kept:
+        write_state("reconcile.json", kept)
+    now = now_iso()
+    adopted = {**request, "opened_at": now, "adopted_at": now, "adopt_reason": reason,
+               "adopted_from": {"opened_at": request.get("opened_at"),
+                                "start": request.get("start")},
+               "adopted_head": head_sha()}
+    adopted.pop("clean", None)
+    write_state("request.json", adopted)
+    print(f"REQUEST — adopted (opened {request.get('opened_at')}, since "
+          f"{short(request.get('start'))}): {dropped} recorded answer(s) dropped, receipt "
+          f"dropped, tokens rotated; reason: {reason}")
+    for kind, path, _ in working_changes(repo_root()):
+        print(f"  uncommitted {kind} inherited: {path} — reconcile and commit it as this session")
+    return adopted
+
+
 def cmd_start(args):
     col = load(args)
     in_git = repo_root() is not None
@@ -3486,7 +3533,15 @@ def cmd_start(args):
             print(f"REQUEST — an open request belongs to {request.get('main')}; "
                   f"ask the user before opening one for {rel(col.main)}")
             return 2
-        if request:
+        just_adopted = False
+        if args.adopt:
+            problem = adopt_problem(args, request)
+            if problem:
+                print(f"lspec start: --adopt refused — {problem}", file=sys.stderr)
+                return 2
+            request = adopt_request(request, args.reason)
+            just_adopted = True
+        if request and not just_adopted:
             print(f"REQUEST — already open since "
                   f"{short(request.get('start'))} "
                   f"(opened {request.get('opened_at')}); not reset")
@@ -3505,6 +3560,8 @@ def cmd_start(args):
                 print(f"  recorded answers: {len(ticks)} (kept while their evidence is unchanged)")
             if args.resume:
                 print("  --resume ignored: a request is already open")
+        elif request:
+            pass                                  # adopted just now: reported by adopt_request
         else:
             if args.resume:
                 resume_lines, refusal = resume_diff(col, args.resume)
@@ -3569,6 +3626,8 @@ def observation_only(request):
     answers, so the next start closes it instead of asking (dl-openask)."""
     if not request.get("clean") or request.get("start") != head_sha():
         return False
+    if request.get("adopted_from"):
+        return False                      # it was adopted because it had something to trample
     if working_changes(repo_root()):
         return False
     return not (read_state("reconcile.json") or {}).get("ticks")
@@ -3927,7 +3986,14 @@ read every listed file whole, in sequential pages, before any commit.
 --resume COMMIT: a follow-up in the same conversation with the earlier full
 read still in context; COMMIT is the handoff commit finish printed. Shows the
 collection's changed lines since then (refuses if COMMIT is not an ancestor or
-more than %d lines changed). After compaction, do a full read.""",
+more than %d lines changed). After compaction, do a full read.
+
+--adopt --reason "TEXT": continue a request another session left open, as this
+session, with the user's say-so quoted as the reason. Keeps the request's start
+commit, the candidate and the subject; drops the prior session's recorded
+answers and receipt and rotates the tokens, so every answer is this session's;
+the next commit carries Reconciled: adopted. Refused with --resume or without a
+reason. An adopted request is never an observation: it closes through finish.""",
 
 "reconcile": """\
 Evaluates the staged candidate (git's selected index) against HEAD. --subject
@@ -4062,6 +4128,9 @@ def main(argv):
     s.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(s)
     s.add_argument("--resume", metavar="COMMIT",
                    help="follow-up in the same conversation: the handoff commit finish printed")
+    s.add_argument("--adopt", action="store_true",
+                   help="continue a request another session left open, as this session")
+    s.add_argument("--reason", metavar="TEXT", help="with --adopt: why, quoted (the user's say-so)")
     g = sub.add_parser("reconcile", help="the commit gate: checklist, answers, receipt",
                        formatter_class=raw, epilog=HELP["reconcile"] % SUBJECT_MAX)
     g.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(g)

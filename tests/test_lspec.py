@@ -3341,6 +3341,61 @@ class Requests(unittest.TestCase):
         self.assertIn('recorded answers:', out)
         self.assertEqual(request(d), first)
 
+    def test_adopt_takes_over_an_open_request_as_this_session(self):
+        """start --adopt: the user's "continue it" made an action (dl-openask).
+        Start commit, candidate and subject are kept; the prior session's
+        answers, receipt and tokens are not; the next commit says so."""
+        d = self.fixture()
+        cli(d, 'start')
+        first = request(d)
+        edit(d, 'main.html', '<h1 id="top">Main</h1>', '<h1 id="top">Main heading</h1>'); sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'reconcile', '--subject', 'docs: derate')
+        tok = re.search(r'token: (\w+)', cli(d, 'reconcile', '--next')[1]).group(1)
+        answer_all(d)
+        self.assertEqual(cli(d, 'reconcile')[0], 0)                  # receipt issued
+        self.assertTrue(state_file(d, 'receipt.json').exists())
+        secret_before = state_file(d, 'secret').read_text()
+        # refusals
+        rc, out = cli(d, 'start', '--adopt'); self.assertEqual(rc, 2); self.assertIn('--reason', out)
+        rc, out = cli(d, 'start', '--adopt', '--reason', 'too short'); self.assertEqual(rc, 2)
+        rc, out = cli(d, 'start', '--adopt', '--reason', 'the user said continue', '--resume', head(d))
+        self.assertEqual(rc, 2); self.assertIn('--resume', out)
+        self.assertEqual(request(d), first)                           # nothing changed
+        # adoption
+        rc, out = cli(d, 'start', '--adopt', '--reason', 'the user said continue')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('REQUEST — adopted', out); self.assertIn('answer(s) dropped', out)
+        self.assertIn('uncommitted staged inherited: main.html', out)
+        req = request(d)
+        self.assertEqual(req['start'], first['start'])
+        self.assertEqual(req['adopted_from']['opened_at'], first['opened_at'])
+        self.assertNotEqual(req['opened_at'], first['opened_at'])
+        self.assertFalse(state_file(d, 'receipt.json').exists())
+        self.assertFalse(state_file(d, 'secret').exists())            # rotated: regenerated on use
+        state = lspec.json.loads(state_file(d, 'reconcile.json').read_text())
+        self.assertEqual(state.get('subject'), 'docs: derate'); self.assertNotIn('ticks', state)
+        rc, out = cli(d, 'reconcile', '--tick', tok, '--answer', 'holds')
+        self.assertEqual(rc, 2); self.assertIn('no current item has token', out)
+        self.assertNotEqual(state_file(d, 'secret').read_text(), secret_before)
+        # the first commit after adoption carries the trailer; the next does not
+        answer_all(d)
+        self.assertEqual(cli(d, 'reconcile')[0], 0)
+        receipt = lspec.json.loads(state_file(d, 'receipt.json').read_text())
+        self.assertIn('Reconciled: adopted request ' + first['start'][:12] + ' — the user said continue',
+                      receipt['trailers'])
+        commit(d, 'docs: derate')
+        edit(d, 'main.html', 'Main heading', 'Main title'); sh('git', 'add', '-A', cwd=d)
+        cli(d, 'reconcile', '--subject', 'docs: derate again'); answer_all(d)
+        self.assertEqual(cli(d, 'reconcile')[0], 0)
+        receipt = lspec.json.loads(state_file(d, 'receipt.json').read_text())
+        self.assertFalse(any(t.startswith('Reconciled: adopted') for t in receipt['trailers']))
+        commit(d, 'docs: derate again')
+        # an adopted request is never an observation: it closes through finish
+        rc, out = cli(d, 'start'); self.assertIn('already open', out)
+        rc, out = cli(d, 'finish'); self.assertEqual(rc, 0, out)
+        rc, out = cli(d, 'start', '--adopt', '--reason', 'nothing is open now')
+        self.assertEqual(rc, 2); self.assertIn('no request is open', out)
+
     def test_start_keeps_a_subject_set_before_it(self):
         """reconcile --subject, then obeying its 'run start' item, must not
         silently lose the subject."""

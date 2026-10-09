@@ -2321,26 +2321,43 @@ def asked_items(ctx, head, records):
 
 def derived_item(ctx, head):
     """The bootloader is a derived view of the lock, open and risk lists
-    (P14, dl-bootloader): when a source moves — a watch entry, a decision row,
-    a sealed claim added, changed or removed — the line is regenerated whole,
-    or the commit says why it is unaffected. Asked of every commit but a
-    review; bench #4 left the line stale in 2/6 cells (dl-asked)."""
+    (P14, dl-bootloader): when a source moves — any element a status line
+    links, in any file of the collection, or a watch entry, decision row or
+    sealed claim added, changed or removed — the line is regenerated whole,
+    or the commit says why it is unaffected. A linked source is a source by
+    construction, whatever its id, so unaffected is refused for it; the
+    contract's row types catch additions the line does not link yet. Asked
+    of every commit but a review; bench #4 left the line stale in 2/6 cells
+    (dl-asked)."""
     col = ctx.staged
     if subject_type(ctx.subject, "review") is not None:
         return None
-    sources, texts = [], []
+    status = [(p, s) for p, s in col.specs.items() if "status" in s.elems]
+    # What each status line links, resolved across files: (path, id) -> citing line.
+    linked = {}
+    for p, s in status:
+        for l in s.links_in("status"):
+            tp, fr = resolve(p, l["href"])
+            if fr:
+                linked.setdefault((tp or p, fr), addr(p, "status"))
+    sources, texts, cited = [], [], set()
     for (p, eid), kind in sorted(ctx.changed.items()):
+        if eid == "status":
+            continue
         spec = col.specs.get(p) or ctx.head_specs.get(p)
         label = ("watch entry" if eid.startswith(WATCH_PREFIX) else
                  "decision row" if eid.startswith("dl-") else
-                 "sealed claim" if spec is not None and eid in spec.sealed else None)
-        if label and eid != "status":
-            sources.append(f"{label} {addr(p, eid)} ({kind})")
-            staged = col.specs.get(p)
-            texts.append(staged.text(eid) or "" if staged and eid in staged.elems else "")
+                 "sealed claim" if spec is not None and eid in spec.sealed else
+                 "linked source" if (p, eid) in linked else None)
+        if not label:
+            continue
+        sources.append(f"{label} {addr(p, eid)} ({kind})")
+        staged = col.specs.get(p)
+        texts.append(staged.text(eid) or "" if staged and eid in staged.elems else "")
+        if (p, eid) in linked:
+            cited.add(addr(p, eid))
     if not sources:
         return None
-    status = [(p, s) for p, s in col.specs.items() if "status" in s.elems]
     view = "".join(f"\nbootloader {addr(p, 'status')}"
                    f"{' (' + ctx.changed[(p, 'status')] + ')' if (p, 'status') in ctx.changed else ''}: "
                    f"{shorten(s.text('status') or '', 300)}" for p, s in status) \
@@ -2350,9 +2367,7 @@ def derived_item(ctx, head):
     bound = texts + [s.text("status") or "" for _, s in status]
     # A status line that links a changed source is affected by construction:
     # unaffected is refused for it (bench watch-unaffected).
-    changed_ids = {addr(p, eid) for (p, eid) in ctx.changed if (p, eid) != (p, "status")}
-    cited = sorted({addr(p, l["href"][1:]) for p, s in status for l in s.links_in("status")
-                    if l["href"].startswith("#") and addr(p, l["href"][1:]) in changed_ids})
+    cited = sorted(cited)
     it = item("derived", "bootloader", "is the bootloader re-derived?", False,
                 evidence=digest(head, *sources, *bound),
                 excerpt="\n".join(sources) + view,
@@ -4086,9 +4101,10 @@ another item's). Each answer is recorded as a Reconciled: trailer.
                unverified --ref WATCH | recurrence --ref ROW (diagnostic register)
   watched      every commit but review: and fix:: watched --ref WATCH | none
   decided      every commit but review:: decided --ref ROW | none
-  derived      a watch entry, decision row or sealed claim changed: was the
-               bootloader re-derived whole? rederived | unaffected --reason;
-               unaffected is refused when a status element links a changed source
+  derived      a source the status line links (any file), or a watch entry,
+               decision row or sealed claim, changed: was the bootloader
+               re-derived whole? rederived | unaffected --reason; unaffected
+               is refused when a status element links a changed source
   neighbor     each unchanged claim one hop from a changed one: holds (else fix the
                file). On a dependent of a target this commit changed, holds is the
                review: the trailer Reconciled: reviewed PATH#ID is the edge's

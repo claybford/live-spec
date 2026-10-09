@@ -3036,6 +3036,54 @@ class DerivedView(unittest.TestCase):
         it = next(i for i in items if i['kind'] == 'derived')
         self.assertNotIn('changed source(s)', it['excerpt'])  # dl-y alone: unaffected stays legal
 
+    def test_an_ordinary_open_item_the_status_line_links_is_a_source(self):
+        """A linked source is a source by construction, whatever its id: an
+        open-items row with no watch-/dl- prefix still asks, and unaffected
+        is refused for it."""
+        d = self.fixture()
+        edit(d, 'main.html', '<table>', '<table><tr id="fit"><td>fitment unknown</td><td>the mount</td>'
+             '<td>measured</td></tr>')
+        edit(d, 'main.html', 'Open: none.', 'Open: <a href="#fit">fit</a>.')
+        commit(d, 'docs: open fit')
+        edit(d, 'main.html', 'fitment unknown', 'fitment unknown, bay measured'); sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: measure the bay')
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertIn('linked source main.html#fit (changed)', it['excerpt'])
+        self.assertEqual(it['cited'], ['main.html#fit'])
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            with self.assertRaisesRegex(ValueError, 'unaffected is refused'):
+                lspec.validate(it, given(['unaffected', 'it', 'is', 'still', 'open']), ctx, set())
+        finally:
+            os.chdir(cwd)
+        # an unlinked ordinary row is not a source: nothing is asked
+        edit(d, 'main.html', 'fitment unknown, bay measured', 'fitment unknown'); commit(d, 'docs: back')
+        edit(d, 'main.html', '<table>', '<table><tr id="loose"><td>loose</td><td>-</td><td>-</td></tr>')
+        sh('git', 'add', '-A', cwd=d)
+        self.assertNotIn('derived', [i['kind'] for i in evaluate_in(d, 'docs: loose')[1]])
+
+    def test_a_source_linked_across_files_refuses_unaffected(self):
+        """The status line's links resolve across the collection: a changed
+        row in a supporting spec linked as motor.html#watch-fit is cited."""
+        d = self.fixture()
+        edit(d, 'motor.html', '</main>', '<table><tr id="watch-fit"><td><code>watch-fit</code> fit</td>'
+             '<td>2026-10-04</td><td>closes when measured</td></tr></table></main>')
+        edit(d, 'main.html', 'Open: none.', 'Open: <a href="motor.html#watch-fit">watch-fit</a>.')
+        commit(d, 'docs: watch fit')
+        edit(d, 'motor.html', '<code>watch-fit</code> fit', '<code>watch-fit</code> fit, remeasured')
+        sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: remeasure')
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertIn('watch entry motor.html#watch-fit (changed)', it['excerpt'])
+        self.assertEqual(it['cited'], ['motor.html#watch-fit'])
+        self.assertIn('the status line links changed source(s): motor.html#watch-fit', it['excerpt'])
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            with self.assertRaisesRegex(ValueError, 'unaffected is refused'):
+                lspec.validate(it, given(['unaffected', 'nothing', 'cites', 'it']), ctx, set())
+        finally:
+            os.chdir(cwd)
+
     def test_not_asked_without_a_source_change_or_on_a_review(self):
         d = self.fixture()
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)

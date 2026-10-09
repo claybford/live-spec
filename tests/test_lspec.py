@@ -2470,6 +2470,60 @@ def evaluate_in(d, subject='docs: x', main='main.html', today=None):
         os.chdir(cwd)
 
 
+class GateStages(unittest.TestCase):
+    """The gate's stages tested alone, on a context built by gather(): the
+    module docstring's reason for the hundred-line rule."""
+
+    def ctx(self, d, subject='docs: x'):
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            col = lspec.Collection('main.html', basis='staged')
+            return lspec.gather(col, subject, lspec.read_state('request.json'))
+        finally:
+            os.chdir(cwd)
+
+    def test_sealed_items_alone(self):
+        d = lrepo(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        ensure_request(d)
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            self.assertEqual(lspec.sealed_items(self.ctx(d)), [])        # nothing staged
+            edit(d, 'main.html', 'The pair rule holds.', 'The pair rule holds firm.')
+            sh('git', 'add', '-A', cwd=d)
+            items = lspec.sealed_items(self.ctx(d))
+            self.assertEqual([(i['kind'], i['key'], i['mech']) for i in items],
+                             [('sealed', 'sealed:main.html#req', False)])
+            self.assertIn('content changed', items[0]['title'])
+            self.assertIn('was: ', items[0]['excerpt']); self.assertIn('now: ', items[0]['excerpt'])
+            self.assertEqual(items[0]['evidence'], lspec.sealed_items(self.ctx(d))[0]['evidence'])
+            edit(d, 'main.html', 'holds firm.', 'holds firmly.')
+            sh('git', 'add', '-A', cwd=d)
+            self.assertNotEqual(items[0]['evidence'], lspec.sealed_items(self.ctx(d))[0]['evidence'])
+        finally:
+            os.chdir(cwd)
+
+    def test_derived_item_alone(self):
+        d = lrepo(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        ensure_request(d)
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            self.assertIsNone(lspec.derived_item(self.ctx(d), head(d)))    # no source moved
+            decision_row(d, 'dl-new', cells=('A choice', 'The other', 'Because.'))
+            sh('git', 'add', '-A', cwd=d)
+            it = lspec.derived_item(self.ctx(d), head(d))
+            self.assertEqual((it['kind'], it['key'], it['mech']), ('derived', 'derived:bootloader', False))
+            self.assertIn('decision row main.html#dl-new (added)', it['excerpt'])
+            self.assertIn('bootloader main.html#status: Status: forward design.', it['excerpt'])
+            self.assertNotIn('cited', it)
+            edit(d, 'main.html', 'Locked: nothing.', 'Locked: <a href="#dl-new">dl-new</a>.')
+            sh('git', 'add', '-A', cwd=d)
+            it = lspec.derived_item(self.ctx(d), head(d))
+            self.assertEqual(it['cited'], ['main.html#dl-new'])          # unaffected is refused
+            self.assertIsNone(lspec.derived_item(self.ctx(d, 'review: main.html#claim'), head(d)))
+        finally:
+            os.chdir(cwd)
+
+
 class SealGate(unittest.TestCase):
     """A sealed change is a decision change or a correction, answered in reconcile."""
 

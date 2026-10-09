@@ -3,7 +3,11 @@
 # briefs by the registry, stages material, resumes, classifies completion.
 # Replaces the per-run hand-driven steps whose defects are recorded in the
 # bench spec (diag-staging, watch-prestaged, watch-partial, watch-rc).
-# Phases: setup | inst | deck | all (default) | score (summary skeleton). Resumable: a session whose
+# Phases: setup | inst | deck | all (default) | score (summary skeleton) |
+# score-blind (the grader's package: evidence and rubric, nothing of the
+# orchestrator's — dl-evidence). Two arms (dl-baseline): method cells carry
+# lspec and hooks, baseline cells a NOTES.md brief and no tool; held-out slots
+# run only under BENCH_HELDOUT=1 (dl-heldout). Resumable: a session whose
 # transcript ends in a final text part and whose end-of-session HEAD stamp
 # exists is never re-run; an incomplete transcript is quarantined to
 # *.partial (dl-completion).
@@ -64,44 +68,60 @@ stage_o4_edit() {  # $1 = cell repo, $2 = subject; verified in place, aborts on 
   log "$(basename "$repo") O4edit staged: $(git -C "$repo" status --porcelain | grep -E 'fitment|shifts' | tr '\n' ' ')"
 }
 
+# cell naming (dl-baseline): method cells S-N, baseline cells S-base-N; the
+# arm of a cell is read back from its name by arm_of
+arm_of() { case "$1" in *-base-*) echo baseline ;; *) echo method ;; esac; }
+cells_of() { echo "$1-$2"; }   # cells_of SUBJECT N -> method cell name
+base_cell() { echo "$1-base-$2"; }
+
 setup() {
-  local S N CELL HOOKDIR H
+  local S N CELL HOOKDIR H ARM BASE
   mkdir -p "$EV/subjects" "$EV/cells"
   python3 "$HERE/briefs.py" emit-all "$EV/briefs" || { log "FATAL brief generation failed"; exit 1; }
   for S in ae86 factorytax; do
-    if [ ! -d "$EV/subjects/$S-base" ]; then
-      cp -a "$HERE/subjects/$S" "$EV/subjects/$S-base"
-      rm -rf "$EV/subjects/$S-base"/factorytax/__pycache__ "$EV/subjects/$S-base"/factorytax/tests/__pycache__
-      git -C "$EV/subjects/$S-base" init -q
-      cp "$HERE/../lspec.py" "$EV/subjects/$S-base/"
-      cp -r "$HERE/../hooks" "$EV/subjects/$S-base/"
-      git -C "$EV/subjects/$S-base" add -A
-      git -C "$EV/subjects/$S-base" -c user.email=bench@local -c user.name=bench \
-        commit -qm "baseline: subject + lspec tooling @ $(git -C "$HERE/.." rev-parse --short HEAD)"
-      log "staged subject $S-base"
-    fi
-    for N in 1 2 3; do   # every cell is enforced: hooks installed (dl-arms)
-      CELL="$S-$N"
-      if [ ! -d "$EV/cells/$CELL" ]; then
-        git -C "$EV/subjects/$S-base" clone -q --no-hardlinks "$EV/subjects/$S-base" "$EV/cells/$CELL"
-        HOOKDIR=$(git -C "$EV/cells/$CELL" rev-parse --path-format=absolute --git-path hooks)
-        rm -f "$HOOKDIR"/*.sample
-        for H in commit-msg post-commit pre-commit prepare-commit-msg; do
-          ln -sf "../../hooks/$H" "$HOOKDIR/$H"
-        done
-        log "staged cell $CELL"
+    for ARM in method baseline; do
+      BASE="$EV/subjects/$S-base"; [ "$ARM" = baseline ] && BASE="$EV/subjects/$S-base-baseline"
+      if [ ! -d "$BASE" ]; then
+        cp -a "$HERE/subjects/$S" "$BASE"
+        rm -rf "$BASE"/factorytax/__pycache__ "$BASE"/factorytax/tests/__pycache__
+        git -C "$BASE" init -q
+        if [ "$ARM" = method ]; then   # the tool rides only in the method arm (dl-baseline)
+          cp "$HERE/../lspec.py" "$BASE/"
+          cp -r "$HERE/../hooks" "$BASE/"
+        fi
+        git -C "$BASE" add -A
+        git -C "$BASE" -c user.email=bench@local -c user.name=bench \
+          commit -qm "baseline: subject ($ARM arm) @ $(git -C "$HERE/.." rev-parse --short HEAD)"
+        log "staged subject $(basename "$BASE")"
       fi
+      for N in 1 2 3; do
+        CELL=$(cells_of "$S" "$N"); [ "$ARM" = baseline ] && CELL=$(base_cell "$S" "$N")
+        if [ ! -d "$EV/cells/$CELL" ]; then
+          git -C "$BASE" clone -q --no-hardlinks "$BASE" "$EV/cells/$CELL"
+          HOOKDIR=$(git -C "$EV/cells/$CELL" rev-parse --path-format=absolute --git-path hooks)
+          rm -f "$HOOKDIR"/*.sample
+          if [ "$ARM" = method ]; then   # enforced: hooks installed in every method cell
+            for H in commit-msg post-commit pre-commit prepare-commit-msg; do
+              ln -sf "../../hooks/$H" "$HOOKDIR/$H"
+            done
+          fi
+          log "staged cell $CELL ($ARM)"
+        fi
+      done
     done
   done
 }
 
 inst() {
-  local N S PLAN TAG FILE HOOK COND
+  local N S ARM CELL PLAN TAG FILE HOOK COND
   for N in 1 2 3; do
     for S in ae86 factorytax; do
-      PLAN=$(python3 "$HERE/briefs.py" plan "$S" inst) || { log "FATAL brief plan $S inst"; exit 1; }
-      IFS=$'\t' read -r TAG FILE HOOK COND <<< "$PLAN"
-      sess "$S-$N" inst "$EV/briefs/$FILE" "$TAG" &
+      for ARM in method baseline; do
+        CELL=$(cells_of "$S" "$N"); [ "$ARM" = baseline ] && CELL=$(base_cell "$S" "$N")
+        PLAN=$(python3 "$HERE/briefs.py" plan "$S" inst "$ARM") || { log "FATAL brief plan $S inst $ARM"; exit 1; }
+        IFS=$'\t' read -r TAG FILE HOOK COND <<< "$PLAN"
+        sess "$CELL" inst "$EV/briefs/$FILE" "$TAG" &
+      done
     done
     wait
   done
@@ -117,6 +137,17 @@ dispatch() {  # dispatch CELL SUBJECT REPO WIRED LINE
     log "$cell $TAG skipped (depends-on present at seed)"
     return 0
   fi
+  if [ "$COND" = heldout ] && [ -z "${BENCH_HELDOUT:-}" ]; then
+    log "$cell $TAG skipped (held out: BENCH_HELDOUT unset, dl-heldout)"
+    return 0
+  fi
+  # open-requests policy (dl-adopt): a method cell whose previous brief left an
+  # lspec request open is adopted by the next brief, as the operator's say-so
+  if [ "$(arm_of "$cell")" = method ] && [ -f "$(git -C "$repo" rev-parse --absolute-git-dir)/lspec/request.json" ]; then
+    (cd "$repo" && python3 lspec.py start --adopt --reason "deck brief $TAG per dl-adopt" >> "$EV/logs/$cell.adopt.log" 2>&1) \
+      && log "$cell $TAG adopted the open request" \
+      || log "$cell $TAG adopt not needed or refused (see logs)"
+  fi
   case "$HOOK" in
     none) ;;
     rebuild_notes) stage_rebuild_notes "$repo" ;;
@@ -128,31 +159,61 @@ dispatch() {  # dispatch CELL SUBJECT REPO WIRED LINE
 
 deck() {  # one cell's full operating deck, ordered and routed by the registry
   local cell=$1 subject=$2
-  local repo="$EV/cells/$cell"
+  local repo="$EV/cells/$cell" arm
+  arm=$(arm_of "$cell")
   local wired=0 line PLAN   # wired evaluated on the seed, before any deck session (dl-w1)
   grep -qs 'rel="depends-on"' "$repo"/*.html && wired=1
-  PLAN=$(python3 "$HERE/briefs.py" plan "$subject" deck) || { log "FATAL brief plan $subject deck"; exit 1; }
+  PLAN=$(python3 "$HERE/briefs.py" plan "$subject" deck "$arm") || { log "FATAL brief plan $subject deck $arm"; exit 1; }
   while IFS= read -r line; do
     dispatch "$cell" "$subject" "$repo" "$wired" "$line"
   done <<< "$PLAN"
   # watch-misroute / watch-verroute: verify-route is an end-of-deck check
   # (it needs every planned brief delivered or W1 logged skipped), so it runs
   # after each cell's deck, from the first cell onward
-  python3 "$HERE/briefs.py" verify-route "$EV" "$cell" "$subject" \
+  python3 "$HERE/briefs.py" verify-route "$EV" "$cell" "$subject" "$arm" \
     || { log "FATAL route verification $cell"; exit 1; }
 }
 
 decks() {
-  local N P1 P2 R1 R2
+  local N ARM P1 P2 R1 R2
   for N in 1 2 3; do
-    deck "ae86-$N" ae86 & P1=$!
-    deck "factorytax-$N" factorytax & P2=$!
-    R1=0; R2=0; wait "$P1" || R1=$?; wait "$P2" || R2=$?
-    # fail-closed: a FATAL inside a deck subshell must abort the whole run
-    if [ "$R1" -ne 0 ] || [ "$R2" -ne 0 ]; then
-      log "FATAL deck subshell failed (rc $R1/$R2)"; exit 1
-    fi
+    for ARM in method baseline; do
+      if [ "$ARM" = method ]; then
+        deck "$(cells_of ae86 "$N")" ae86 & P1=$!
+        deck "$(cells_of factorytax "$N")" factorytax & P2=$!
+      else
+        deck "$(base_cell ae86 "$N")" ae86 & P1=$!
+        deck "$(base_cell factorytax "$N")" factorytax & P2=$!
+      fi
+      R1=0; R2=0; wait "$P1" || R1=$?; wait "$P2" || R2=$?
+      # fail-closed: a FATAL inside a deck subshell must abort the whole run
+      if [ "$R1" -ne 0 ] || [ "$R2" -ne 0 ]; then
+        log "FATAL deck subshell failed (rc $R1/$R2)"; exit 1
+      fi
+    done
   done
+}
+
+# the blind grader's package (dl-evidence): transcripts, metrics, the cells'
+# repos and the rubric — no briefs, no deck, no driver log, no orchestrator
+# notes. The grader did not drive the sessions; the report says who scored.
+score_blind() {
+  local B="$EV/blind"
+  rm -rf "$B"; mkdir -p "$B"
+  cp -a "$EV/transcripts" "$EV/metrics" "$EV/cells" "$B/"
+  cp "$HERE/rubric.md" "$HERE/seed-inventory.md" "$B/"
+  cat > "$B/GRADER.txt" <<'EOT'
+You are scoring a benchmark run you did not take part in. In this directory:
+rubric.md and seed-inventory.md (the pre-registered instruments), transcripts/
+(one jsonl per session, named CELL-SLOT), metrics/ (cost per session), cells/
+(each cell's repository at run end; its git history is the evidence). Score
+every criterion the rubric lists, per cell, MET / PARTIAL / FAILED, quoting the
+git or transcript evidence for each verdict. Do not infer what a session was
+asked beyond its transcript. Write the scores as a table, then the D-series
+counts per cell, then F-series outcomes for both arms (method cells S-N,
+baseline cells S-base-N).
+EOT
+  log "blind package at $B ($(ls "$B/transcripts" | wc -l) transcripts); launch the grader in a fresh sandbox on it"
 }
 
 case "$PHASE" in
@@ -161,6 +222,7 @@ case "$PHASE" in
   deck)  decks ;;
   all)   setup; inst; decks ;;
   score) python3 "$HERE/briefs.py" skeleton "$EV" "$EV/report-skeleton.html" ;;
-  *) echo "usage: driver.sh [setup|inst|deck|all|score]" >&2; exit 2 ;;
+  score-blind) score_blind ;;
+  *) echo "usage: driver.sh [setup|inst|deck|all|score|score-blind]" >&2; exit 2 ;;
 esac
 log "$PHASE DONE"

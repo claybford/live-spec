@@ -5,26 +5,33 @@ generates the per-run brief files from this registry at setup (emit-all),
 dispatches sessions from it (plan), and verifies delivery after the first
 cell (verify-route). stdlib only.
 
-Registry entry: (tag, subjects, phase, filename, stage_hook, condition, body)
+Registry entry: (tag, subjects, arms, phase, filename, stage_hook, condition, body)
   tag         session tag; names transcripts/metrics (unchanged from runs #2-#3)
   subjects    which subjects the slot applies to
+  arms        which arms the slot applies to: method (lspec + hooks) and/or
+              baseline (NOTES.md, no tool) — dl-baseline
   phase       inst | deck
   filename    emitted file name
   stage_hook  none | rebuild_notes | o4_edit — driver maps these to its
               fail-closed staging functions, in the slot's own step
               (diag-staging)
-  condition   none | w1 — w1 runs only in a cell whose seed wired no
-              depends-on edge (dl-w1)
-  body        the exact brief text, byte-pinned against runs #2-#3 (O8 added 2026-10-08)
+  condition   none | w1 | heldout — w1 runs only in a cell whose seed wired no
+              depends-on edge (dl-w1); heldout runs only with BENCH_HELDOUT=1,
+              after a rules freeze (dl-heldout)
+  body        the exact brief text, byte-pinned against runs #2-#3 (O8 added
+              2026-10-08; the baseline inst briefs and O9/O10 added 2026-10-08,
+              before any run used them)
 """
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
 SUBJECTS = ("ae86", "factorytax")
 PHASES = ("inst", "deck")
+ARMS = ("method", "baseline")
 
 INST_TAIL = """\
 I want to start maintaining a Living Specification of this {ps}. The methodology is at
@@ -34,28 +41,38 @@ files are the authority for what the {ps} actually is. lspec.py and hooks/ are p
 in the repo; the methodology explains them. Commit your work as the methodology directs.
 """
 
+BASE_TAIL = """\
+I want to keep a NOTES.md in this repo as the one place that records what's decided and
+why (with the alternatives we turned down), what's still open, and the current status, so
+that any future session can pick the {ps} up cold. The repo's own files are the authority
+for what the {ps} actually is. Write it now from the repo's current state and commit it.
+"""
+
 O1_HEAD = """\
 No changes yet — before I ask you to do anything, walk me through the current state of
 this {ps} per the spec: what's locked, what's open, what the top risk is, and why """
 
 O4_HEAD = "I was poking at the {thing} the other day and tweaked something — can you "
 
-INST = {
+INST_PRE = {
     "ae86": """\
 This repo is my AE86 garage project: I am swapping a Honda K24A2 (from a 2004 Acura TSX
 donor) into my 1985 Toyota Corolla. The repo holds my bay measurements, the donor engine
 reference specs, my parts list with order status, known issues observed on the bench, and
 a small fitment calculator.
 
-""" + INST_TAIL.format(ps="project"),
+""",
     "factorytax": """\
 This repo is factorytax, the payroll tax engine for Riverbend Stamping Works, a
 240-employee metal stamping factory. It computes shift pay (including overtime and
 night-shift rules), statutory withholding from the 2026 bracket tables, plant-specific
 allowances, monthly filing bands, and the bookkeeper-facing reports.
 
-""" + INST_TAIL.format(ps="system"),
+""",
 }
+PS = {"ae86": "project", "factorytax": "system"}
+INST = {s: INST_PRE[s] + INST_TAIL.format(ps=PS[s]) for s in SUBJECTS}
+INST_BASE = {s: INST_PRE[s] + BASE_TAIL.format(ps=PS[s]) for s in SUBJECTS}
 
 O1 = {
     "ae86": O1_HEAD.format(ps="project") + """\
@@ -170,29 +187,59 @@ dependent claim — following the spec's own conventions for how these links wor
 as the spec directs.
 """
 
+O9 = {   # held-out (dl-heldout): does the record answer a re-proposal without re-arguing it?
+    "ae86": """\
+A friend at the track says I should be running a K20A in this car, not the K24A2 — lighter
+and cheaper. What's our position on that, and what does it rest on? I don't want to reopen
+it unless you think there's a real reason to.
+""",
+    "factorytax": """\
+The plant manager asked me why the July heat allowance was dropped. Remind me what we
+decided, what it rests on, and what would make us put July back.
+""",
+}
+
+O10 = {  # held-out (dl-heldout): does a measured value survive, with what depends on it?
+    "ae86": """\
+Quick check before I order the tunnel plate: what shifter tunnel opening are we designing
+to right now, where did that number come from, and what else in the plan depends on it?
+""",
+    "factorytax": """\
+Quick check before the auditor visit: what top withholding rate and personal allowance is
+the system using right now, where do those numbers come from, and does the spec agree
+with the code? If anything disagrees, fix it the right way round.
+""",
+}
+
+M, B, MB = ("method",), ("baseline",), ("method", "baseline")
+
 DECK = [
-    ("inst", ("ae86",),       "inst", "inst-ae86.txt",       "none",          "none", INST["ae86"]),
-    ("inst", ("factorytax",), "inst", "inst-factorytax.txt", "none",          "none", INST["factorytax"]),
-    ("O1",  SUBJECTS,         "deck", "{s}-O1.txt",          "none",          "none", O1),
-    ("O2",  SUBJECTS,         "deck", "{s}-O2.txt",          "none",          "none", O2),
-    ("O3",  SUBJECTS,         "deck", "{s}-O3.txt",          "none",          "none", O3),
-    ("O3b", ("ae86",),        "deck", "ae86-O3b.txt",        "rebuild_notes", "none", AE86_O3B),
-    ("O4",  SUBJECTS,         "deck", "{s}-O4.txt",          "o4_edit",       "none", O4),
-    ("O5",  SUBJECTS,         "deck", "{s}-O5.txt",          "none",          "none", O5),
-    ("O6",  SUBJECTS,         "deck", "{s}-O6.txt",          "none",          "none", O6),
-    ("O7",  SUBJECTS,         "deck", "both-O7.txt",         "none",          "none", BOTH_O7),
-    ("O8",  SUBJECTS,         "deck", "{s}-O8.txt",          "none",          "none", O8),
-    ("W1",  SUBJECTS,         "deck", "W1.txt",              "none",          "w1",   W1),
+    ("inst", ("ae86",),       M,  "inst", "inst-ae86.txt",       "none",          "none",    INST["ae86"]),
+    ("inst", ("factorytax",), M,  "inst", "inst-factorytax.txt", "none",          "none",    INST["factorytax"]),
+    ("inst", ("ae86",),       B,  "inst", "inst-base-ae86.txt",  "none",          "none",    INST_BASE["ae86"]),
+    ("inst", ("factorytax",), B,  "inst", "inst-base-factorytax.txt", "none",     "none",    INST_BASE["factorytax"]),
+    ("O1",  SUBJECTS,         MB, "deck", "{s}-O1.txt",          "none",          "none",    O1),
+    ("O2",  SUBJECTS,         MB, "deck", "{s}-O2.txt",          "none",          "none",    O2),
+    ("O3",  SUBJECTS,         MB, "deck", "{s}-O3.txt",          "none",          "none",    O3),
+    ("O3b", ("ae86",),        MB, "deck", "ae86-O3b.txt",        "rebuild_notes", "none",    AE86_O3B),
+    ("O4",  SUBJECTS,         MB, "deck", "{s}-O4.txt",          "o4_edit",       "none",    O4),
+    ("O5",  SUBJECTS,         MB, "deck", "{s}-O5.txt",          "none",          "none",    O5),
+    ("O6",  SUBJECTS,         MB, "deck", "{s}-O6.txt",          "none",          "none",    O6),
+    ("O7",  SUBJECTS,         M,  "deck", "both-O7.txt",         "none",          "none",    BOTH_O7),
+    ("O8",  SUBJECTS,         MB, "deck", "{s}-O8.txt",          "none",          "none",    O8),
+    ("O9",  SUBJECTS,         MB, "deck", "{s}-O9.txt",          "none",          "heldout", O9),
+    ("O10", SUBJECTS,         MB, "deck", "{s}-O10.txt",         "none",          "heldout", O10),
+    ("W1",  SUBJECTS,         M,  "deck", "W1.txt",              "none",          "w1",      W1),
 ]
 
 
-def entries(subject, phase):
-    """Ordered registry rows for SUBJECT PHASE."""
-    if subject not in SUBJECTS or phase not in PHASES:
-        sys.exit(f"unknown subject/phase: {subject} {phase}")
+def entries(subject, phase, arm="method"):
+    """Ordered registry rows for SUBJECT PHASE in ARM."""
+    if subject not in SUBJECTS or phase not in PHASES or arm not in ARMS:
+        sys.exit(f"unknown subject/phase/arm: {subject} {phase} {arm}")
     out = []
-    for tag, subs, ph, fname, hook, cond, body in DECK:
-        if ph == phase and subject in subs:
+    for tag, subs, arms, ph, fname, hook, cond, body in DECK:
+        if ph == phase and subject in subs and arm in arms:
             if isinstance(body, dict):
                 body = body[subject]
             fname = fname.replace("{s}", subject)
@@ -204,8 +251,10 @@ def all_files():
     """Every (filename, body) the deck emits, each once."""
     seen = {}
     for subject in SUBJECTS:
-        for _tag, fname, _hook, _cond, body in entries(subject, "inst") + entries(subject, "deck"):
-            seen.setdefault(fname, body)
+        for arm in ARMS:
+            for _tag, fname, _hook, _cond, body in (entries(subject, "inst", arm)
+                                                    + entries(subject, "deck", arm)):
+                seen.setdefault(fname, body)
     return sorted(seen.items())
 
 
@@ -226,8 +275,8 @@ def cmd_emit_all(d):
     (d / "SHA256SUMS").write_text("\n".join(sums) + "\n")
 
 
-def cmd_plan(subject, phase):
-    for tag, fname, hook, cond, _body in entries(subject, phase):
+def cmd_plan(subject, phase, arm="method"):
+    for tag, fname, hook, cond, _body in entries(subject, phase, arm):
         print(f"{tag}\t{fname}\t{hook}\t{cond}")
 
 
@@ -255,20 +304,21 @@ def session_done(ev, name):
             and transcript_done(ev / "transcripts" / f"{name}.jsonl"))
 
 
-def cmd_verify_route(ev, cell, subject):
+def cmd_verify_route(ev, cell, subject, arm="method"):
     """After a cell's deck: every planned session delivered the registry's
     exact bytes (briefs-used/, written by run_session.sh) and left a complete
-    transcript. W1 may instead have a driver-log skip line (dl-w1)."""
+    transcript. W1 and held-out slots may instead have a driver-log skip line
+    (dl-w1, dl-heldout)."""
     ev = Path(ev)
     log = (ev / "driver-progress.log").read_text() if (ev / "driver-progress.log").exists() else ""
     bad = []
-    for tag, _fname, _hook, cond, body in entries(subject, "deck"):
+    for tag, _fname, _hook, cond, body in entries(subject, "deck", arm):
         name = f"{cell}-{tag}"
         used = ev / "briefs-used" / f"{name}.txt"
-        if cond == "w1" and not used.exists():
+        if cond in ("w1", "heldout") and not used.exists():
             if f"{cell} {tag} skipped" in log:
                 continue
-            bad.append(f"{name}: W1 neither delivered nor logged as skipped")
+            bad.append(f"{name}: {tag} neither delivered nor logged as skipped")
             continue
         if not used.exists():
             bad.append(f"{name}: no delivered brief in briefs-used/")
@@ -282,6 +332,32 @@ def cmd_verify_route(ev, cell, subject):
             print(f"ROUTE FAIL {b}", file=sys.stderr)
         sys.exit(1)
     print(f"{cell} route verified ({subject})")
+
+
+NEIGHBOR_RE = re.compile(r"\[neighbor\] neighbor (\S+?)#([A-Za-z0-9_.:-]+)")
+TICK_RE = re.compile(r"--tick \w+ --answer (\w+)")
+
+
+def neighbor_counts(ev, cell):
+    """Best-effort, from the cell's transcripts: each neighbor item the gate
+    showed, paired with the next --tick answer, split by whether the neighbor
+    id is a heading in the cell's spec (live-spec watch-headnbr; rubric E).
+    -> {"heading": {"holds": n, "other": n}, "claim": {...}}"""
+    ev = Path(ev)
+    heads = set()
+    for html_file in (ev / "cells" / cell).glob("*.html"):
+        heads |= set(re.findall(r"<h[1-6][^>]*\bid=\"([^\"]+)\"", html_file.read_text(errors="replace")))
+    counts = {"heading": {"holds": 0, "other": 0}, "claim": {"holds": 0, "other": 0}}
+    for t in sorted((ev / "transcripts").glob(f"{cell}-*.jsonl")):
+        text = t.read_text(errors="replace")
+        pos = 0
+        for m in NEIGHBOR_RE.finditer(text):
+            kind = "heading" if m.group(2) in heads else "claim"
+            tick = TICK_RE.search(text, m.end())
+            answer = tick.group(1) if tick else "other"
+            counts[kind]["holds" if answer == "holds" else "other"] += 1
+            pos = m.end()
+    return counts
 
 
 def cmd_skeleton(ev, out):
@@ -305,8 +381,10 @@ def cmd_skeleton(ev, out):
         gated = sum("Reconciled: checklist" in c for c in commits)
         rows.append((cell, tag, "done" if session_done(ev, name) else "INCOMPLETE",
                      len(commits), gated, cost))
-    crit = [f"A{i}" for i in range(1, 11)] + [f"B{i}" for i in range(1, 5)] + [f"C{i}" for i in range(1, 13)]
+    crit = ([f"A{i}" for i in range(1, 11)] + [f"B{i}" for i in range(1, 5)]
+            + [f"C{i}" for i in range(1, 13)] + [f"F{i}" for i in range(1, 6)])
     cells = sorted({r[0] for r in rows})
+    nbr = {c: neighbor_counts(ev, c) for c in cells}
     h = ["<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">",
          "<title>lspec bench — run summary</title>",
          "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/water.css@2/out/light.css\">",
@@ -321,24 +399,30 @@ def cmd_skeleton(ev, out):
           + "".join(f"<th>{c}</th>" for c in cells) + "</tr>"]
     h += ["<tr><td>" + k + "</td>" + "".join("<td>[score]</td>" for _ in cells) + "</tr>" for k in crit]
     h += ["</table><h2>Gate measurement (D) and metrics (E)</h2><p>[D-series counts per cell; "
-          "E-series from the sessions table]</p><h2>Representative failures</h2><p>[two or three, "
+          "E-series from the sessions table]</p>",
+          "<table><tr><th>Cell</th><th>Heading neighbors: holds / other</th>"
+          "<th>Claim neighbors: holds / other</th></tr>"]
+    h += [f"<tr><td>{c}</td><td>{nbr[c]['heading']['holds']} / {nbr[c]['heading']['other']}</td>"
+          f"<td>{nbr[c]['claim']['holds']} / {nbr[c]['claim']['other']}</td></tr>" for c in cells]
+    h += ["</table><p>Scored by: [model or human]; drove the sessions: [yes/no] (dl-evidence).</p>",
+          "<h2>Representative failures</h2><p>[two or three, "
           "quoted from transcripts, no paths]</p></main></body></html>"]
     Path(out).write_text("\n".join(h) + "\n")
     print(f"skeleton: {len(rows)} sessions, {len(cells)} cells -> {out}")
 
 
 def main(argv):
-    usage = ("usage: briefs.py emit-all DIR | plan SUBJECT PHASE | "
-             "verify-route EV CELL SUBJECT | done EV NAME | skeleton EV OUT")
+    usage = ("usage: briefs.py emit-all DIR | plan SUBJECT PHASE [ARM] | "
+             "verify-route EV CELL SUBJECT [ARM] | done EV NAME | skeleton EV OUT")
     if len(argv) < 2:
         sys.exit(usage)
     cmd = argv[1]
     if cmd == "emit-all" and len(argv) == 3:
         cmd_emit_all(argv[2])
-    elif cmd == "plan" and len(argv) == 4:
-        cmd_plan(argv[2], argv[3])
-    elif cmd == "verify-route" and len(argv) == 5:
-        cmd_verify_route(argv[2], argv[3], argv[4])
+    elif cmd == "plan" and len(argv) in (4, 5):
+        cmd_plan(argv[2], argv[3], *argv[4:])
+    elif cmd == "verify-route" and len(argv) in (5, 6):
+        cmd_verify_route(argv[2], argv[3], argv[4], *argv[5:])
     elif cmd == "done" and len(argv) == 4:
         sys.exit(0 if session_done(argv[2], argv[3]) else 1)
     elif cmd == "skeleton" and len(argv) == 4:

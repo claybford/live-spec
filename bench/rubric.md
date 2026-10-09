@@ -3,6 +3,8 @@
 Model under test: fireworks-ai/accounts/fireworks/models/glm-5p3-flash, effort low (pinned in sandbox-home config).
 Scoring: each criterion MET / PARTIAL / FAILED, with quoted evidence (transcript line or git evidence).
 Dual-scored: orchestrator + blind explore subagent; disagreements reconciled with quotes.
+Scored by (from run #5, added 2026-10-08 before any run #5 session): a grader that did not drive the sessions — a second model, or a human pass — working from `driver.sh score-blind`'s package (transcripts, metrics, cell repos, this rubric; no briefs, deck or driver log). The report header states who scored and whether they drove the sessions (bench-spec dl-evidence).
+Arms (from run #5, bench-spec dl-baseline): method cells `S-N` (lspec + hooks) and baseline cells `S-base-N` (a NOTES.md brief, no tool). A–D score the method arm; F scores both arms; E is reported for both.
 
 ## A. Instantiation criteria (scored for all 6)
 
@@ -53,8 +55,22 @@ Mechanical, per instance: count at final handoff —
 3. watch entries missing required anatomy (date, closing condition)
 4. stale restatements of edited values (spot-list pre-registered per subject)
 5. commits bypassing reconcile (no Reconciled: trailers)
-From run #4 there is one arm, enforced (bench-spec dl-arms); D is reported as absolute counts per cell, not an arm comparison. Runs #1–#3 scored it as enforced vs advisory.
+From run #4 D is reported as absolute counts per method cell, not an arm comparison (runs #1–#3 scored it as enforced vs advisory; from run #5 the second arm is the baseline, bench-spec dl-baseline, and D does not apply to it).
 
 ## E. Metrics series (mechanical, per commit)
 
 bytes of spec file(s), dl- row count, depends-on edge count, watch- row count, review: commit count, cumulative session cost (from step-finish parts in --format json transcripts).
+Added 2026-10-08 (before any run #5 session): neighbor answers by target kind — heading vs claim, holds vs other — per cell, from `driver.sh score`'s skeleton (live-spec watch-headnbr). For baseline cells: bytes of NOTES.md and commit count.
+
+## F. Outcomes, both arms (added 2026-10-08, before any baseline or held-out session ran; bench-spec dl-baseline, dl-heldout)
+
+Scored per cell from git and transcripts, MET / PARTIAL / FAILED with quotes, in the method arm and the baseline arm alike. O9 and O10 are held out: excluded from any run used to change rules, first scored in the run after the freeze commit the runs table names.
+
+| # | Criterion | Signal |
+|---|-----------|--------|
+| F1 | No wrong downstream decision | O2/O5 values propagate correctly: nothing downstream still uses the pre-update value (clutch order, bracket rate, tunnel opening); O10 reports the current value and its source without contradiction |
+| F2 | No lost constraint | O4/O6: the requirement survives byte-identical or is changed deliberately with a stated reason; O9 states the recorded position and its basis rather than re-deciding |
+| F3 | No repeated investigation | O5: the recurrence is recognized as the recorded failure (diagnosis reused, not re-derived); O9/O10 answer from the record, not from re-reading the whole repo for the answer |
+| F4 | Recovery after a dirty handoff | A session that starts on uncommitted or half-done work from the previous brief identifies it, finishes or backs it out, and says which (method arm: adopts per dl-adopt; baseline: reads NOTES.md and the tree) |
+| F5 | Total deck cost | Cumulative cost across the deck, from metrics/; reported per arm with the per-cell spread |
+

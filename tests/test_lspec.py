@@ -1929,12 +1929,12 @@ class HookIntegration(unittest.TestCase):
         sh('git', 'add', 'hooks/post-commit', cwd=d)
         self.assertEqual(self.gcommit(d, 'docs: install completion hook').returncode, 0)
         Path(d, 'unfinished.txt').write_text('draft')
-        result = self.gcommit(d, 'docs: session event')
+        result = self.gcommit(d, 'audit: session event')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('untracked: unfinished.txt', result.stderr)   # git routes hook output to stderr
-        self.assertEqual(sh('git', 'log', '-1', '--format=%s', cwd=d).strip(), 'docs: session event')
+        self.assertEqual(sh('git', 'log', '-1', '--format=%s', cwd=d).strip(), 'audit: session event')
         Path(d, 'unfinished.txt').unlink()
-        result = self.gcommit(d, 'docs: clean event')
+        result = self.gcommit(d, 'audit: clean event')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stderr, '')                  # nothing left: the hook says nothing
 
@@ -2663,6 +2663,8 @@ class SealCorrection(unittest.TestCase):
             os.chdir(cwd)
 
     def test_correction_confirmed_by_a_later_session_clears(self):
+        """The confirmation is a review: commit naming the claim, empty when the
+        claim needed no edit (dl-seal); other commits are not asked."""
         d = self.fixture()
         self.correct(d, ['correction', 'fixing', 'a', 'typo', 'here'])
         corrected = head(d)
@@ -2672,22 +2674,32 @@ class SealCorrection(unittest.TestCase):
         self.assertNotIn('confirm', kinds)
         sh('git', 'reset', '-q', '--hard', cwd=d)
         self.assertEqual(cli(d, 'finish')[0], 0)
-        # the next session is, on its first commit
-        cli(d, 'start')
+        # the next session sees it at start; an ordinary commit is not asked
+        rc, out = cli(d, 'start')
+        self.assertIn('AWAITING CONFIRMATION (1): main.html#req', out)
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
-        out = reconcile_out(d, 'docs: derate')
+        self.assertNotIn('confirm', reconcile_out(d, 'docs: derate'))
+        sh('git', 'reset', '-q', '--hard', cwd=d)
+        # an empty docs: commit is refused; the confirmation rides review:
+        out = reconcile_out(d, 'docs: confirm it')
+        self.assertIn("empty candidate under 'docs'", out)
+        rc, out = cli(d, 'reconcile', '--subject', 'review: main.html#req')
         self.assertIn('confirm 1', out)
-        item = next(i for i in evaluate_in(d, 'docs: derate')[1] if i['kind'] == 'confirm')
+        item = next(i for i in evaluate_in(d, 'review: main.html#req')[1] if i['kind'] == 'confirm')
         self.assertIn(corrected[:7], item['excerpt'])
         self.assertIn('fixing a typo here', item['excerpt'])
         self.assertIn('The pair rule holds firm.', item['excerpt'])
-        rc, out = settle(d, 'docs: derate', answers={'confirm': ['confirmed', 'matches', 'dl-pair', 'as', 'decided']})
+        rc, out = do_review(d, 'main.html#req', message='checked against dl-pair')
         self.assertEqual(rc, 0, out)
-        receipt = lspec.json.loads(state_file(d, 'receipt.json').read_text())
-        self.assertIn('Reconciled: confirmed main.html#req — matches dl-pair as decided', receipt['trailers'])
-        commit_reconciled(d)
+        body = sh('git', 'log', '-1', '--format=%B', cwd=d)
+        self.assertTrue(body.startswith('review: main.html#req\n'))
+        self.assertIn('Reconciled: confirmed main.html#req', body)
+        self.assertEqual(sh('git', 'diff', 'HEAD^', 'HEAD', '--stat', cwd=d), '')   # empty
         self.assertNotIn('AWAITING', cli(d, 'start')[1])
-        self.assertNotIn('confirm', [it['kind'] for it in evaluate_in(d, 'docs: x')[1]])
+        self.assertNotIn('confirm', [it['kind'] for it in evaluate_in(d, 'review: main.html#req')[1]])
+        # nothing left to review: the verb refuses a second time
+        rc, out = cli(d, 'review', 'main.html#req')
+        self.assertEqual(rc, 2); self.assertIn('awaits no confirmation', out)
 
     def test_confirm_in_the_same_commit_is_refused(self):
         d = self.fixture()
@@ -4117,17 +4129,17 @@ class Receipts(unittest.TestCase):
 
     def test_message_must_carry_the_reconciled_subject_and_trailers(self):
         d = self.hrepo()
-        self.assertEqual(settle(d, 'docs: event')[0], 0)
+        self.assertEqual(settle(d, 'audit: event')[0], 0)
         msg = Path(d, '.git', 'MSG')
-        for text, why in [('docs: other\n', 'not the reconciled subject'),
-                          ('docs: event\n\nReconciled: forged\n', 'trailers do not match')]:
+        for text, why in [('audit: other\n', 'not the reconciled subject'),
+                          ('audit: event\n\nReconciled: forged\n', 'trailers do not match')]:
             msg.write_text(text)
             rc, out = cli(d, 'hook', 'commit-msg', str(msg))
             self.assertEqual(rc, 1); self.assertIn(why, out)
         msg.write_text('anything\n\nCo-Authored-By: A <a@b>\n')
         self.assertEqual(cli(d, 'hook', 'prepare-commit-msg', str(msg), 'message')[0], 0)
         text = msg.read_text()
-        self.assertTrue(text.startswith('docs: event\n'))
+        self.assertTrue(text.startswith('audit: event\n'))
         self.assertIn('Co-Authored-By: A <a@b>\nReconciled: checklist', text)
         self.assertEqual(cli(d, 'hook', 'commit-msg', str(msg))[0], 0)
 
@@ -4136,7 +4148,7 @@ class Receipts(unittest.TestCase):
         edit(d, 'main.html', 'Main', 'Main heading')
         self.assertEqual(self.gcommit(d, 'docs: retitle', add=['main.html']).returncode, 0)
         before = head(d)
-        self.assertEqual(settle(d, 'docs: retitle')[0], 0)    # a receipt for the empty amend
+        self.assertEqual(settle(d, 'audit: retitle')[0], 0)   # a receipt for the empty amend
         r = subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit',
                             '--amend', '--no-edit'], cwd=d, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
@@ -4164,7 +4176,7 @@ class Receipts(unittest.TestCase):
         w = self.track(tempfile.mkdtemp())
         sh('git', 'worktree', 'add', '-q', '-b', 'linked', w, cwd=d)
         self.assertIsNone(request(w))
-        r = self.gcommit(w, 'docs: linked event')
+        r = self.gcommit(w, 'audit: linked event')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotEqual(state_file(d, 'request.json'), state_file(w, 'request.json'))
         self.assertIsNotNone(request(w))

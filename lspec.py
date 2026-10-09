@@ -1708,6 +1708,24 @@ def request_items(ctx):
     return []
 
 
+def candidate_is_empty(root):
+    """True when the index tree equals HEAD's: a commit would change no file."""
+    try:
+        return git("write-tree", cwd=root).strip() == git("rev-parse", "HEAD^{tree}",
+                                                           cwd=root).strip()
+    except RuntimeError:
+        return False
+
+
+def awaiting_confirmation(root, request):
+    """Names of sealed corrections a previous request left awaiting a later
+    session's review: confirmation (dl-seal)."""
+    start = (request or {}).get("start")
+    if not start or head_status() != "ok":
+        return set()
+    return {name for name, _, _ in pending_corrections(root, start)}
+
+
 def subject_items(ctx):
     """The subject's vocabulary and shape: a declared `type:`, one transition,
     at most SUBJECT_MAX characters (a review: lists its claims)."""
@@ -1735,6 +1753,12 @@ def subject_items(ctx):
     if ";" in subject:
         out.append(item("subject", "chain", "subject chains clauses with ';'", True,
                         detail="one transition per commit; split the commit"))
+    if ctx.head_state == "ok" and subject_type(subject, "audit") is None \
+            and subject_type(subject, "review") is None and candidate_is_empty(ctx.root):
+        out.append(item("subject", "empty", f"empty candidate under {prefix.strip()!r}, "
+                        "a type that cannot be empty", True,
+                        detail="only audit: and review: commits may change no file (P16); "
+                               "a sealed correction is confirmed by lspec review CLAIM"))
     if subject_type(subject, "seed") is not None and not getattr(ctx, "body", "").strip():
         out.append(item("subject", "seedbody", "seed: commit has no body", True,
                         detail="the seed commit body carries the dependency and seal "
@@ -1934,9 +1958,10 @@ def review_subject_items(ctx, named, retired):
     if ctx.head is not None:
         sources |= {f"{repo_rel(fp)}#{l['src']}" for fp, l, _, _ in ctx.head.depends_on_edges()
                     if l["src"]}
+    sources |= awaiting_confirmation(ctx.root, ctx.request)
     for name in sorted(named - sources):
         out.append(item("review", name + " named", f"review commit names {name}, which "
-                        "carries no depends-on link", True,
+                        "carries no depends-on link and awaits no confirmation", True,
                         detail="name the dependent claim itself (the id holding the link)"))
     for name, kind in review_offenders(named, ctx.changed, ctx.head_specs, col.specs, retired):
         out.append(item("review", name + " scope", f"review commit changes {name} ({kind}), "
@@ -2149,14 +2174,18 @@ def sealed_items(ctx):
 
 def confirm_items(ctx):
     """Sealed corrections a previous request recorded without a decision row,
-    still awaiting confirmation: asked of every commit of a later request,
-    never of the correcting one (its start commit bounds the search)."""
+    still awaiting confirmation: asked of a review: commit naming the claim,
+    never of the correcting request (its start commit bounds the search);
+    start lists what awaits (dl-seal)."""
     col = ctx.staged
     out = []
-    if ctx.head_state != "ok" or subject_type(ctx.subject, "review") is not None \
+    if ctx.head_state != "ok" or subject_type(ctx.subject, "review") is None \
             or not (ctx.request or {}).get("start"):
         return out
+    named, _ = subject_claims(ctx.subject)
     for name, sha, reason in pending_corrections(ctx.root, ctx.request["start"]):
+        if name not in named:
+            continue
         found = find_id(ctx, name)
         if found is None or found[1] not in col.specs[found[0]].sealed:
             continue
@@ -3825,6 +3854,7 @@ def review_claims(col, targets, retired):
     of any edge the commit retires). The claim itself, not a container around
     one: the edge's source id."""
     retiring = {(fp, link["src"]) for fp, link, tp, fr in retired}
+    awaiting = awaiting_confirmation(repo_root(), read_state("request.json"))
     names, files, claims = [], set(), []
     for t in targets:
         try:
@@ -3835,8 +3865,9 @@ def review_claims(col, targets, retired):
             raise ReviewRefused(f"{t} names a file; name the dependent claim")
         deps = [l for l in col.specs[p].links_in(frag)
                 if l["rel"] == "depends-on" and l["src"] == frag]
-        if not deps and (p, frag) not in retiring:
-            raise ReviewRefused(f"{addr(p, frag)} has no depends-on link; nothing to review")
+        if not deps and (p, frag) not in retiring and f"{repo_rel(p)}#{frag}" not in awaiting:
+            raise ReviewRefused(f"{addr(p, frag)} has no depends-on link and awaits no "
+                                "confirmation; nothing to review")
         names.append(f"{repo_rel(p)}#{frag}")
         claims.append((p, frag))
         files.add(repo_rel(p))
@@ -3879,7 +3910,9 @@ def review_preflight(col, names, claims, files, retired):
     retiring = {(fp, link["src"]) for fp, link, tp, fr in retired}
     _, dpaths = uncommitted([rel(x) for x in col.specs])
     owed = {r["dependent"] for r in owed_reviews(col, dpaths)} | retiring
-    clear = [(p, f) for p, f in claims if (p, f) not in owed]
+    awaiting = awaiting_confirmation(repo_root(), read_state("request.json"))
+    clear = [(p, f) for p, f in claims if (p, f) not in owed and addr(p, f) not in awaiting
+             and f"{repo_rel(p)}#{f}" not in awaiting]
     if clear:
         raise ReviewRefused("nothing is owed for " + ", ".join(addr(p, f) for p, f in clear)
                             + " — a review names the obligation it clears"
@@ -4087,7 +4120,9 @@ unrelated staged changes, a claim that owes nothing (naming the commit that
 already reviewed it), and a change in a named file to a claim it does not name.
 A target change committed through the gate is normally reviewed there by the
 dependent's holds answer; a review: commit is for a dependent that had to
-change, or debt from an edit that landed outside the protocol.
+change, or debt from an edit that landed outside the protocol. It is also how
+a later session confirms a sealed correction left awaiting: `lspec review
+CLAIM` on a clean tree asks the confirm item and commits empty (dl-seal).
 
 What is owed: the target's committed text is compared with the latest review
 naming the dependent claim, or with the edge's introduction if unreviewed; a

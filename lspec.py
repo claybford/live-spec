@@ -47,7 +47,10 @@ Implementation details beyond the seed's operating rules:
 
 * State lives in Git metadata (per worktree) under lspec/: request.json
   (MAIN and the request's start commit), reconcile.json (subject, body and
-  answers keyed by item and evidence), receipt.json, and a random secret.
+  answers keyed by item and evidence), receipt.json, a random secret, and
+  history.json (review baselines memoized under the HEAD they were derived
+  from; stale under any other HEAD, deletable at any time) and specs.marshal
+  (parsed files by blob, under the parser that wrote them; deletable).
   A receipt names the request that earned it (its opened_at); once a
   different request is open the hooks refuse it, so a session never commits
   on another session's answers.
@@ -74,13 +77,18 @@ Implementation details beyond the seed's operating rules:
 """
 
 import argparse
+import atexit
+import contextlib
 import hashlib
 import hmac
 import html
+import io
 import json
+import marshal
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -195,6 +203,25 @@ class Spec(HTMLParser):
                 del self._stack[i:]
                 break
 
+    # ---- cached form
+    FIELDS = ("raw", "body", "ids", "links", "elems", "tags", "count_decls", "bad_deps",
+              "sealed", "bad_sealed", "watches", "retired_changes", "_spans", "_lines")
+
+    def fields(self):
+        """Everything a parse produced, as plain data (marshal-safe)."""
+        return {f: getattr(self, f) for f in self.FIELDS}
+
+    @classmethod
+    def from_fields(cls, path, fields):
+        """A Spec with PATH and a prior parse's FIELDS: no parsing, and the
+        parser's own transient state is not restored (nothing reads it)."""
+        spec = cls.__new__(cls)
+        spec.path = path
+        spec._stack, spec._pre = [], 0
+        for f in cls.FIELDS:
+            setattr(spec, f, fields[f])
+        return spec
+
     # ---- element access
     def element(self, eid):
         s, e = self.elems[eid]
@@ -263,12 +290,22 @@ def resolve(from_path, href):
     return canon(os.path.join(os.path.dirname(from_path), path)), frag
 
 
+_CANON = {}        # (cwd, path) -> canonical path; realpath is slow on Windows
+_RELS = {}         # (cwd, path) -> rel(path)
+_REPO_RELS = {}    # (cwd, path) -> repo_rel(path)
+
+
 def canon(path):
     """Canonical absolute path for use as a dictionary key. realpath resolves
     symlinks and Windows 8.3 short names; normpath fixes separators. Every
     path compared against another goes through here, never through
-    os.path.abspath alone."""
-    return os.path.normpath(os.path.realpath(os.path.abspath(path)))
+    os.path.abspath alone. Memoized per cwd: a link resolution asks tens of
+    thousands of times per checklist, and realpath is a system call."""
+    key = (os.getcwd(), path)
+    out = _CANON.get(key)
+    if out is None:
+        out = _CANON[key] = os.path.normpath(os.path.realpath(os.path.abspath(path)))
+    return out
 
 
 def addr(path, frag):
@@ -313,7 +350,11 @@ def posix(path):
 def rel(path):
     """Display / pathspec form: relative to cwd, forward slashes. Both sides
     canonical, or a short-name or symlinked cwd yields an absolute mess."""
-    return posix(os.path.relpath(canon(path), canon(os.getcwd())))
+    key = (os.getcwd(), path)
+    out = _RELS.get(key)
+    if out is None:
+        out = _RELS[key] = posix(os.path.relpath(canon(path), canon(os.getcwd())))
+    return out
 
 
 def repo_rel(path):
@@ -323,8 +364,11 @@ def repo_rel(path):
     root = repo_root()
     if root is None:
         raise HistoryUnavailable("not a git checkout")
-    return posix(os.path.relpath(os.path.realpath(os.path.abspath(path)),
-                                 os.path.realpath(os.path.abspath(root))))
+    key = (os.getcwd(), path)
+    out = _REPO_RELS.get(key)
+    if out is None:
+        out = _REPO_RELS[key] = posix(os.path.relpath(canon(path), canon(root)))
+    return out
 
 
 def subject_type(subject, type_):
@@ -383,6 +427,9 @@ def pending_corrections(root, before=None):
 
 def review_log(root):
     """[(sha, {name: how})] for every commit recording a review, newest first."""
+    head = commit_sha("HEAD", root)
+    if head and (root, head) in _LOGS:
+        return _LOGS[(root, head)]
     out = []
     for rec in git("log", "--format=%H%x1f%s%x1f%b%x1e", cwd=root).split("\x1e"):
         if not rec.strip():
@@ -392,6 +439,8 @@ def review_log(root):
         named = reviewed_claims(subject, body)
         if named:
             out.append((sha.strip(), named))
+    if head:
+        _LOGS[(root, head)] = out
     return out
 
 
@@ -405,25 +454,347 @@ class HistoryIncomplete(HistoryUnavailable):
     obligations — rows a cold agent would "clear" with spurious reviews."""
 
 
+# ---- history memo
+# A file at a commit, the review log, a lineage floor and a review baseline
+# are functions of committed history alone. In one process they are memoized
+# under the commit's sha; a baseline is also kept in lspec/history.json keyed
+# by HEAD and the shallow boundary, so the two or three evaluations behind
+# each checklist answer do not each re-walk the log for every edge. It is
+# transaction state (dl-state): authoritative about nothing, and deleting
+# it costs one recomputation.
+
+_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_FILES = {}        # (root, sha, repo path) -> Spec or None
+_BLOBS = {}        # (root, blob oid, repo path) -> Spec: one parse per blob
+_LOGS = {}         # (root, head) -> review_log
+_FLOORS = {}       # (root, head, repo path) -> lineage floor
+_BASELINES = {}    # (root, head, boundaries) -> {key: entry}; mirrors history.json
+
+
+def forget_history():
+    """Drop every in-process memo (tests and tools that rewrite history);
+    the parse cache is written out first, as at process exit."""
+    flush_specs()
+    _SPECS.clear(); _SPECS_USED.clear()
+    for memo in (_FILES, _BLOBS, _LOGS, _FLOORS, _BASELINES, _SHALLOW, _HEADS, _TREES, _INDEX, _DIFFS,
+                 _CANON, _RELS, _REPO_RELS):
+        memo.clear()
+
+
+_PARSER_TAG = None
+
+
+def parser_tag():
+    """Names the parser: this file's hash and the interpreter's version. A
+    cached parse is reused only under the tag that wrote it."""
+    global _PARSER_TAG
+    if _PARSER_TAG is None:
+        _PARSER_TAG = file_sha256(__file__)[:16] + "-" + f"{sys.version_info[0]}{sys.version_info[1]}"
+    return _PARSER_TAG
+
+
+_SPECS = {}        # git dir -> {"tag": parser tag, "entries": {oid: fields}}
+_SPECS_DIRTY = set()   # git dirs with entries to write
+_SPECS_USED = {}   # git dir -> oids read or written this process
+
+
+def spec_cache_path():
+    return state_path("specs.marshal")
+
+
+def spec_store():
+    """The parse cache of the current checkout, loaded once per process
+    from one file: on Windows each file open costs milliseconds, so one
+    file holds every entry. A file written under another parser tag, or
+    unreadable, starts empty. Only the blobs a collection build reads go
+    in (prefetch_blobs); the history walk's reads are memoized elsewhere
+    and would only swell the file."""
+    path = spec_cache_path()
+    store = _SPECS.get(path)
+    if store is None:
+        store = {"tag": parser_tag(), "entries": {}}
+        try:
+            with open(path, "rb") as fh:
+                data = marshal.load(fh)
+            if isinstance(data, dict) and data.get("tag") == parser_tag() \
+                    and isinstance(data.get("entries"), dict):
+                store = data
+        except (OSError, ValueError, EOFError, TypeError):
+            pass
+        _SPECS[path] = store
+    return store
+
+
+def cached_spec(root, oid, path):
+    """The Spec for blob OID from the parse cache, or None. A blob is
+    content-addressed and the parser is named in the file, so a hit is the
+    parse this lspec would produce."""
+    fields = spec_store()["entries"].get(oid)
+    if not isinstance(fields, dict) or set(fields) != set(Spec.FIELDS):
+        return None
+    _SPECS_USED.setdefault(spec_cache_path(), set()).add(oid)
+    return Spec.from_fields(path, fields)
+
+
+def store_spec(root, oid, spec):
+    """Record SPEC's parse for OID; written out by flush_specs."""
+    spec_store()["entries"][oid] = spec.fields()
+    _SPECS_USED.setdefault(spec_cache_path(), set()).add(oid)
+    _SPECS_DIRTY.add(spec_cache_path())
+
+
+def flush_specs():
+    """Write each parse cache this process added to. Entries no run has
+    used are pruned once they outnumber the used ones, so the file tracks
+    the checkout's current content rather than everything ever parsed.
+    Best effort: the cache is a memo, so a failed write costs a parse next
+    time, never a wrong answer. Runs at exit and before the memos drop."""
+    for path in list(_SPECS_DIRTY):
+        store, used = _SPECS.get(path), _SPECS_USED.get(path, set())
+        if store is None:
+            continue
+        entries = store["entries"]
+        if len(entries) > 2 * len(used) + 64:
+            store["entries"] = {k: v for k, v in entries.items() if k in used}
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            stale = os.path.join(os.path.dirname(path), "specs")   # an earlier per-blob layout
+            if os.path.isdir(stale):
+                shutil.rmtree(stale, ignore_errors=True)
+            fd, tmp = tempfile.mkstemp(prefix=".specs", dir=os.path.dirname(path))
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    marshal.dump(store, fh)
+                os.replace(tmp, path)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+            _SPECS_DIRTY.discard(path)
+        except (OSError, ValueError, RuntimeError):
+            pass
+
+
+atexit.register(flush_specs)
+
+
+def parsed_blob(root, oid, path, keep=False):
+    """Spec parsed from blob OID, once per process: a blob is immutable, so
+    the same content at HEAD and in the index is one parse. KEEP records
+    the parse in the checkout's cache for later invocations — set for the
+    candidate's own content (HEAD, the index), not for the history walk."""
+    key = (root, oid, repo_rel(path))
+    spec = _BLOBS.get(key)
+    if spec is None:
+        spec = cached_spec(root, oid, path)
+        if spec is None:
+            spec = Spec(path, git("cat-file", "blob", oid, cwd=root))
+            if keep:
+                store_spec(root, oid, spec)
+        _BLOBS[key] = spec
+    return spec
+
+
+_HEADS = {}        # root -> (ref-file fingerprint, sha)
+
+
+def head_commit(root):
+    """HEAD's full sha, or None when unborn or unreadable. Resolved by git
+    once per process and reused while the files git writes on every ref
+    update (HEAD, its branch ref, packed-refs) are unchanged, so a memo
+    lookup costs a few stats rather than a subprocess."""
+    try:
+        gitdir = _GITDIRS.get(root)
+        if gitdir is None:
+            gitdir = git("rev-parse", "--absolute-git-dir", cwd=root).strip()
+            _GITDIRS[root] = gitdir
+        with open(os.path.join(gitdir, "HEAD"), encoding="utf-8") as f:
+            head = f.read().strip()
+        watched = [os.path.join(gitdir, "packed-refs")]
+        if head.startswith("ref: "):
+            watched.append(os.path.join(gitdir, head[5:]))
+        fp = (head, tuple((os.stat(w).st_mtime_ns, os.stat(w).st_size) if os.path.exists(w)
+                          else None for w in watched))
+    except (OSError, RuntimeError):
+        return commit_sha("HEAD", root, _resolve=True)
+    cached = _HEADS.get(root)
+    if cached and cached[0] == fp:
+        return cached[1]
+    sha = commit_sha("HEAD", root, _resolve=True)
+    _HEADS[root] = (fp, sha)
+    return sha
+
+
+def commit_sha(commit, root, _resolve=False):
+    """COMMIT resolved to its full sha, or None when it does not name one."""
+    if _SHA_RE.fullmatch(commit):
+        return commit
+    if commit == "HEAD" and not _resolve:
+        return head_commit(root)
+    try:
+        return git("rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}", cwd=root).strip() \
+            or None
+    except (RuntimeError, OSError):
+        return None
+
+
+_TREES = {}        # (root, sha) -> {repo path: (kind, oid)}: one ls-tree per tree
+_INDEX = {}        # root -> (index fingerprint, {repo path: oid}): one ls-files per index
+
+
+def tree_listing(root, commit):
+    """Every entry of COMMIT's tree, from one `git ls-tree -r -t`; trees and
+    submodule commits are kept so a non-file path is told from an absent one."""
+    sha = commit_sha(commit, root)
+    key = (root, sha)
+    if sha and key in _TREES:
+        return _TREES[key]
+    listing = {}
+    for entry in git("ls-tree", "-r", "-t", "-z", "--full-tree", commit, cwd=root).split("\0"):
+        if not entry:
+            continue
+        header, _, name = entry.partition("\t")
+        mode, kind, oid = header.split()
+        listing[name] = (kind, oid)
+    if sha:
+        _TREES[key] = listing
+    return listing
+
+
+def index_listing(root):
+    """Stage-0 entries of the index, from one `git ls-files -s`, re-read when
+    the index file changes (git rewrites it on every add)."""
+    gitdir = _GITDIRS.get(root)
+    if gitdir is None:
+        gitdir = _GITDIRS[root] = git("rev-parse", "--absolute-git-dir", cwd=root).strip()
+    index = os.path.join(gitdir, "index")
+    try:
+        st = os.stat(index)
+        fingerprint = (st.st_mtime_ns, st.st_size, st.st_ino)
+    except OSError:
+        fingerprint = None
+    cached = _INDEX.get(root)
+    if cached and cached[0] == fingerprint and fingerprint is not None:
+        return cached[1]
+    listing = {}
+    for entry in git("ls-files", "-s", "-z", "--full-name", cwd=root).split("\0"):
+        if not entry:
+            continue
+        meta, _, name = entry.partition("\t")
+        mode, oid, stage = meta.split()
+        if stage == "0":
+            listing[name] = oid
+    _INDEX[root] = (fingerprint, listing)
+    return listing
+
+
+def prefetch_blobs(root, wanted):
+    """Parse every (oid, path) in WANTED not yet parsed, reading the blobs
+    through one `git cat-file --batch`. Decoded as git() decodes: the
+    platform text codec with universal newlines, so a spec's text is the
+    same bytes-to-str whichever path read it."""
+    todo = []
+    for oid, path in wanted:
+        key = (root, oid, repo_rel(path))
+        if key in _BLOBS:
+            continue
+        spec = cached_spec(root, oid, path)
+        if spec is not None:
+            _BLOBS[key] = spec
+        else:
+            todo.append((oid, path))
+    if not todo:
+        return
+    r = subprocess.run(["git", "cat-file", "--batch"], cwd=root, check=False,
+                       input="".join(oid + "\n" for oid, _ in todo).encode("ascii"),
+                       capture_output=True)
+    if r.returncode:
+        raise RuntimeError(r.stderr.decode(errors="replace").strip() or "git cat-file --batch failed")
+    out, pos = r.stdout, 0
+    for oid, path in todo:
+        nl = out.index(b"\n", pos)
+        header = out[pos:nl].decode("ascii").split()
+        pos = nl + 1
+        if len(header) < 3:
+            raise RuntimeError(f"cannot read blob {oid}: {' '.join(header)}")
+        size = int(header[2])
+        text = io.TextIOWrapper(io.BytesIO(out[pos:pos + size])).read()
+        pos += size + 1
+        spec = _BLOBS[(root, oid, repo_rel(path))] = Spec(path, text)
+        store_spec(root, oid, spec)
+
+
+_DIFFS = {}        # (root, index fingerprint, head) -> {"names": [...], "hunks": {path: text}}
+
+
+def _candidate_key(root):
+    index_listing(root)                       # refresh the index fingerprint
+    return (root, _INDEX[root][0], head_commit(root))
+
+
+def staged_names(root):
+    """Repo-relative paths the index changes against HEAD, listed once per
+    (index, HEAD) in a process."""
+    key = _candidate_key(root)
+    memo = _DIFFS.setdefault(key, {})
+    if "names" not in memo:
+        memo["names"] = [n for n in git("diff", "--cached", "--name-only", "-z", "HEAD",
+                                        cwd=root).split("\0") if n]
+    return list(memo["names"])
+
+
+def staged_hunks(root, paths):
+    """{repo path: unified diff (-U0) of the index against HEAD} for PATHS,
+    produced by one git call per (index, HEAD) and split per file; a path
+    without changes maps to ""."""
+    key = _candidate_key(root)
+    memo = _DIFFS.setdefault(key, {})
+    if "hunks" not in memo:
+        rels = staged_names(root)
+        out = git("-c", "core.quotepath=false", "diff", "--cached", "-U0", "--no-color",
+                  "HEAD", "--", *rels, cwd=root) if rels else ""
+        headers = {f"diff --git a/{n} b/{n}": n for n in rels}
+        hunks, current = {}, None
+        for line in out.splitlines(keepends=True):
+            if line.startswith("diff --git "):
+                current = headers.get(line.rstrip("\n"))   # a quoted name: unmatched
+                if current is not None:
+                    hunks[current] = ""
+                continue
+            if current is not None:
+                hunks[current] += line
+        for n in rels:                # unmatched headers: read that file alone
+            if n not in hunks:
+                hunks[n] = git("diff", "--cached", "-U0", "--no-color", "HEAD", "--", n, cwd=root)
+        memo["hunks"] = hunks
+    return {p: memo["hunks"].get(p, "") for p in paths}
+
+
 def file_at(commit, path):
     """Spec at COMMIT, None for proven absence; raise for unavailable evidence."""
     root = repo_root()
     if root is None:
         raise HistoryUnavailable("not a git checkout")
+    sha = commit_sha(commit, root)
+    key = (root, sha, repo_rel(path))
+    if sha and key in _FILES:
+        return _FILES[key]
     try:
-        # ls-tree establishes absence separately from a failed object read.
-        entry = git("ls-tree", "-z", commit, "--", repo_rel(path), cwd=root)
-        if not entry:
-            return None
-        header, _, _ = entry.partition("\t")
-        mode, kind, oid = header.split()
-        if kind != "blob":
-            raise HistoryUnavailable(f"{commit}:{repo_rel(path)} is not a file")
-        return Spec(path, git("cat-file", "blob", oid, cwd=root))
+        # The tree listing establishes absence separately from a failed object read.
+        entry = tree_listing(root, commit).get(repo_rel(path))
+        if entry is None:
+            spec = None
+        else:
+            kind, oid = entry
+            if kind != "blob":
+                raise HistoryUnavailable(f"{commit}:{repo_rel(path)} is not a file")
+            spec = parsed_blob(root, oid, path, keep=sha is not None and sha == head_commit(root))
     except HistoryUnavailable:
         raise
     except (RuntimeError, OSError) as e:
         raise HistoryUnavailable(f"cannot read {commit}:{repo_rel(path)}: {e}") from e
+    if sha:
+        _FILES[key] = spec
+    return spec
 
 
 def file_staged(path):
@@ -431,12 +802,11 @@ def file_staged(path):
     root = repo_root()
     if root is None:
         raise HistoryUnavailable("not a git checkout")
-    entry = git("ls-files", "-s", "-z", "--", repo_rel(path), cwd=root)
-    meta = entry.split("\0")[0]
-    if not meta:
-        return None
     try:
-        return Spec(path, git("cat-file", "blob", meta.split()[1], cwd=root))
+        oid = index_listing(root).get(repo_rel(path))
+        if oid is None:
+            return None
+        return parsed_blob(root, oid, path, keep=True)
     except (RuntimeError, OSError) as e:
         raise HistoryUnavailable(f"cannot read staged {repo_rel(path)}: {e}") from e
 
@@ -457,11 +827,9 @@ def exists_at(path, basis):
         raise HistoryUnavailable("not a git checkout")
     rr = repo_rel(path)
     if basis == "staged":
-        return bool(git("ls-files", "-s", "-z", "--", rr, cwd=root).strip())
-    entry = git("ls-tree", "-z", basis, "--", rr, cwd=root)
-    if not entry:
-        return False
-    return entry.partition("\t")[0].split()[1] == "blob"
+        return rr in index_listing(root)
+    entry = tree_listing(root, basis).get(rr)
+    return entry is not None and entry[0] == "blob"
 
 
 def stamp(staged=False):
@@ -518,15 +886,33 @@ def uncommitted(rels):
     return line, paths
 
 
+_SHALLOW = {}      # root -> (shallow file path, fingerprint, boundaries)
+
+
 def shallow_boundaries(root):
-    """The shallow-clone boundary commits (grafted roots), empty when complete."""
-    if git("rev-parse", "--is-shallow-repository", cwd=root).strip() != "true":
-        return set()
-    shallow_path = git("rev-parse", "--git-path", "shallow", cwd=root).strip()
-    if not os.path.isabs(shallow_path):
-        shallow_path = os.path.join(root, shallow_path)
-    with open(shallow_path, encoding="ascii") as fh:
-        return set(fh.read().split())
+    """The shallow-clone boundary commits (grafted roots), empty when complete.
+    Git keeps them in the `shallow` file; its path is asked once per process
+    and the set re-read only when that file's fingerprint changes."""
+    cached = _SHALLOW.get(root)
+    if cached is None:
+        shallow_path = git("rev-parse", "--git-path", "shallow", cwd=root).strip()
+        if not os.path.isabs(shallow_path):
+            shallow_path = os.path.join(root, shallow_path)
+        cached = (shallow_path, object(), set())
+    shallow_path, fingerprint, boundaries = cached
+    try:
+        st = os.stat(shallow_path)
+        now = (st.st_mtime_ns, st.st_size)
+    except FileNotFoundError:
+        now = None
+    if now != fingerprint:
+        if now is None:
+            boundaries = set()
+        else:
+            with open(shallow_path, encoding="ascii") as fh:
+                boundaries = set(fh.read().split())
+        _SHALLOW[root] = (shallow_path, now, boundaries)
+    return set(boundaries)
 
 
 def lineage_floor(root, a_path):
@@ -534,11 +920,19 @@ def lineage_floor(root, a_path):
     deliberate lineage boundary, so a re-instantiation under a reused filename
     inherits neither a prior lineage's introductions nor its reviews. A body
     line can never type a commit. None when the lineage has no seed."""
+    head = commit_sha("HEAD", root)
+    key = (root, head, repo_rel(a_path))
+    if head and key in _FLOORS:
+        return _FLOORS[key]
+    floor = None
     for line in git("log", "--format=%H%x00%s", "--", repo_rel(a_path), cwd=root).splitlines():
         sha, _, subject = line.partition("\x00")
         if subject_type(subject, "seed") is not None:
-            return sha
-    return None
+            floor = sha
+            break
+    if head:
+        _FLOORS[key] = floor
+    return floor
 
 
 def recorded_review(root, name, floor, boundaries):
@@ -624,9 +1018,46 @@ def review_baseline(a_path, src, href):
     root = repo_root()
     if root is None:
         raise HistoryUnavailable("not a git checkout")
-    name = f"{repo_rel(a_path)}#{src}"
     try:
         boundaries = shallow_boundaries(root)
+    except (RuntimeError, OSError) as e:
+        raise HistoryUnavailable(str(e)) from e
+    head = commit_sha("HEAD", root)
+    store = baseline_store(root, head, boundaries) if head else None
+    key = f"{repo_rel(a_path)}\0{src}\0{href}"
+    if store is not None and key in store:
+        return tuple(store[key])
+    result = _review_baseline(root, a_path, src, href, boundaries)
+    # Only an established baseline is kept: an unavailable one may be
+    # transient, and stale failure under the same HEAD would be sticky.
+    if store is not None:
+        store[key] = list(result)
+        save_baselines(root, head, boundaries)
+    return result
+
+
+def baseline_store(root, head, boundaries):
+    """The baseline memo for ROOT at HEAD with these shallow BOUNDARIES,
+    loaded from lspec/history.json when that file was written for the same
+    head and boundary; any other file is stale and starts empty."""
+    key = (root, head, tuple(sorted(boundaries)))
+    if key not in _BASELINES:
+        data = read_state("history.json") or {}
+        fresh = data.get("head") == head and data.get("shallow") == list(key[2]) \
+            and isinstance(data.get("baselines"), dict)
+        _BASELINES[key] = dict(data["baselines"]) if fresh else {}
+    return _BASELINES[key]
+
+
+def save_baselines(root, head, boundaries):
+    key = (root, head, tuple(sorted(boundaries)))
+    write_state("history.json", {"head": head, "shallow": list(key[2]),
+                                 "baselines": _BASELINES[key]})
+
+
+def _review_baseline(root, a_path, src, href, boundaries):
+    name = f"{repo_rel(a_path)}#{src}"
+    try:
         floor = lineage_floor(root, a_path)
         reviewed = recorded_review(root, name, floor, boundaries)
         if reviewed:
@@ -646,11 +1077,9 @@ def head_status():
     """HEAD state: "ok", "unborn" (HEAD is a symref to a branch with no
     commits — the first-commit state), or "broken" (HEAD unresolvable any
     other way: unavailable or damaged evidence, never assumed unborn)."""
-    try:
-        git("rev-parse", "--verify", "--quiet", "HEAD")
+    root = repo_root()
+    if root is not None and head_commit(root):
         return "ok"
-    except (RuntimeError, OSError):
-        pass
     try:
         # Read the symref with its own return code: a failed read is broken
         # evidence, not an unborn branch. Only a resolvable symref naming a
@@ -670,7 +1099,7 @@ def head_status():
 
 
 def head_sha():
-    return git("rev-parse", "HEAD").strip() if head_status() == "ok" else None
+    return head_commit(repo_root()) if head_status() == "ok" else None
 
 
 # ============================================================ collection
@@ -699,7 +1128,28 @@ class Collection:
             return os.path.exists(p)
         return exists_at(p, self.basis)
 
+    def _prefetch(self):
+        """Read every HTML blob of this basis not yet parsed in one git call."""
+        if self.basis == "worktree":
+            return
+        root = repo_root()
+        if root is None:
+            return
+        try:
+            if self.basis == "staged":
+                listing = {n: oid for n, oid in index_listing(root).items()}
+            else:
+                listing = {n: oid for n, (kind, oid) in tree_listing(root, self.basis).items()
+                           if kind == "blob"}
+            under = repo_rel(os.path.dirname(self.main))
+            prefix = "" if under in ("", ".") else under.rstrip("/") + "/"
+            prefetch_blobs(root, [(oid, canon(os.path.join(root, n))) for n, oid in listing.items()
+                                  if n.endswith(".html") and n.startswith(prefix)])
+        except (RuntimeError, OSError):
+            pass                 # per-file reads report their own failures
+
     def _build(self):
+        self._prefetch()
         queue = [self.main]
         self.parents[self.main] = (None, "main")
         while queue:
@@ -793,28 +1243,21 @@ def html_files(root, basis="worktree"):
     Worktree: tracked plus untracked files that .gitignore does not exclude
     (nested repos are skipped by git itself); outside git, a plain walk
     skipping dot-directories. Staged/commit: the index / that tree."""
-    if basis == "staged":
-        top = repo_root()
-        if top is None:
-            return []
-        r = subprocess.run(["git", "ls-files", "--cached", "--full-name", "-z", "--",
-                            repo_rel(root)], capture_output=True, text=True,
-                           cwd=top, check=False)
-        if r.returncode == 0:
-            return sorted(canon(os.path.join(top, y)) for y in r.stdout.split("\0")
-                          if y and y.endswith(".html"))
-        return []
     if basis != "worktree":
         top = repo_root()
         if top is None:
             return []
-        r = subprocess.run(["git", "ls-tree", "-r", "--full-name", "-z", "--name-only",
-                            basis, "--", repo_rel(root)],
-                           capture_output=True, text=True, cwd=top, check=False)
-        if r.returncode == 0:
-            return sorted(canon(os.path.join(top, y)) for y in r.stdout.split("\0")
-                          if y and y.endswith(".html"))
-        return []
+        under = repo_rel(root)
+        prefix = "" if under in ("", ".") else under.rstrip("/") + "/"
+        try:
+            if basis == "staged":
+                names = index_listing(top)
+            else:
+                names = [n for n, (kind, _) in tree_listing(top, basis).items() if kind == "blob"]
+        except (RuntimeError, OSError):
+            return []
+        return sorted(canon(os.path.join(top, y)) for y in names
+                      if y.endswith(".html") and y.startswith(prefix))
     r = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard",
                         "--full-name", "-z", "--", root], capture_output=True, text=True, check=False)
     if r.returncode == 0:
@@ -1319,7 +1762,7 @@ def head_edges(col, root):
     deleted files are read from their HEAD trees, so an obligation a staged
     deletion would remove is still visible to the gate."""
     files = set(col.specs)
-    for n in git("diff", "--cached", "--name-only", "HEAD", cwd=root).split():
+    for n in staged_names(root):
         if n.endswith(".html"):
             files.add(canon(os.path.join(root, n)))
     edges = []
@@ -1683,7 +2126,7 @@ def gather(col, subject, request):
         except HistoryUnavailable as e:
             ctx.baseline_error = str(e)
         # Files that left the collection keep their HEAD claims in view.
-        for n in git("diff", "--cached", "--name-only", "HEAD", cwd=root).splitlines():
+        for n in staged_names(root):
             p = canon(os.path.join(root, n))
             if n.endswith(".html") and p not in ctx.head_specs and p in col.specs:
                 try:
@@ -2075,7 +2518,7 @@ def staged_paths(ctx):
     """Repo-relative paths the candidate changes against HEAD ([] when unborn)."""
     if ctx.head_state != "ok":
         return []
-    return git("diff", "--cached", "--name-only", "HEAD", cwd=ctx.root).splitlines()
+    return staged_names(ctx.root)
 
 
 def read_items(ctx):
@@ -2125,8 +2568,10 @@ def read_probe(spec, start, name, attempt):
     ids = [i for i, _ in sorted(spec.elems.items(), key=lambda kv: kv[1][0])]
     if len(ids) < 2:
         return None
-    h = hmac.new(secret(), f"read\0{start}\0{name}\0{attempt}".encode(), hashlib.sha256).hexdigest()
-    i = int(h, 16) % (len(ids) - 1)
+    h = hmac.new(secret(), f"read\0{start}\0{name}".encode(), hashlib.sha256).hexdigest()
+    # Each wrong answer steps to the next probe, so a moved probe is always
+    # a different question; the step wraps round the file.
+    i = (int(h, 16) + attempt) % (len(ids) - 1)
     return ids[i], ids[i + 1]
 
 
@@ -2507,11 +2952,11 @@ def unanchored_links(ctx):
     out = []
     if ctx.head_state != "ok":
         return out
-    for p, s in sorted(ctx.staged.specs.items()):
-        if p not in ctx.head_specs:
-            continue
-        diff = git("diff", "--cached", "-U0", "--no-color", "HEAD", "--", repo_rel(p),
-                   cwd=ctx.root)
+    shared = [p for p in sorted(ctx.staged.specs) if p in ctx.head_specs]
+    hunks = staged_hunks(ctx.root, [repo_rel(p) for p in shared])
+    for p in shared:
+        s = ctx.staged.specs[p]
+        diff = hunks[repo_rel(p)]
         hs = ctx.head_specs[p]
         old_line = new_line = 0
         for text in diff.splitlines():
@@ -2545,8 +2990,16 @@ def unanchored_links(ctx):
 
 # ---- state in Git metadata
 
+_GITDIRS = {}   # cwd -> absolute git dir, memoized like repo_root
+
+
 def state_path(name):
-    return os.path.join(git("rev-parse", "--absolute-git-dir").strip(), "lspec", name)
+    cwd = os.getcwd()
+    gitdir = _GITDIRS.get(cwd)
+    if gitdir is None:
+        gitdir = git("rev-parse", "--absolute-git-dir").strip()
+        _GITDIRS[cwd] = gitdir
+    return os.path.join(gitdir, "lspec", name)
 
 
 def read_state(name):
@@ -2824,14 +3277,21 @@ def tick_reason(tick):
     return " ".join((tick_given(tick).get("reason") or "").split()).casefold()
 
 
-def evaluate(col, subject=None, today=None):
+def evaluate(col, subject=None, today=None, ctx=None):
     """Compute the checklist and apply recorded ticks. -> (ctx, items, state).
-    Each item gains 'status' (open/answered), 'answer' and 'trailer'."""
+    Each item gains 'status' (open/answered), 'answer' and 'trailer'.
+    CTX, a context this call already gathered for the same candidate and
+    subject, is reused: the candidate is read once, however many times the
+    checklist is rebuilt (a tick rebuilds it after recording its answer)."""
     state = read_state("reconcile.json") or {}
     request = read_state("request.json")
     if subject is not None:
         state["subject"] = subject
-    ctx = gather(col, state.get("subject"), request)
+    if ctx is None or ctx.subject != (state.get("subject") or "") or ctx.request != request:
+        ctx = gather(col, state.get("subject"), request)
+        ctx.gathered_notes = list(ctx.notes)
+    else:
+        ctx.notes = list(ctx.gathered_notes)    # item builders append; start clean
     ctx.body = state.get("body") or ""
     ctx.probes = state.get("probes") or {}
     today = today or datetime.now().date()
@@ -3321,7 +3781,7 @@ def cmd_reconcile(args):
                 "given": {k: v for k, v in given.items() if v}, "at": now_iso()}
             write_state("reconcile.json", state)
             print(f"answered [{it['kind']}] {it['title']}: {' '.join(answer)}")
-            ctx, items, state = evaluate(col)
+            ctx, items, state = evaluate(col, ctx=ctx)
     receipt = issue_or_clear(col, ctx, items, state)
     print_checklist(col, ctx, items, receipt)
     return 0 if receipt else 1
@@ -4015,7 +4475,9 @@ finish on a clean tree. Every verb takes --main MAIN before or after the verb;
 with a request open, MAIN defaults to the request's. Exit status: 0 pass, 1 a
 failed check or open checklist, 2 unreadable input, missing evidence or a
 refused operation. State lives in the per-worktree git directory under lspec/
-(request.json, reconcile.json, receipt.json, a random secret). It is a
+(request.json, reconcile.json, receipt.json, a random secret, and history.json,
+a memo of review baselines keyed by HEAD, and specs.marshal, parsed files keyed
+by blob; both are safe to delete). It is a
 cooperative local gate, not a signature: a shell can forge a token or bypass
 hooks, which is deliberate circumvention. Green means the checks ran and the
 questions were answered, not that the answers are right.""",

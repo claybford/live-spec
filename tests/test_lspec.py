@@ -14,6 +14,7 @@ import contextlib
 import html
 import io
 import json
+import marshal
 import os
 import re
 import shlex
@@ -838,6 +839,227 @@ class N(unittest.TestCase):
         first, second = log[0][:7], log[1][:7]
         self.assertIn(f"baseline {first} (introduced)", out)
         self.assertIn(f"baseline {second} (introduced)", out)
+
+    @contextlib.contextmanager
+    def in_repo(self, d):
+        before = os.getcwd()
+        try:
+            os.chdir(d)
+            yield
+        finally:
+            os.chdir(before)
+
+    def _git_calls(self, d, fn):
+        """Git subcommands spawned while FN runs inside D."""
+        calls = []
+        real = lspec.subprocess.run
+        def spy(a, *x, **k):
+            if a[:1] == ["git"]:
+                calls.append(a[1])
+            return real(a, *x, **k)
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            with mock.patch.object(lspec.subprocess, "run", side_effect=spy):
+                result = fn()
+        finally:
+            os.chdir(cwd)
+        return calls, result
+
+    def test_baseline_is_walked_once_per_head(self):
+        """An edge born after the seed makes review_baseline walk the log
+        with a file read per commit. The walk runs once per HEAD: a second
+        call in the process, and a fresh process reading history.json, both
+        return the same baseline without `git log`, and the memo cannot
+        reuse itself when the walk raised."""
+        d = self._two_claims()
+        lspec.forget_history()
+        main = os.path.join(d, "main.html")
+        args = (main, "claim2", "motor.html#power")
+        first, (sha, how) = self._git_calls(d, lambda: lspec.review_baseline(*args))
+        self.assertEqual(how, "introduced")
+        self.assertIn("log", first)
+        again, same = self._git_calls(d, lambda: lspec.review_baseline(*args))
+        self.assertEqual(same, (sha, how))
+        self.assertNotIn("log", again)
+        lspec.forget_history()                   # a new process: only the file survives
+        cold, same = self._git_calls(d, lambda: lspec.review_baseline(*args))
+        self.assertEqual(same, (sha, how))
+        self.assertNotIn("log", cold)
+        self.assertNotIn("cat-file", cold)
+        with self.in_repo(d):
+            stored = lspec.read_state("history.json")
+        self.assertEqual(stored["head"], sh("git", "rev-parse", "HEAD", cwd=d).strip())
+        self.assertEqual(len(stored["baselines"]), 1)
+
+    def test_baseline_memo_follows_head(self):
+        """A review: commit moves the baseline; the memo keyed by the old HEAD
+        is not consulted, in process or from history.json."""
+        d = self._two_claims()
+        lspec.forget_history()
+        args = (os.path.join(d, "main.html"), "claim2", "motor.html#power")
+        with self.in_repo(d):
+            sha, how = lspec.review_baseline(*args)
+            self.assertEqual(how, "introduced")
+        commit(d, "review: main.html#claim2")
+        with self.in_repo(d):
+            sha2, how2 = lspec.review_baseline(*args)
+        self.assertEqual(how2, "review")
+        self.assertEqual(sha2, sh("git", "rev-parse", "HEAD", cwd=d).strip())
+        lspec.forget_history()
+        with self.in_repo(d):
+            self.assertEqual(lspec.review_baseline(*args), (sha2, how2))
+
+    def test_tick_rebuilds_checklist_without_regathering(self):
+        """A tick's second evaluation reuses the gathered context: the
+        candidate is read once per invocation, and the rebuilt checklist —
+        items, evidence, notes — is the one a fresh gather would produce."""
+        d = self._two_claims()
+        edit(d, "motor.html", "105 kW", "100 kW")
+        sh("git", "add", "-A", cwd=d)
+        ensure_request(d)
+        rc, out = cli(d, "reconcile", "--subject", "docs: derate again")
+        tok = out.split("--tick ")[1].split()[0] if "--tick " in out else None
+        rc, out = cli(d, "reconcile", "--next")
+        tok = out.split("token: ")[1].split()[0]
+        kind = out.split("[")[1].split("]")[0]
+        self.assertEqual(kind, "read")
+        probe = out.split("directly follows #")[1].split()[0].rstrip(";,.")
+        with self.in_repo(d):
+            col = lspec.Collection("main.html", basis="staged")
+            spec = col.specs[lspec.canon("main.html")]
+            order = [i for i, _ in sorted(spec.elems.items(), key=lambda kv: kv[1][0])]
+            follows = order[order.index(probe) + 1]
+            gathers = []
+            real = lspec.gather
+            with mock.patch.object(lspec, "gather", side_effect=lambda *a: gathers.append(1) or real(*a)):
+                rc, out = cli(d, "reconcile", "--tick", tok, "--answer", "read-whole", "--ref", follows)
+            self.assertIn("answered [read]", out)
+            self.assertEqual(len(gathers), 1)
+            lspec.forget_history()
+            fresh_ctx, fresh, _ = lspec.evaluate(col)
+            again_ctx, again, _ = lspec.evaluate(col, ctx=fresh_ctx)
+            strip = lambda items: [{k: v for k, v in it.items()} for it in items]
+            self.assertEqual(strip(again), strip(fresh))
+            self.assertEqual(again_ctx.notes, fresh_ctx.notes)
+            self.assertIs(again_ctx, fresh_ctx)
+
+    def test_batch_blob_read_matches_single_read(self):
+        """A collection reads its blobs through one cat-file --batch; the
+        text must equal what a text-mode `git cat-file blob` yields (same
+        codec, same newline translation), or evidence — and tokens recorded
+        against it — would differ by read path. CRLF content exercises it."""
+        d = repo()
+        Path(d, "crlf.html").write_bytes(
+            b"<html><body><main>\r\n<h1 id=\"top\">CRLF</h1>\r\n<p id=\"c\">caf\xc3\xa9 \xe2\x80\x94 one</p>\r\n</main></body></html>\r\n")
+        commit(d, "docs: crlf fixture")
+        with self.in_repo(d):
+            root = lspec.repo_root()
+            oid = lspec.tree_listing(root, "HEAD")["crlf.html"][1]
+            lspec.forget_history()
+            lspec.prefetch_blobs(root, [(oid, os.path.join(d, "crlf.html"))])
+            batched = lspec._BLOBS[(root, oid, "crlf.html")].raw
+            single = lspec.git("cat-file", "blob", oid, cwd=root)
+            self.assertEqual(batched, single)
+            lspec.forget_history()
+            self.assertEqual(lspec.file_at("HEAD", os.path.join(d, "crlf.html")).raw, single)
+
+    def test_collection_reads_with_a_fixed_number_of_git_calls(self):
+        """Building a staged collection costs a bounded number of git
+        processes however many files it has: the listings and the blobs
+        come in one call each, not one per file."""
+        d = self._two_claims()
+        for i in range(12):
+            Path(d, f"s{i}.html").write_text(
+                f'<html><body><main><h1 id="top">S{i}</h1><p id="c">claim {i}</p></main></body></html>')
+            edit(d, "main.html", "</table>",
+                 f'<tr id="dl-split-s{i}"><td><code>dl-split-s{i}</code> <a href="s{i}.html">s{i}.html</a> holds {i}</td><td>keep</td><td>w.</td></tr>\n</table>')
+        sh("git", "add", "-A", cwd=d)
+        lspec.forget_history()
+        calls, col = self._git_calls(d, lambda: lspec.Collection("main.html", basis="staged"))
+        self.assertEqual(len(col.specs), 14)
+        self.assertLessEqual(len(calls), 6, calls)
+
+    def test_cached_parse_is_the_fresh_parse(self):
+        """A spec read back from lspec/specs/ carries every field a fresh
+        parse has, with the same values; a second process reads the blob
+        from the cache and spawns no git for it; another parser tag never
+        sees the entry; a corrupt entry is a miss, not an error."""
+        d = self._two_claims()
+        with self.in_repo(d):
+            root = lspec.repo_root()
+            oid = lspec.tree_listing(root, "HEAD")["main.html"][1]
+            main = os.path.join(d, "main.html")
+            lspec.forget_history()
+            fresh = lspec.Collection("main.html", basis="HEAD").specs[lspec.canon(main)]
+            lspec.forget_history()
+            calls, cached = self._git_calls(d, lambda: lspec.file_at("HEAD", main))
+            self.assertNotIn("cat-file", calls)
+            self.assertEqual(cached.fields(), fresh.fields())
+            self.assertEqual(cached.text("claim"), fresh.text("claim"))
+            self.assertEqual(cached.rows(), fresh.rows())
+            self.assertEqual(cached.path, fresh.path)
+            lspec.forget_history()
+            with mock.patch.object(lspec, "parser_tag", return_value="other-0"):
+                calls, again = self._git_calls(d, lambda: lspec.file_at("HEAD", main))
+            self.assertIn("cat-file", calls)
+            self.assertEqual(again.fields(), fresh.fields())
+            lspec.forget_history()                 # flushes, then drops the memo
+            entry = lspec.spec_cache_path()
+            self.assertTrue(os.path.exists(entry))
+            with open(entry, "rb") as fh:
+                self.assertIn(oid, marshal.load(fh)["entries"])
+            with open(entry, "wb") as fh:
+                fh.write(b"not marshal")
+            lspec.forget_history()
+            calls, again = self._git_calls(d, lambda: lspec.file_at("HEAD", main))
+            self.assertIn("cat-file", calls)           # a corrupt cache is a miss
+            self.assertEqual(again.fields(), fresh.fields())
+
+    def test_baseline_memo_is_keyed_to_the_tool(self):
+        """A baseline derives from history and from this file's reading of
+        it, so history.json written by another lspec is stale at the same
+        HEAD: it is not consulted, and the walk runs again."""
+        d = self._two_claims()
+        lspec.forget_history()
+        args = (os.path.join(d, "main.html"), "claim2", "motor.html#power")
+        with self.in_repo(d):
+            sha, how = lspec.review_baseline(*args)
+            lspec.forget_history()                        # writes history.json
+            stored = lspec.read_state("history.json")
+            self.assertEqual(stored["tool"], lspec.parser_tag())
+            with mock.patch.object(lspec, "parser_tag", return_value="other-0"):
+                calls, same = self._git_calls(d, lambda: lspec.review_baseline(*args))
+        self.assertIn("log", calls)                       # walked again, not served
+        self.assertEqual(same, (sha, how))
+
+    def test_baselines_are_written_once_per_process(self):
+        """Deriving N baselines writes history.json once (at flush), not N
+        times: the file holds every one, and nothing wrote it in between."""
+        d = self._two_claims()
+        lspec.forget_history()
+        main = os.path.join(d, "main.html")
+        with self.in_repo(d):
+            writes = []
+            real = lspec.write_json
+            with mock.patch.object(lspec, "write_json", side_effect=lambda *a: writes.append(a[0]) or real(*a)):
+                lspec.review_baseline(main, "claim", "motor.html#power")
+                lspec.review_baseline(main, "claim2", "motor.html#power")
+                self.assertEqual(writes, [])
+                lspec.flush_baselines()
+            self.assertEqual([os.path.basename(w) for w in writes], ["history.json"])
+            self.assertEqual(len(lspec.read_state("history.json")["baselines"]), 2)
+
+    def test_unavailable_baseline_is_not_memoized(self):
+        d = self._two_claims()
+        lspec.forget_history()
+        args = (os.path.join(d, "main.html"), "claim2", "motor.html#power")
+        with self.in_repo(d):
+            with mock.patch.object(lspec, "edge_introduction",
+                                   side_effect=lspec.HistoryUnavailable("object unavailable")):
+                with self.assertRaises(lspec.HistoryUnavailable):
+                    lspec.review_baseline(*args)
+            self.assertIsNone(lspec.read_state("history.json"))
+            self.assertEqual(lspec.review_baseline(*args)[1], "introduced")
 
     def test_review_clears_only_the_reviewed_claim(self):
         d = self._two_claims()
@@ -2907,6 +3129,24 @@ class ReadProbe(unittest.TestCase):
         ensure_request(d)
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
         return d
+
+    def test_a_moved_probe_never_repeats_its_predecessor(self):
+        """watch-probecollide: a wrong answer moves the probe, and the moved
+        probe is a different question whatever the secret. Checked as a
+        property, not a run count: for many secrets, over every attempt,
+        consecutive probes differ, and the wrong answer that moved it is
+        never the new answer."""
+        d = self.fixture()
+        spec = lspec.Spec(os.path.join(d, "main.html"))
+        n = len([i for i in spec.elems]) - 1
+        self.assertGreater(n, 1)
+        for trial in range(200):
+            with mock.patch.object(lspec, "secret", return_value=os.urandom(32)):
+                probes = [lspec.read_probe(spec, "start", "main.html", a) for a in range(n + 2)]
+            for before, after in zip(probes, probes[1:]):
+                self.assertNotEqual(before, after)          # moved: a different question
+                self.assertNotEqual(before[1], after[1])    # the wrong id is not the next answer
+            self.assertEqual(len(set(probes[:n])), n)       # every probe before it wraps
 
     def probe(self, d):
         out = cli(d, 'reconcile', '--subject', 'docs: derate', '--next')[1]

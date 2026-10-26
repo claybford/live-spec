@@ -48,8 +48,8 @@ Implementation details beyond the seed's operating rules:
 * State lives in Git metadata (per worktree) under lspec/: request.json
   (MAIN and the request's start commit), reconcile.json (subject, body and
   answers keyed by item and evidence), receipt.json, a random secret, and
-  history.json (review baselines memoized under the HEAD they were derived
-  from; stale under any other HEAD, deletable at any time) and specs.marshal
+  history.json (review baselines memoized under the HEAD and tool they were
+  derived from; stale under any other, deletable at any time) and specs.marshal
   (parsed files by blob, under the parser that wrote them; deletable).
   A receipt names the request that earned it (its opened_at); once a
   different request is open the hooks refuse it, so a session never commits
@@ -475,7 +475,8 @@ def forget_history():
     """Drop every in-process memo (tests and tools that rewrite history);
     the parse cache is written out first, as at process exit."""
     flush_specs()
-    _SPECS.clear(); _SPECS_USED.clear()
+    flush_baselines()
+    _SPECS.clear(); _SPECS_USED.clear(); _BASELINES_DIRTY.clear(); _BASELINE_PATHS.clear()
     for memo in (_FILES, _BLOBS, _LOGS, _FLOORS, _BASELINES, _SHALLOW, _HEADS, _TREES, _INDEX, _DIFFS,
                  _CANON, _RELS, _REPO_RELS):
         memo.clear()
@@ -1036,23 +1037,51 @@ def review_baseline(a_path, src, href):
     return result
 
 
+_BASELINES_DIRTY = set()   # keys with baselines to write
+_BASELINE_PATHS = {}       # key -> the history.json it was loaded from
+
+
 def baseline_store(root, head, boundaries):
     """The baseline memo for ROOT at HEAD with these shallow BOUNDARIES,
     loaded from lspec/history.json when that file was written for the same
-    head and boundary; any other file is stale and starts empty."""
+    head, boundary and tool: a baseline is a function of history and of
+    this file's derivation of it (how a review is read, a lineage floored,
+    an edge's birth found), so the parser tag names the writer, as for
+    specs.marshal. Any other file is stale and starts empty."""
     key = (root, head, tuple(sorted(boundaries)))
     if key not in _BASELINES:
         data = read_state("history.json") or {}
         fresh = data.get("head") == head and data.get("shallow") == list(key[2]) \
-            and isinstance(data.get("baselines"), dict)
+            and data.get("tool") == parser_tag() and isinstance(data.get("baselines"), dict)
         _BASELINES[key] = dict(data["baselines"]) if fresh else {}
+        _BASELINE_PATHS[key] = state_path("history.json")
     return _BASELINES[key]
 
 
 def save_baselines(root, head, boundaries):
-    key = (root, head, tuple(sorted(boundaries)))
-    write_state("history.json", {"head": head, "shallow": list(key[2]),
-                                 "baselines": _BASELINES[key]})
+    """Mark the memo for writing; flush_baselines writes it once."""
+    _BASELINES_DIRTY.add((root, head, tuple(sorted(boundaries))))
+
+
+def flush_baselines():
+    """Write each baseline memo this process added to, once, rather than
+    once per edge derived. Best effort, like the parse cache: a failed
+    write costs a walk next time. Runs at exit and before the memos drop."""
+    for key in list(_BASELINES_DIRTY):
+        store = _BASELINES.get(key)
+        if store is None:
+            _BASELINES_DIRTY.discard(key)
+            continue
+        root, head, shallow = key
+        try:
+            write_json(_BASELINE_PATHS[key], {"head": head, "shallow": list(shallow),
+                                              "tool": parser_tag(), "baselines": store})
+            _BASELINES_DIRTY.discard(key)
+        except (OSError, RuntimeError, KeyError):
+            pass
+
+
+atexit.register(flush_baselines)
 
 
 def _review_baseline(root, a_path, src, href, boundaries):
@@ -3012,9 +3041,12 @@ def read_state(name):
 
 
 def write_state(name, data):
-    path = state_path(name)
+    write_json(state_path(name), data)
+
+
+def write_json(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix="." + name, dir=os.path.dirname(path))
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path), dir=os.path.dirname(path))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, sort_keys=True, indent=2)

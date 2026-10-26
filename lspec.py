@@ -3721,7 +3721,7 @@ def print_checklist(col, ctx, items, receipt):
         for it in open_j:
             kinds[it["kind"]] = kinds.get(it["kind"], 0) + 1
         print("  judgment items open: " + ", ".join(f"{k} {n}" for k, n in kinds.items())
-              + f" — one at a time: {command(col, 'reconcile', '--next')}")
+              + f" — one at a time, never scripted: {command(col, 'reconcile', '--next')}")
     for it in judged:
         if it.get("stale"):
             print(f"  REOPENED [{it['kind']}] {it['title']}: {it['stale']}")
@@ -3783,6 +3783,10 @@ def cmd_reconcile(args):
             print("  answer with one of:")
             for form in legal_forms(it["kind"], bool(it.get("probe"))):
                 print("    " + command(col, "reconcile", "--tick", tok) + " " + form)
+            print("  Answer this item from the evidence above. Never script the "
+                  "--next/--tick loop, answer items in bulk, or tick an item you have "
+                  "not read: the gate records that an answer was given, not that it was "
+                  "right.")
             return 0
     if args.tick:
         tok = args.tick

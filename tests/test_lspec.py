@@ -4082,6 +4082,16 @@ class Checklist(unittest.TestCase):
         rc, out = cli(d, 'reconcile', '--tick', 'deadbeef', '--answer', 'read-whole')
         self.assertEqual(rc, 2); self.assertIn('no current item has token', out)
 
+    def test_tick_stage_forbids_scripting(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
+        cli(d, 'reconcile', '--subject', 'docs: derate')
+        out = cli(d, 'reconcile')[1]
+        self.assertIn('never scripted', out)
+        out = cli(d, 'reconcile', '--next')[1]
+        self.assertIn('Never script the --next/--tick loop', out)
+        self.assertIn('not that it was right', out)
+
     def test_ticks_follow_their_evidence(self):
         d = self.fixture()
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)

@@ -3785,8 +3785,7 @@ def cmd_reconcile(args):
                 print("    " + command(col, "reconcile", "--tick", tok) + " " + form)
             print("  Answer this item from the evidence above. Never script the "
                   "--next/--tick loop, answer items in bulk, or tick an item you have "
-                  "not read: that is lying about having done the check. The gate cannot "
-                  "tell, so the record would be false — not a passed gate.")
+                  "not read: that is lying about having done the check.")
             return 0
     if args.tick:
         tok = args.tick

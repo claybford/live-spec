@@ -4091,7 +4091,6 @@ class Checklist(unittest.TestCase):
         out = cli(d, 'reconcile', '--next')[1]
         self.assertIn('Never script the --next/--tick loop', out)
         self.assertIn('lying about having done the check', out)
-        self.assertIn('not a passed gate', out)
 
     def test_ticks_follow_their_evidence(self):
         d = self.fixture()

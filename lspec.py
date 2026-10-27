@@ -1749,7 +1749,8 @@ def print_shared_literals(col):
     pairs = shared_literals(col)
     if not pairs:
         return
-    print(f"ADVISORY — edgeless claims sharing a literal ({len(pairs)}); a shared value may be "
+    print()
+    print(f"{status('ADVISORY')} — edgeless claims sharing a literal ({len(pairs)}); a shared value may be "
           "an unencoded dependency, or a copy:")
     for lit, claims in pairs:
         print(f"  {lit!r}: " + ", ".join(addr(*c) for c in claims))
@@ -1762,27 +1763,27 @@ def print_owed(owed, prefix="REVIEW", col=None):
     owed = [r for r in owed if not r.get("incomplete")]
     if not owed:
         if not line:
-            print(f"{prefix} OWED: none")
+            print(f"{title(prefix)} {status('OWED')}: {paint('none', 'green')}")
         return
-    print(f"{prefix} OWED ({len(owed)})")
+    print(f"{title(prefix)} {status('OWED')} ({len(owed)})")
     if any(r["kind"] == "unknown" for r in owed):
         hint = command(col, "review", "CLAIM") if col else "lspec review CLAIM"
-        print(f"  CLEARANCE UNKNOWN: the available history is ambiguous about these edges; "
-              f"review each against committed state and record it with {hint}.")
+        print(f"  CLEARANCE {status('UNKNOWN')}: the available history is ambiguous about these edges; "
+              f"review each against committed state and record it with {cmd(hint)}.")
     for r in owed:
         d, t = r["dependent"], r["target"]
-        line = f"  {addr(*d)}  depends-on {addr(*t)}  [{r['kind']}]"
+        line = f"  {addr(*d)}  depends-on {addr(*t)}  {paint('[' + r['kind'] + ']', 'yellow')}"
         if r.get("dirty"):
             line += "  [target has uncommitted changes; nothing clears until committed]"
         if col:
             line += load_hint(col, d[0], t[0])
         if r["kind"] == "content":
             b, h = r["note"]
-            print(line); print(f"      {shorten(b)}\n    → {shorten(h)}")
+            print(line); print(f"    {shorten(b)}\n    → {shorten(h)}")
         else:
             print(line + (f"  {r['note']}" if r.get("note") else ""))
         if r.get("baseline"):
-            print(f"      baseline {r['baseline'][:7]} ({r['how']})")
+            print(paint(f"    baseline {r['baseline'][:7]} ({r['how']})", "grey"))
 
 
 def head_edges(col, root):
@@ -1938,6 +1939,64 @@ def retired_dependencies(col):
 
 # =================================================================== cli
 # Shared surface of the verbs: loading MAIN, runnable hints, reports.
+
+# ---- presentation
+# Color is a layer over the words, never the words: every status is a word
+# (PASS, FAIL, OPEN) that survives a pipe, a log, or a terminal that renders
+# the codes away before an agent reads the text. Codes are emitted only when
+# the stream is a terminal (or --color=always); an agent harness that captures
+# output through a pipe never sees one, whatever TERM or FORCE_COLOR it sets.
+# SGR 2 (dim) is absent on purpose: Windows' console does not list it.
+
+_COLOR = False            # stdout's decision for this run
+_COLOR_MODE = "auto"      # the --color flag, so another stream can decide for itself
+_SGR = {"bold": "1", "red": "31", "green": "32", "yellow": "33", "magenta": "35",
+        "cyan": "36", "grey": "90"}
+_TONE = {"PASS": "green", "RECEIPT": "green", "HANDOFF": "green",
+         "FAIL": "red", "UNKNOWN": "red",
+         "OPEN": "yellow", "REOPENED": "yellow", "OWED": "yellow", "UNCOMMITTED": "yellow",
+         "WATCH": "magenta", "SEALED": "magenta", "ADVISORY": "grey", "note": "grey"}
+
+
+def color_enabled(mode, stream):
+    """--color never/always decide outright (a flag outranks the environment,
+    per no-color.org); then NO_COLOR when set non-empty, TERM=dumb, and a
+    stream that is not a terminal each veto. TERM alone never enables."""
+    if mode == "never":
+        return False
+    if mode == "always":
+        return True
+    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
+        return False
+    try:
+        return os.isatty(stream.fileno())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def paint(text, *styles, stream=None):
+    """STREAM names a stream other than stdout (stderr); it decides for itself."""
+    on = _COLOR if stream is None else color_enabled(_COLOR_MODE, stream)
+    if not on or not styles:
+        return str(text)
+    return "".join(f"\x1b[{_SGR[s]}m" for s in styles) + str(text) + "\x1b[0m"
+
+
+def title(text):
+    """A section title: bold, the words unchanged."""
+    return paint(text, "bold")
+
+
+def status(word):
+    """A status word in its tone; an unknown word is left plain."""
+    tone = _TONE.get(word)
+    return paint(word, tone) if tone else str(word)
+
+
+def cmd(text):
+    """A runnable hint: cyan, never wrapped, never prefixed."""
+    return paint(text, "cyan")
+
 
 def deliver(path, raw):
     """Print a spec whole between header and end lines (show FILE)."""
@@ -2376,9 +2435,9 @@ def watch_items(col, today):
 def watch_line(col):
     entries = watch_entries(col)
     if not entries:
-        return "WATCH ENTRIES: none"
-    return f"WATCH ENTRIES ({len(entries)}): " + ", ".join(
-        addr(p, eid) + (f" (until {until})" if until else "") for p, eid, until in entries)
+        return f"{title('WATCH ENTRIES')}: none"
+    return f"{title('WATCH ENTRIES')} ({len(entries)}):\n" + "\n".join(
+        "  " + addr(p, eid) + (f" (until {until})" if until else "") for p, eid, until in entries)
 
 
 def edge_key(r):
@@ -3455,17 +3514,12 @@ def unfinished_notice():
 
 
 def report_structure(col, markers=True):
-    """Shared structural report; no commit gates or bookkeeping writes."""
-    for d in col.disconnected:
-        print(f"  note: {rel(d)} is not linked from the collection (disconnected)")
+    """Shared structural report; no commit gates or bookkeeping writes. The
+    verdict leads; notes follow it, so a note never reads as a failure."""
     fails = check_structure(col, markers=markers)
-    # A supporting spec without counts is the normal case (detail split off);
-    # main holds the enumerations a dropped item would silently shrink.
-    if col.main in col.specs and not col.specs[col.main].count_decls:
-        print(f"  note: {rel(col.main)} declares no count checksums (data-count)")
     rc = 0
     if fails:
-        print(f"FAIL — {len(fails)} issue(s):")
+        print(f"{status('FAIL')} — {len(fails)} issue(s):")
         for f in fails:
             print("  " + f)
         rc = 1
@@ -3473,8 +3527,14 @@ def report_structure(col, markers=True):
         s = col.specs[col.main]
         derive(s)
         counts = ", ".join(f"{n} {g[0]}" for g, n in s.count_groups) or "no counts declared"
-        print(f"PASS — {len(col.specs)} file(s); {rel(col.main)}: {counts}; "
+        print(f"{status('PASS')} — {len(col.specs)} file(s); {rel(col.main)}: {counts}; "
               f"all structural checks green")
+    for d in col.disconnected:
+        print(f"  {status('note')}: {rel(d)} is not linked from the collection (disconnected)")
+    # A supporting spec without counts is the normal case (detail split off);
+    # main holds the enumerations a dropped item would silently shrink.
+    if col.main in col.specs and not col.specs[col.main].count_decls:
+        print(f"  {status('note')}: {rel(col.main)} declares no count checksums (data-count)")
     return rc
 
 
@@ -3503,7 +3563,7 @@ def cmd_check(args):
     rc = report_structure(col, markers=not getattr(args, "template", False))
     for p, s in col.specs.items():
         if s.retired_changes:
-            print(f"  note: {rel(p)}: data-changes is retired and ignored")
+            print(f"  {status('note')}: {rel(p)}: data-changes is retired and ignored")
     if args.neighborhood:
         print()
         neighborhood(col, *col.parse_target(args.neighborhood), semantic=False, staged=staged)
@@ -3513,7 +3573,7 @@ def cmd_check(args):
                   file=sys.stderr)
             return 2
         changed = changed_targets(col, args.diff)
-        print(f"\nneighborhoods of {len(changed)} element(s) changed since {args.diff}:")
+        print(f"\n{title('neighborhoods')} of {len(changed)} element(s) changed since {args.diff}:")
         for p, frag in changed:
             print(load_hint(col, p).strip() or "")
             neighborhood(col, p, frag, semantic=False, staged=staged)
@@ -3567,11 +3627,11 @@ def print_graph(col):
 
 def neighborhood(col, p, frag, semantic=True, staged=False):
     s = col.specs[p]
-    print(f"== {addr(p, frag)}")
+    print(title(f"== {addr(p, frag)}"))
     inbound = col.inbound(p, frag)
     outbound = s.links_in(frag) if frag else s.links
-    print("MECHANICAL")
-    print("  PASS target exists")
+    print(title("MECHANICAL"))
+    print(f"  {status('PASS')} target exists")
     bad = []
     for l in outbound:
         tgt, fr = resolve(p, l["href"])
@@ -3580,10 +3640,10 @@ def neighborhood(col, p, frag, semantic=True, staged=False):
         t = tgt or p
         if t not in col.specs or (fr and fr not in col.specs[t].elems):
             bad.append(l["href"])
-    print(f"  {'PASS' if not bad else 'FAIL'} outgoing references resolve"
+    print(f"  {status('PASS' if not bad else 'FAIL')} outgoing references resolve"
           + (f": {', '.join(bad)}" if bad else ""))
     dup = s.ids.count(frag) if frag else 0
-    print(f"  {'PASS' if dup <= 1 else 'FAIL'} id unique in file")
+    print(f"  {status('PASS' if dup <= 1 else 'FAIL')} id unique in file")
     facts = derive(s)
     covered = frag and (any(re.fullmatch(re.escape(pt.partition("=")[0]) + r"\d+", frag)
                             for d, _, _ in s.count_decls for pt in d.split() if "=" in pt)
@@ -3591,7 +3651,7 @@ def neighborhood(col, p, frag, semantic=True, staged=False):
     if covered:
         fails = []
         count_checksums(s, derive(s), fails, rel(p))
-        print(f"  {'PASS' if not fails else 'FAIL'} applicable count checks"
+        print(f"  {status('PASS' if not fails else 'FAIL')} applicable count checks"
               + ("".join("\n      " + f for f in fails)))
     # counterparts: outbound targets that link back
     counter = []
@@ -3604,17 +3664,17 @@ def neighborhood(col, p, frag, semantic=True, staged=False):
                     (resolve(t, x["href"])[0] in (None, p) and resolve(t, x["href"])[1] == frag)]
             if back:
                 counter.append(addr(t, fr))
-    print("EDGES")
-    print(f"  inbound ({len(inbound)}): " + (", ".join(
-        f"{addr(fp, l['src'])}{' [depends-on]' if l['rel']=='depends-on' else ''}"
-        f"{load_hint(col, fp)}"
-        for fp, l in inbound) or "none"))
+    print()
+    print(title("EDGES"))
     outs = [addr(resolve(p, l['href'])[0] or p, resolve(p, l['href'])[1])
             for l in outbound if resolve(p, l["href"]) != (None, None)]
-    print(f"  outbound ({len(outs)}): " + ", ".join(outs))
-    print(f"  counterparts ({len(counter)}): " + ", ".join(counter))
     deps = col.dependents(p, frag)
-    print(f"  dependents ({len(deps)}): " + ", ".join(addr(fp, l['src']) + load_hint(col, fp) for fp, l in deps))
+    edge_list("inbound", [
+        f"{addr(fp, l['src'])}{' [depends-on]' if l['rel']=='depends-on' else ''}"
+        f"{load_hint(col, fp)}" for fp, l in inbound])
+    edge_list("outbound", outs)
+    edge_list("counterparts", counter)
+    edge_list("dependents", [addr(fp, l['src']) + load_hint(col, fp) for fp, l in deps])
     # Owed reviews against this surface's basis: a staged report reads the
     # index (the candidate commit), never working-tree dirt; a working-tree
     # report flags uncommitted target changes, which clear nothing.
@@ -3625,14 +3685,26 @@ def neighborhood(col, p, frag, semantic=True, staged=False):
         _, dirty_paths = uncommitted([rel(x) for x in col.specs])
         owed = [r for r in owed_reviews(col, dirty_paths) if r["target"][0] == p
                 and (not frag or r["target"][1] == frag)]
+    print()
     print_owed(owed, col=col)
     if semantic:
+        print()
         print_semantic()
 
 
+def edge_list(label, entries):
+    """One edge class of a neighborhood: the count on the label line, then one
+    address per line, so a long list never wraps into a single block."""
+    print(f"  {label} ({len(entries)}):" + ("" if entries else " none"))
+    for e in entries:
+        print(f"    {e}")
+
+
 def print_semantic():
-    print("SEMANTIC (by hand): do referrers still hold; does cited evidence still support "
-          "the claim; is the status still right; do restatements agree.")
+    print(f"{title('SEMANTIC')} (by hand):")
+    for q in ("do referrers still hold?", "does cited evidence still support the claim?",
+              "is the status still right?", "do restatements agree?"):
+        print(f"  {q}")
 
 
 def cmd_neighbors(args):
@@ -3669,18 +3741,23 @@ def cmd_impact(args):
             any_change = True
             tag = {"changed": "CHANGED", "moved": "MOVED  ", "added": "ADDED  ",
                    "removed": "REMOVED"}[st]
-            print(f"{tag} {addr(p, i)}" + (f"  (was #{d})" if st == "moved" else ""))
+            print()
+            print(f"{title(tag)} {addr(p, i)}" + (f"  (was #{d})" if st == "moved" else ""))
             if st == "changed":
-                print(f"    {shorten(d[0])}\n  → {shorten(d[1])}")
-            for fp, l in col.dependents(p, i) if st != "removed" else []:
-                print(f"  REVIEW {addr(fp, l['src'])}  depends-on {addr(p, i)}"
-                      f"  [{'address-only' if st == 'moved' else 'content'}]{load_hint(col, fp, p)}")
+                print(f"    {shorten(d[0])}\n    → {shorten(d[1])}")
+            reviews = [f"    REVIEW {addr(fp, l['src'])}  depends-on {addr(p, i)}"
+                       f"  [{'address-only' if st == 'moved' else 'content'}]{load_hint(col, fp, p)}"
+                       for fp, l in (col.dependents(p, i) if st != "removed" else [])]
             if st in ("removed", "moved"):
                 # dependents still pointing at the old id
-                for fp, l, tp, fr in col.depends_on_edges():
-                    if tp == p and fr == (i if st == "removed" else d):
-                        print(f"  REVIEW {addr(fp, l['src'])}  depends-on {addr(p, fr)}"
-                              f"  [target {'removed' if st == 'removed' else 'renamed'}]")
+                reviews += [f"    REVIEW {addr(fp, l['src'])}  depends-on {addr(p, fr)}"
+                            f"  [target {'removed' if st == 'removed' else 'renamed'}]"
+                            for fp, l, tp, fr in col.depends_on_edges()
+                            if tp == p and fr == (i if st == "removed" else d)]
+            if reviews:
+                print()
+            for line in reviews:
+                print(line)
     # moved sources since base
     moved = set()
     for p, s in col.specs.items():
@@ -3695,7 +3772,8 @@ def cmd_impact(args):
             if prior and l["src"] not in prior:
                 any_change = True
                 moved.add((p, l["src"]))
-                print(f"SOURCE-MOVED {addr(p, l['src'])}  (was #{prior[0]})  depends-on {l['href']}")
+                print()
+                print(f"{title('SOURCE-MOVED')} {addr(p, l['src'])}  (was #{prior[0]})  depends-on {l['href']}")
     if not any_change:
         print(f"no element changed since {base}")
     print()
@@ -3709,31 +3787,40 @@ def print_checklist(col, ctx, items, receipt):
     mech = [it for it in items if it["mech"]]
     judged = [it for it in items if not it["mech"]]
     open_j = [it for it in judged if it["status"] == "open"]
-    print(f"CHECKLIST — {ctx.subject!r}" if ctx.subject else "CHECKLIST — no subject yet")
-    print(f"  mechanical open: {len(mech)}   judgment open: {len(open_j)}   "
-          f"answered: {len(judged) - len(open_j)}")
+    print()
+    print(f"{title('CHECKLIST')} — {ctx.subject}" if ctx.subject else f"{title('CHECKLIST')} — no subject yet")
+    print(f"  {len(judged) - len(open_j)} answered, {len(open_j)} to answer, {len(mech)} to fix")
+    if mech:
+        print()
     for it in mech:
-        print(f"  OPEN [{it['kind']}] {it['title']}")
+        print(f"  {status('OPEN')} [{it['kind']}] {it['title']}")
         if it["detail"]:
-            print(f"      {it['detail']}")
+            print(paint(f"    {it['detail']}", "grey"))
     if open_j:
         kinds = {}
         for it in open_j:
             kinds[it["kind"]] = kinds.get(it["kind"], 0) + 1
+        print()
         print("  judgment items open: " + ", ".join(f"{k} {n}" for k, n in kinds.items())
-              + f" — one at a time, never scripted: {command(col, 'reconcile', '--next')}")
-    for it in judged:
-        if it.get("stale"):
-            print(f"  REOPENED [{it['kind']}] {it['title']}: {it['stale']}")
+              + f" — one at a time, never scripted: {cmd(command(col, 'reconcile', '--next'))}")
+    stale = [it for it in judged if it.get("stale")]
+    if stale:
+        print()
+    for it in stale:
+        print(f"  {status('REOPENED')} [{it['kind']}] {it['title']}: {it['stale']}")
+    if ctx.notes:
+        print()
     for n in ctx.notes:
-        print(f"  note: {n}")
+        print(f"  {status('note')}: {n}")
     if receipt:
-        print("RECEIPT — issued for this staged state, subject and answers. Commit with "
+        print()
+        print(f"{status('RECEIPT')} — issued for this staged state, subject and answers. Commit with "
               "`git commit --no-edit`: the hooks write the subject and Reconciled: trailers. "
               "If the user's OK is needed, pause and ask first; any change means rerunning reconcile.")
     elif mech:
+        print()
         print("Fix the mechanical items in the files, restage, and rerun "
-              + command(col, "reconcile") + ".")
+              + cmd(command(col, "reconcile")) + ".")
 
 
 def cmd_reconcile(args):
@@ -3771,18 +3858,23 @@ def cmd_reconcile(args):
         else:
             it = open_j[0]
             done = len(judged) - len(open_j)
-            print(f"ITEM {done + 1} of {len(judged)} [{it['kind']}] {it['title']}")
+            print()
+            print(f"{title(f'ITEM {done + 1} of {len(judged)}')} [{it['kind']}] {it['title']}")
             if it.get("stale"):
                 print(f"  earlier answer no longer valid: {it['stale']}")
+            print()
             print("  evidence:")
             for line in it["excerpt"].splitlines():
                 print("    " + line)
+            print()
             print("  question: " + it["question"])
             tok = token(it)
             print(f"  token: {tok}")
+            print()
             print("  answer with one of:")
             for form in legal_forms(it["kind"], bool(it.get("probe"))):
-                print("    " + command(col, "reconcile", "--tick", tok) + " " + form)
+                print("    " + cmd(command(col, "reconcile", "--tick", tok) + " " + form))
+            print()
             print("  Answer this item from the evidence above. Never script the "
                   "--next/--tick loop, answer items in bulk, or tick an item you have "
                   "not read: that is lying about having done the check.")
@@ -3825,15 +3917,15 @@ def cmd_reconcile(args):
 def cmd_hook(args):
     """The installed hooks: confirm the commit matches the reconcile receipt.
     Every check ran in reconcile, so a refusal means the candidate changed."""
-    hint = "rerun `python3 lspec.py reconcile` (it keeps answers whose evidence is unchanged)"
+    hint = "python3 lspec.py reconcile"
     if args.which == "prepare-commit-msg":
         # Git names the message source: "commit" means --amend, -c or -C. An
         # amend rewrites a reconciled commit with a candidate reconciled
         # against the commit being replaced, so its trailers would describe
         # the wrong delta. The record is append-only; make a new commit.
         if args.source and args.source[0] == "commit":
-            print("prepare-commit-msg: commit refused — amending or reusing a commit rewrites a "
-                  "reconciled record; make a new commit (git is the record)", file=sys.stderr)
+            refuse("prepare-commit-msg", "amending or reusing a commit rewrites a reconciled "
+                   "record", "make a new commit (git is the record)")
             return 1
         receipt = read_state("receipt.json")
         if receipt is None or receipt_problem():
@@ -3853,9 +3945,17 @@ def cmd_hook(args):
         with open(args.msg, encoding="utf-8") as f:
             problem = message_problem(read_state("receipt.json"), f.read())
     if problem:
-        print(f"{args.which}: commit refused — {problem}; {hint}.", file=sys.stderr)
+        refuse(args.which, problem, f"rerun {hint} (it keeps answers whose evidence is unchanged)")
         return 1
     return 0
+
+
+def refuse(hook, reason, next_step):
+    """A hook's refusal, on stderr: the verdict on its own line, then why and
+    what to do, each on a line of its own so neither is lost in a sentence."""
+    print(f"{hook}: commit {paint('refused', 'red', 'bold', stream=sys.stderr)}", file=sys.stderr)
+    print(f"  reason: {reason}", file=sys.stderr)
+    print(f"  next:   {next_step}", file=sys.stderr)
 
 
 def cmd_clean():
@@ -3868,7 +3968,7 @@ def cmd_clean():
     changes = working_changes(root)
     if not changes:
         return 0
-    print(f"UNCOMMITTED — {len(changes)} file(s) left after HEAD:")
+    print(f"{status('UNCOMMITTED')} — {len(changes)} file(s) left after HEAD:")
     for label in ("staged", "unstaged", "untracked"):
         for kind, pth, _ in changes:
             if kind == label:
@@ -3954,18 +4054,20 @@ def obligations_report(col, today=None):
     print(watch_line(col))
     expired = watch_items(col, today)
     for it in expired:
-        print(f"WATCH — {it['title']}" + (f": {it['detail']}" if it["detail"] else ""))
+        print(f"{status('WATCH')} — {it['title']}" + (f": {it['detail']}" if it["detail"] else ""))
     awaiting = []
     if repo_root() is not None and head_status() == "ok":
         sealed = {f"{repo_rel(p)}#{i}" for p, s in col.specs.items() for i in s.sealed}
         awaiting = [(n, sha, why) for n, sha, why in pending_corrections(repo_root()) if n in sealed]
         if awaiting:
-            print(f"SEALED CORRECTIONS AWAITING CONFIRMATION ({len(awaiting)}): " + "; ".join(
-                f"{n} (commit {sha[:7]} \u2014 {why})" for n, sha, why in awaiting))
+            print()
+            print(f"{status('SEALED')} CORRECTIONS AWAITING CONFIRMATION ({len(awaiting)}):")
+            for n, sha, why in awaiting:
+                print(f"  {n} (commit {sha[:7]} \u2014 {why})")
             print("  a later session confirms each in reconcile, or fixes the claim")
     for p, s in col.specs.items():
         if s.retired_changes:
-            print(f"  note: {rel(p)}: data-changes is retired and ignored; sealed changes are "
+            print(f"  {status('note')}: {rel(p)}: data-changes is retired and ignored; sealed changes are "
                   "answered in reconcile as a decision change or a correction")
     return rc, rc == 0 and not established and not expired and not awaiting
 
@@ -4087,7 +4189,7 @@ def cmd_start(args):
             request = adopt_request(request, args.reason)
             just_adopted = True
         if request and not just_adopted:
-            print(f"REQUEST — already open since "
+            print(f"{title('REQUEST')} — already open since "
                   f"{short(request.get('start'))} "
                   f"(opened {request.get('opened_at')}); not reset")
             print("  An open request is work that was started and never handed off with "
@@ -4119,22 +4221,23 @@ def cmd_start(args):
             remove_state("receipt.json")
             if kept:
                 write_state("reconcile.json", kept)
-            print(f"REQUEST — opened at {short(head_sha())}")
+            print(f"{title('REQUEST')} — opened at {short(head_sha())}")
             if kept.get("subject"):
                 print(f"  subject kept: {kept['subject']!r}")
             for kind, path, _ in working_changes(repo_root()):
                 print(f"  uncommitted {kind} before this request: {path} — reconcile and commit "
                       "it, or ask the user")
     else:
-        print("REQUEST — not a git checkout: no request is recorded")
+        print(f"{title('REQUEST')} — not a git checkout: no request is recorded")
+    print()
     if args.resume and not refusal and resume_lines:
-        print("RESUME — the read still in your context plus these changes is the load:")
+        print(f"{title('RESUME')} — the read still in your context plus these changes is the load:")
         for line in resume_lines:
             print("  " + line)
     else:
         if refusal:
-            print(f"RESUME REFUSED — {refusal}: read every governing spec in full.")
-        print("READ — before any authoritative action (a commit, live program state, networked "
+            print(f"{title('RESUME')} {paint('REFUSED', 'red')} — {refusal}: read every governing spec in full.")
+        print(f"{title('READ')} — before any authoritative action (a commit, live program state, networked "
               "hardware), read whole every spec that governs it: every line, in sequential "
               "pages. Skipped ranges and search in place of reading are not a read.")
     for p in col.specs:
@@ -4147,21 +4250,27 @@ def cmd_start(args):
                   "whole when work crosses into it")
     sealed = [addr(p, eid) for p, spec in col.specs.items() for eid in spec.sealed]
     deps = list(col.depends_on_edges())
-    print(f"SEALED ({len(sealed)}): " + (", ".join(sealed) or "none"))
-    print(f"DEPENDS-ON EDGES: {len(deps)}")
-    print("OBLIGATIONS")
+    print()
+    print(f"{title('SEALED')} ({len(sealed)}):" + ("" if sealed else " none"))
+    for a in sealed:
+        print(f"  {a}")
+    print(f"{title('DEPENDS-ON EDGES')}: {len(deps)}")
+    print()
+    print(title("OBLIGATIONS"))
     rc, clean = obligations_report(col)
     print_shared_literals(col)
     if in_git and (request := read_state("request.json")) and request.get("start") == head_sha() \
             and "clean" not in request:
         write_state("request.json", {**request, "clean": clean})
     missing = missing_hooks() if in_git else []
+    print()
     if missing:
-        print("HOOKS — not installed, or from an older lspec: " + ", ".join(missing)
+        print(f"{title('HOOKS')} — not installed, or from an older lspec: " + ", ".join(missing)
               + "; install: " + "; ".join(f"ln -sf ../../hooks/{h} .git/hooks/{h}" for h in missing))
-    print("SESSION — per commit: edit, stage, " + command(col, "reconcile", "--subject",
-          "type: one transition") + ", work the checklist, `git commit --no-edit`. "
-          "Hand off with " + command(col, "finish") + " on a clean tree.")
+        print()
+    print(f"{title('SESSION')} — per commit: edit, stage, " + cmd(command(col, "reconcile", "--subject",
+          "type: one transition")) + ", work the checklist, `git commit --no-edit`. "
+          "Hand off with " + cmd(command(col, "finish")) + " on a clean tree.")
     return rc
 
 
@@ -4186,8 +4295,9 @@ def cmd_finish(args):
         return 2
     print(stamp()[0])
     changes = working_changes(root)
+    print()
     if changes:
-        print("NOT HANDED OFF — finish requires a clean working tree:")
+        print(f"{paint('NOT HANDED OFF', 'red', 'bold')} — finish requires a clean working tree:")
         for kind, path, _ in changes:
             print(f"  {kind}: {path}")
         print("Reconcile and commit this work, or discard it. Asking the user whether to "
@@ -4197,45 +4307,51 @@ def cmd_finish(args):
     if established:
         # Debt handed off is a lie the next session inherits (B2). Incomplete
         # history is a condition, not debt, and does not block.
-        print(f"NOT HANDED OFF — review owed ({len(established)}); finish requires none:")
+        print(f"{paint('NOT HANDED OFF', 'red', 'bold')} — review owed ({len(established)}); finish requires none:")
         print_owed(owed, col=col)
         print("Review each dependent against committed state and record it: "
-              + command(col, "review", *sorted({addr(*r["dependent"]) for r in established})))
+              + cmd(command(col, "review", *sorted({addr(*r["dependent"]) for r in established}))))
         return 1
     request = read_state("request.json")
     head = head_sha()
     start = (request or {}).get("start")
     if request is None:
-        print("REQUEST — none open (run start at the beginning of a request); nothing to close")
+        print(f"{title('REQUEST')} — none open (run start at the beginning of a request); nothing to close")
         commits = []
     else:
         span = f"{start}..HEAD" if start else "HEAD"
         commits = git("log", "--format=%h %s", span, check=False).splitlines() if head else []
-        print(f"REQUEST — since {short(start)}: {len(commits)} commit(s)")
+        print(f"{title('REQUEST')} — since {short(start)}: {len(commits)} commit(s)")
         for c in commits:
             print("  " + c)
-    print("OBLIGATIONS")
+    print()
+    print(title("OBLIGATIONS"))
     obligations_report(col)
-    print("BEFORE YOU HAND OFF — answer each. Any yes means the request is not done: "
+    print()
+    print(f"{title('BEFORE YOU HAND OFF')} — answer each. Any yes means the request is not done: "
           "reopen it with start --resume (below), record it, and finish again.")
+    questions = []
     if not commits:
-        print("  - This request committed nothing. Did it produce a finding, decision or doubt "
-              "that belongs in the spec?")
-    print("  - Was a decision made in conversation that has no decision row?")
-    print("  - Did you resolve an ambiguity by assumption without recording the alternative "
-          "as an open item?")
-    print("  - Did a failure appear for the first time without a watch entry carrying its "
-          "closing condition?")
-    print("  - A sealed correction above awaits a later session: did it name the decision it "
-          "restores, if there is one?")
-    print("  - Is anything above (WATCH, FAIL) yours to clear now?")
+        questions.append("This request committed nothing. Did it produce a finding, decision or "
+                         "doubt that belongs in the spec?")
+    questions += ["Was a decision made in conversation that has no decision row?",
+                  ("Did you resolve an ambiguity by assumption without recording the alternative "
+                   "as an open item?"),
+                  ("Did a failure appear for the first time without a watch entry carrying its "
+                   "closing condition?"),
+                  ("A sealed correction above awaits a later session: did it name the decision it "
+                   "restores, if there is one?"),
+                  "Is anything above (WATCH, FAIL) yours to clear now?"]
+    for n, q in enumerate(questions, 1):
+        print(f"  {n}. {q}")
     if request is not None:
         remove_state("request.json")
         remove_state("reconcile.json")
         remove_state("receipt.json")
     sha = (head or "")[:12] or "none"
-    print(f"HANDOFF {sha} — request closed. A follow-up in this conversation, with the full "
-          f"read still in context: " + command(col, "start", "--resume", sha)
+    print()
+    print(f"{status('HANDOFF')} {sha} — request closed. A follow-up in this conversation, with the full "
+          f"read still in context: " + cmd(command(col, "start", "--resume", sha))
           + "; anything else starts with a full read.")
     return 0
 
@@ -4507,13 +4623,17 @@ A session: start MAIN, read what it lists whole, edit and stage, reconcile
 --subject "type: one transition", answer the checklist (--next / --tick), commit
 with `git commit --no-edit` (the hooks write subject and Reconciled: trailers),
 finish on a clean tree. Every verb takes --main MAIN before or after the verb;
-with a request open, MAIN defaults to the request's. Exit status: 0 pass, 1 a
-failed check or open checklist, 2 unreadable input, missing evidence or a
-refused operation. State lives in the per-worktree git directory under lspec/
-(request.json, reconcile.json, receipt.json, a random secret, and history.json,
-a memo of review baselines keyed by HEAD, and specs.marshal, parsed files keyed
-by blob; both are safe to delete). It is a
-cooperative local gate, not a signature: a shell can forge a token or bypass
+with a request open, MAIN defaults to the request's. --color auto|always|never
+goes before the verb: auto (the default) colors only a terminal, never a pipe,
+and respects NO_COLOR and TERM=dumb; the words carry every status, color or
+not. Exit status: 0 pass, 1 a failed check or open checklist, 2 unreadable
+input, missing evidence or a refused operation.
+
+State lives in the per-worktree git directory under lspec/: request.json,
+reconcile.json, receipt.json, a random secret, and two caches that are safe to
+delete — history.json (review baselines keyed by HEAD) and specs.marshal
+(parsed files keyed by blob). It is a cooperative local gate, not a
+signature: a shell can forge a token or bypass
 hooks, which is deliberate circumvention. Green means the checks ran and the
 questions were answered, not that the answers are right.""",
 
@@ -4672,6 +4792,8 @@ def main(argv):
     ap = argparse.ArgumentParser(prog="lspec", formatter_class=raw, epilog=HELP["lspec"],
                                  description=(__doc__ or "lspec — Living Specification maintenance").split("\n")[0])
     ap.add_argument("--main", help="main spec (default live-spec.html); accepted before or after the subcommand")
+    ap.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                    help="color the report: auto colors a terminal only (default); before the verb")
     sub = ap.add_subparsers(dest="verb")
     # --main on each subparser too (default=SUPPRESS so an absent one never
     # clobbers the global value); positional MAIN still wins over both.
@@ -4736,6 +4858,9 @@ def main(argv):
         args.finish_receipt = False
     if getattr(args, "main_pos", None):
         args.main = args.main_pos
+    global _COLOR, _COLOR_MODE
+    _COLOR_MODE = args.color
+    _COLOR = color_enabled(args.color, sys.stdout)
     try:
         rc = {"start": cmd_start, "reconcile": cmd_reconcile, "finish": cmd_finish,
               "check": cmd_check, "show": cmd_show, "neighbors": cmd_neighbors,
@@ -4754,6 +4879,8 @@ def main(argv):
     except (RuntimeError, OSError) as e:
         print(f"lspec {args.verb}: {e}", file=sys.stderr)
         return 2
+    finally:
+        _COLOR, _COLOR_MODE = False, "auto"   # per run; a later in-process call starts plain
 
 
 if __name__ == "__main__":

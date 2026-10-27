@@ -282,6 +282,70 @@ class Units(unittest.TestCase):
         self.assertEqual(lspec.edge_key(r), (lspec.canon('m.html'), lspec.canon('t.html'), 'p'))
 
 
+class Color(unittest.TestCase):
+    """Colour is a layer over the words: codes reach a terminal only. A pipe —
+    the test harness, an agent's capture, a log — never sees one, and every
+    status still reads as a word there."""
+
+    def test_enabled_only_for_a_terminal(self):
+        pipe = io.StringIO()                       # no fileno: never a terminal
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NO_COLOR", None); os.environ.pop("TERM", None)
+            self.assertFalse(lspec.color_enabled("auto", pipe))
+            self.assertTrue(lspec.color_enabled("always", pipe))     # the flag outranks the stream
+            self.assertFalse(lspec.color_enabled("never", pipe))
+            tty = mock.Mock(); tty.fileno.return_value = 99
+            with mock.patch.object(os, "isatty", return_value=True):
+                self.assertTrue(lspec.color_enabled("auto", tty))
+                os.environ["TERM"] = "xterm-256color"             # TERM alone never enables...
+                self.assertTrue(lspec.color_enabled("auto", tty))
+                os.environ["TERM"] = "dumb"                       # ...but it can veto
+                self.assertFalse(lspec.color_enabled("auto", tty))
+                del os.environ["TERM"]
+                os.environ["NO_COLOR"] = ""                       # set but empty: no effect
+                self.assertTrue(lspec.color_enabled("auto", tty))
+                os.environ["NO_COLOR"] = "1"                      # set non-empty: off
+                self.assertFalse(lspec.color_enabled("auto", tty))
+                self.assertTrue(lspec.color_enabled("always", tty))  # the flag outranks NO_COLOR
+                os.environ["FORCE_COLOR"] = "1"                   # ambient; not honoured
+                os.environ.pop("NO_COLOR")
+            with mock.patch.object(os, "isatty", return_value=False):
+                self.assertFalse(lspec.color_enabled("auto", tty))
+
+    def test_paint_wraps_the_word_or_leaves_it(self):
+        with mock.patch.object(lspec, "_COLOR", False):
+            self.assertEqual(lspec.status("PASS"), "PASS")
+            self.assertEqual(lspec.title("READ"), "READ")
+            self.assertEqual(lspec.cmd("python3 lspec.py check"), "python3 lspec.py check")
+        with mock.patch.object(lspec, "_COLOR", True):
+            self.assertEqual(lspec.status("PASS"), "\x1b[32mPASS\x1b[0m")
+            self.assertEqual(lspec.status("FAIL"), "\x1b[31mFAIL\x1b[0m")
+            self.assertEqual(lspec.status("plain"), "plain")      # unknown words stay plain
+            self.assertEqual(lspec.title("READ"), "\x1b[1mREAD\x1b[0m")
+            self.assertNotIn("\x1b[2m", lspec.paint("x", *lspec._SGR))   # no SGR 2 (dim) anywhere
+
+    def test_captured_output_carries_no_codes(self):
+        """The CLI under redirect_stdout is the agent-harness case: a pipe."""
+        d = repo()
+        for argv in (("start",), ("check",), ("impact", "HEAD"),
+                     ("neighbors", "motor.html#power"), ("reconcile", "--subject", "docs: x")):
+            self.assertNotIn("\x1b", cli(d, *argv)[1], argv)
+        self.assertIn("\x1b[32mPASS\x1b[0m", cli(d, "--color=always", "check")[1])
+
+    def test_stderr_decides_for_itself(self):
+        """A hook's refusal goes to stderr; its colour follows that stream, not
+        stdout's. Captured, it carries no code; --color=always, it does."""
+        d = repo()
+        rc, out = cli(d, "hook", "pre-commit")             # no receipt: refused
+        self.assertEqual(rc, 1); self.assertIn("commit refused", out); self.assertNotIn("\x1b", out)
+        self.assertIn("  reason: no reconcile receipt", out); self.assertIn("  next:   rerun", out)
+        rc, out = cli(d, "--color=always", "hook", "pre-commit")
+        self.assertIn("\x1b[31m\x1b[1mrefused\x1b[0m", out)
+        err = io.StringIO()
+        with mock.patch.object(lspec, "_COLOR", True), mock.patch.object(lspec, "_COLOR_MODE", "auto"):
+            self.assertEqual(lspec.paint("x", "red", stream=err), "x")   # stdout on, stderr a pipe: plain
+
+
 class SharedLiterals(unittest.TestCase):
     """B3 advisory: edgeless claims that state the same value."""
 
@@ -562,7 +626,7 @@ class G(unittest.TestCase):
         d = repo(); edit(d, "motor.html", "120 kW", "105 kW")
         rc, out = cli(d, "check", "--diff", "HEAD")
         self.assertIn("neighborhoods of 1 element(s)", out); self.assertIn("== motor.html#power", out)
-        self.assertIn("dependents (1): main.html#claim", out)
+        self.assertIn("dependents (1):\n    main.html#claim", out)
 
     def test_show_and_graph(self):
         d = repo(); rc, out = cli(d, "show", "motor.html#power", "--text")
@@ -2912,7 +2976,7 @@ class SealCorrection(unittest.TestCase):
                       trailers)
         for verb in ('start', 'finish'):
             out = cli(d, verb)[1]
-            self.assertIn('SEALED CORRECTIONS AWAITING CONFIRMATION (1): main.html#req', out)
+            self.assertIn('SEALED CORRECTIONS AWAITING CONFIRMATION (1):\n  main.html#req', out)
             self.assertIn(head(d)[:7], out)
         self.assertIn('awaits a later session', cli(d, 'finish')[1])   # finish asks about it
 
@@ -2952,7 +3016,7 @@ class SealCorrection(unittest.TestCase):
         self.assertEqual(cli(d, 'finish')[0], 0)
         # the next session sees it at start; an ordinary commit is not asked
         rc, out = cli(d, 'start')
-        self.assertIn('AWAITING CONFIRMATION (1): main.html#req', out)
+        self.assertIn('AWAITING CONFIRMATION (1):\n  main.html#req', out)
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
         self.assertNotIn('confirm', reconcile_out(d, 'docs: derate'))
         sh('git', 'reset', '-q', '--hard', cwd=d)
@@ -3694,7 +3758,7 @@ class ChangeFeedback(unittest.TestCase):
         d = self.fixture()
         edit(d, 'motor.html', 'id="power"', 'id="power" data-sealed')
         rc, out = cli(d, 'start')
-        self.assertIn('SEALED (1): motor.html#power', out)
+        self.assertIn('SEALED (1):\n  motor.html#power', out)
         self.assertIn('DEPENDS-ON EDGES: 1', out)
 
     def test_mv_and_review_print_next_steps(self):
@@ -3831,7 +3895,7 @@ class Requests(unittest.TestCase):
         state = lspec.json.loads(state_file(d, 'reconcile.json').read_text())
         self.assertEqual((state['subject'], state['body']), ('docs: derate', 'why'))
         self.assertNotIn('ticks', state)
-        self.assertIn("CHECKLIST — 'docs: derate'", cli(d, 'reconcile')[1])
+        self.assertIn("CHECKLIST — docs: derate", cli(d, 'reconcile')[1])
 
     def test_size_line_shows_both_baselines(self):
         d = self.fixture()
@@ -4097,13 +4161,13 @@ class Checklist(unittest.TestCase):
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
         cli(d, 'reconcile', '--subject', 'docs: derate')
         answer_all(d)
-        self.assertIn('answered: 5', cli(d, 'reconcile')[1])
+        self.assertIn('5 answered,', cli(d, 'reconcile')[1])
         edit(d, 'main.html', 'Main', 'Main heading'); sh('git', 'add', '-A', cwd=d)
         out = cli(d, 'reconcile')[1]
-        self.assertIn('answered: 5', out)            # unrelated change: answers kept
+        self.assertIn('5 answered,', out)            # unrelated change: answers kept
         edit(d, 'motor.html', '105 kW', '100 kW'); sh('git', 'add', '-A', cwd=d)
         out = cli(d, 'reconcile')[1]
-        self.assertIn('judgment open: 1', out)       # only the neighbor of the changed claim returns
+        self.assertIn(', 1 to answer,', out)       # only the neighbor of the changed claim returns
         self.assertIn('neighbor 1', out)
 
     def test_reasons_cannot_repeat(self):
@@ -4351,11 +4415,11 @@ class Checklist(unittest.TestCase):
         sh('git', 'add', '-A', cwd=d)
         cli(d, 'reconcile', '--subject', 'fix: quiet the fan')
         answer_all(d, {'cause': ['established', 'watch-noise', 'bearing was worn out']})
-        self.assertIn('judgment open: 0', cli(d, 'reconcile')[1])
+        self.assertIn(', 0 to answer,', cli(d, 'reconcile')[1])
         edit(d, 'motor.html', 'closes after a week quiet', 'unverified: diagnosis unconfirmed')
         sh('git', 'add', '-A', cwd=d)
         out = cli(d, 'reconcile')[1]
-        self.assertIn('judgment open: 2', out)
+        self.assertIn(', 2 to answer,', out)
         self.assertIn('cause 1, derived 1', out)   # the rewritten entry is a bootloader source too
         self.assertIn('watch entry motor.html#watch-noise (added): watch-noise noise 2026-10-04 unverified',
                       cli(d, 'reconcile', '--next')[1])
@@ -4374,7 +4438,7 @@ class Checklist(unittest.TestCase):
              '<td><code>watch-a</code> a</td><td>b</td><td>c</td></tr><tr id="watch-b"><td><code>watch-b</code> a</td><td>b</td><td>c</td>'
              '</tr></table></main>')
         commit(d, 'docs: two watches')
-        line = 'WATCH ENTRIES (2): motor.html#watch-a (until 2026-11-04), motor.html#watch-b'
+        line = 'WATCH ENTRIES (2):\n  motor.html#watch-a (until 2026-11-04)\n  motor.html#watch-b'
         self.assertIn(line, cli(d, 'start')[1])
         self.assertIn(line, cli(d, 'finish')[1])
 

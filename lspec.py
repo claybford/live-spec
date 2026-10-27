@@ -4001,11 +4001,10 @@ def first_commit(path):
     return log[0], ("oldest available" if shallow else "first commit")
 
 
-def size_line(col):
-    """Main's word count against two baselines: the last audit, and the first
-    commit. An audit that adds words zeroes the first delta; the second is
-    the one the top risk (drift-by-accretion) is measured by."""
-    now = spec_words(col.specs[col.main])
+def size_line(col, now):
+    """Main's word count NOW against two baselines: the last audit, and the
+    first commit. An audit that adds words zeroes the first delta; the second
+    is the one the top risk (drift-by-accretion) is measured by."""
     if not repo_root():
         return f"{now} words"
     parts = []
@@ -4029,9 +4028,9 @@ def size_line(col):
     return f"{now} words ({'; '.join(parts)})"
 
 
-def size_warning(col):
+def size_warning(now):
     """The advisory past WORDS_MARK, or None: shown, never a check (dl-wholeload)."""
-    if spec_words(col.specs[col.main]) <= WORDS_MARK:
+    if now <= WORDS_MARK:
         return None
     return (f"past the {WORDS_MARK}-word mark: every session reads it whole; "
             "an audit removes or relocates, never elaborates")
@@ -4250,8 +4249,9 @@ def cmd_start(args):
         lines = len(col.specs[p].raw.splitlines())
         if p == col.main:
             print(f"  {rel(p)} (main)")
-            print(f"    {lines} lines, {size_line(col)}")
-            if (warning := size_warning(col)):
+            words = spec_words(col.specs[p])
+            print(f"    {lines} lines, {size_line(col, words)}")
+            if (warning := size_warning(words)):
                 print(f"    {warning}")
         else:
             par = col.parents.get(p)

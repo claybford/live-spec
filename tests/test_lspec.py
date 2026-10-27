@@ -1440,8 +1440,8 @@ class L(unittest.TestCase):
         d = repo(); rc, out = cli(d, "start")
         self.assertEqual(rc, 0, out)
         self.assertNotIn('id="power"', out)                    # the agent reads the specs
-        self.assertIn("main.html (main) — 14 lines, 50 words", out)
-        self.assertIn("motor.html — 5 lines; split from main.html (dl-split-motor)", out)
+        self.assertIn("main.html (main)\n    14 lines, 50 words", out)
+        self.assertIn("motor.html\n    5 lines; split from main.html (dl-split-motor)\n    read it whole", out)
         self.assertLess(len(out.splitlines()), 25, out)        # short enough never to truncate
 
     def test_cross_file_outputs_carry_load_hint(self):

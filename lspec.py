@@ -4026,11 +4026,15 @@ def size_line(col):
             parts.append(f"{now - then:+d} since {name} {ref[:7]}")
     if sha is None:
         parts.insert(0, "no audit: commit yet")
-    line = f"{now} words ({'; '.join(parts)})"
-    if now > WORDS_MARK:
-        line += (f" \u2014 past the {WORDS_MARK}-word mark: every session reads it whole; "
-                 "an audit removes or relocates, never elaborates")
-    return line
+    return f"{now} words ({'; '.join(parts)})"
+
+
+def size_warning(col):
+    """The advisory past WORDS_MARK, or None: shown, never a check (dl-wholeload)."""
+    if spec_words(col.specs[col.main]) <= WORDS_MARK:
+        return None
+    return (f"past the {WORDS_MARK}-word mark: every session reads it whole; "
+            "an audit removes or relocates, never elaborates")
 
 
 def owed_now(col):
@@ -4240,14 +4244,20 @@ def cmd_start(args):
         print(f"{title('READ')} — before any authoritative action (a commit, live program state, networked "
               "hardware), read whole every spec that governs it: every line, in sequential "
               "pages. Skipped ranges and search in place of reading are not a read.")
+    # One entry per file: identity on its own line, then size and provenance,
+    # then any advisory, so the role and the warning are each found at a glance.
     for p in col.specs:
         lines = len(col.specs[p].raw.splitlines())
         if p == col.main:
-            print(f"  {rel(p)} (main) — {lines} lines, {size_line(col)}")
+            print(f"  {rel(p)} (main)")
+            print(f"    {lines} lines, {size_line(col)}")
+            if (warning := size_warning(col)):
+                print(f"    {warning}")
         else:
             par = col.parents.get(p)
-            print(f"  {rel(p)} — {lines} lines; split from {rel(par[0])} ({par[1]}); read it "
-                  "whole when work crosses into it")
+            print(f"  {rel(p)}")
+            print(f"    {lines} lines; split from {rel(par[0])} ({par[1]})")
+            print("    read it whole when work crosses into it")
     sealed = [addr(p, eid) for p, spec in col.specs.items() for eid in spec.sealed]
     deps = list(col.depends_on_edges())
     print()

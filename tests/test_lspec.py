@@ -538,6 +538,113 @@ def commit_reconciled(d):
                    text=True, check=True)
 
 
+POWER_CITED = ('<p id="power" data-sealed>120 kW per <a href="https://x.example/v1">datasheet</a>, '
+               'C <a href="main.html#claim">r</a> P <a href="main.html#bore">r</a> '
+               '<img src="a.png" alt="plot"> see <a href="main.html#claim">main</a>.</p>')
+
+
+def cited_repo():
+    """repo() whose sealed motor#power cites an external source, two
+    identically labelled internal links and an image."""
+    d = tempfile.mkdtemp()
+    Path(d, "main.html").write_text(MAIN.format(extra='<tr id="bore"><td>bore</td></tr>'))
+    motor = MOTOR.format(extra="").replace(
+        '<p id="power">120 kW, see <a href="main.html#claim">main</a>.</p>', POWER_CITED)
+    assert POWER_CITED in motor
+    Path(d, "motor.html").write_text(motor)
+    sh("git", "init", "-q", cwd=d)
+    commit(d, "docs: seed")
+    return d
+
+
+class CitedStructure(unittest.TestCase):
+    """A claim's comparison is its signature: rendered text plus the ordered
+    destinations it cites. Git keeps the HTML; the tool must not reduce two
+    versions of it to text before deciding whether anything changed."""
+
+    SUBSTANTIVE = {
+        "external source re-pointed": ('x.example/v1', 'x.example/v2'),
+        "internal target re-pointed under its label":
+            ('href="main.html#claim">main', 'href="main.html#bore">main'),
+        "two destinations swapped under identical labels":
+            ('C <a href="main.html#claim">r</a> P <a href="main.html#bore">r</a>',
+             'C <a href="main.html#bore">r</a> P <a href="main.html#claim">r</a>'),
+        "image source changed": ('src="a.png"', 'src="b.png"'),
+        "image alt changed": ('alt="plot"', 'alt="chart"'),
+        "link removed, its words kept": ('<a href="https://x.example/v1">datasheet</a>', 'datasheet'),
+        "link added around existing words": ('120 kW per', '<a href="https://y.example/r">120 kW</a> per'),
+        "link moved to other words":
+            ('120 kW per <a href="https://x.example/v1">datasheet</a>',
+             '<a href="https://x.example/v1">120 kW</a> per datasheet'),
+    }
+    COSMETIC = {
+        "inline emphasis": ('120 kW', '<em>120</em> kW'),
+        "attribute spacing": ('<a href="main.html#claim">main', '<a  href="main.html#claim" >main'),
+        "relative path respelled to the same file":
+            ('href="main.html#claim">main', 'href="./main.html#claim">main'),
+    }
+
+    def test_substantive_structure_changes_are_changes(self):
+        for name, (old, new) in self.SUBSTANTIVE.items():
+            with self.subTest(name):
+                d = cited_repo(); edit(d, "motor.html", old, new); sh("git", "add", "-A", cwd=d)
+                out = reconcile_out(d, "docs: x")
+                self.assertRegex(out, r"sealed 1", name)       # the sealed claim is edited
+                self.assertRegex(out, r"neighbor \d", name)     # its dependent is asked
+                commit(d, "docs: out of band")
+                imp = cli(d, "impact", "HEAD~1")[1]
+                self.assertIn("CHANGED motor.html#power", imp, name)
+                self.assertIn("REVIEW main.html#claim  depends-on motor.html#power  [content]", imp, name)
+                self.assertIn("OWED (1)", imp, name)
+
+    def test_cosmetic_markup_changes_are_not(self):
+        for name, (old, new) in self.COSMETIC.items():
+            with self.subTest(name):
+                d = cited_repo(); edit(d, "motor.html", old, new); sh("git", "add", "-A", cwd=d)
+                out = reconcile_out(d, "docs: x")
+                self.assertNotRegex(out, r"sealed \d", name)
+                self.assertNotRegex(out, r"neighbor \d", name)
+                commit(d, "docs: out of band")
+                imp = cli(d, "impact", "HEAD~1")[1]
+                self.assertIn("no element changed since HEAD~1", imp, name)
+                self.assertIn("OWED: none", imp, name)
+
+    def test_evidence_shows_both_when_text_and_destination_change(self):
+        d = cited_repo()
+        edit(d, "motor.html", '<a href="https://x.example/v1">datasheet</a>',
+             '<a href="https://x.example/v2">spec sheet</a>')
+        commit(d, "docs: re-point and relabel")
+        imp = cli(d, "impact", "HEAD~1")[1]
+        self.assertIn("spec sheet", imp)
+        self.assertIn("https://x.example/v2", imp)
+
+    def test_evidence_shows_the_destination_when_text_is_unchanged(self):
+        d = cited_repo(); edit(d, "motor.html", 'x.example/v1', 'x.example/v2')
+        commit(d, "docs: re-point")
+        imp = cli(d, "impact", "HEAD~1")[1]
+        self.assertIn("https://x.example/v1", imp)
+        self.assertIn("https://x.example/v2", imp)
+
+    def test_a_second_repoint_reopens_the_answered_neighbor(self):
+        d = cited_repo(); edit(d, "motor.html", 'x.example/v1', 'x.example/v2')
+        sh("git", "add", "-A", cwd=d); ensure_request(d)
+        reconcile_out(d, "docs: x"); answer_all(d)
+        self.assertEqual(cli(d, "reconcile")[0], 0)              # receipt issued
+        edit(d, "motor.html", 'x.example/v2', 'x.example/v3'); sh("git", "add", "-A", cwd=d)
+        out = cli(d, "reconcile", "--subject", "docs: x")[1]
+        self.assertRegex(out, r"neighbor \d")                    # reviewed v2, not v3
+        self.assertRegex(out, r"sealed 1")
+
+    def test_recorded_review_clears_and_a_later_repoint_owes_again(self):
+        d = cited_repo(); edit(d, "motor.html", 'x.example/v1', 'x.example/v2')
+        commit(d, "docs: re-point")
+        self.assertIn("OWED (1)", cli(d, "impact", "HEAD~1")[1])
+        self.assertEqual(do_review(d, "main.html#claim", message="checked v2")[0], 0)
+        self.assertIn("OWED: none", cli(d, "impact", "HEAD")[1])
+        edit(d, "motor.html", 'x.example/v2', 'x.example/v3'); commit(d, "docs: re-point again")
+        self.assertIn("OWED (1)", cli(d, "impact", "HEAD~1")[1])
+
+
 class G(unittest.TestCase):
     def test_impact_content_change_names_dependent(self):
         d = repo(); edit(d, "motor.html", "120 kW", "105 kW")
@@ -2080,14 +2187,17 @@ class HoldsReview(unittest.TestCase):
         commit_reconciled(d)
         self.assertIn('OWED: none', cli(d, 'impact', 'HEAD')[1])
 
-    def test_link_only_target_change_records_no_review(self):
-        """The obligation follows rendered text; so does the recorded review."""
+    def test_link_only_target_change_records_a_review(self):
+        """The obligation follows the claim's signature — rendered text and
+        cited structure — so a re-pointed link under an unchanged label is a
+        change the dependent's holds answer reviews."""
         d = self.fixture()
         edit(d, 'motor.html', 'see <a href="main.html#claim">main</a>', 'see <a href="main.html#top">main</a>')
         sh('git', 'add', '-A', cwd=d)
         self.assertEqual(settle(d, 'docs: relink')[0], 0)
         receipt = lspec.json.loads(state_file(d, 'receipt.json').read_text())
-        self.assertFalse([t for t in receipt['trailers'] if 'reviewed' in t], receipt['trailers'])
+        self.assertEqual([t for t in receipt['trailers'] if 'reviewed' in t],
+                         ['Reconciled: reviewed main.html#claim'])
 
     def test_plain_link_neighbor_records_no_review(self):
         d = self.fixture()

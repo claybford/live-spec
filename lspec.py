@@ -135,6 +135,7 @@ class Spec(HTMLParser):
         self.bad_sealed = []     # start offsets: data-sealed on an element with no id
         self.watches = []        # (id or None, data-watch-until value, tag)
         self.retired_changes = 0 # data-changes attributes (retired ledger)
+        self.embeds = []         # <img>: {"src", "alt", "src" parent id, "off"}
         self._stack, self._pre = [], 0
         self._spans = {}         # start offset -> end offset, every element
         self._lines = [0]
@@ -171,12 +172,15 @@ class Spec(HTMLParser):
             self.watches.append((eid, a["data-watch-until"] or "", tag))
         if "data-changes" in a:
             self.retired_changes += 1
+        parent = self._stack[-1][1] if self._stack else None
         if tag in VOID:
             if eid and eid not in self.elems:
                 start = self._off()
                 self.elems[eid] = (start, self.raw.find(">", start) + 1)
+            if tag == "img":
+                self.embeds.append({"src": a.get("src") or "", "alt": a.get("alt") or "",
+                                    "parent": eid or parent, "off": self._off()})
             return
-        parent = self._stack[-1][1] if self._stack else None
         self._stack.append((tag, eid or parent, eid, self._off()))
         if tag == "a" and a.get("href"):
             self.links.append({"href": a["href"], "rel": a.get("rel"),
@@ -205,7 +209,7 @@ class Spec(HTMLParser):
 
     # ---- cached form
     FIELDS = ("raw", "body", "ids", "links", "elems", "tags", "count_decls", "bad_deps",
-              "sealed", "bad_sealed", "watches", "retired_changes", "_spans", "_lines")
+              "sealed", "bad_sealed", "watches", "retired_changes", "embeds", "_spans", "_lines")
 
     def fields(self):
         """Everything a parse produced, as plain data (marshal-safe)."""
@@ -234,6 +238,45 @@ class Spec(HTMLParser):
         s, e = self.elems[eid]
         return [l for l in self.links if s <= l["off"] < e]
 
+    def struct(self, eid, own=False):
+        """The claim's cited structure in document order: every link's
+        destination and rel, every image's src and alt. Position is kept, so
+        two links swapping destinations under identical labels still differ.
+        own=True keeps only what this id'd element carries itself."""
+        s, e = self.elems[eid]
+        toks = [(l["off"], "a:" + self.dest(l["href"]) + (" rel=" + l["rel"] if l["rel"] else "")
+                 + " " + repr(self.label(l)))
+                for l in self.links if (l["src"] == eid if own else s <= l["off"] < e)]
+        toks += [(m["off"], "img:" + m["src"].strip() + (" alt=" + m["alt"] if m["alt"] else ""))
+                 for m in self.embeds if (m["parent"] == eid if own else s <= m["off"] < e)]
+        return tuple(t for _, t in sorted(toks))
+
+    def label(self, link):
+        """The words a link anchors: part of what the citation claims."""
+        end = self._spans.get(link["off"])
+        return claim_text(self.raw[link["off"]:end]) if end else ""
+
+    def dest(self, href):
+        """Where HREF points, independent of how it is spelled: an internal
+        destination as a repo-relative address, so a file move that rewrites
+        relative paths changes no claim; an external one as written."""
+        tp, fr = resolve(self.path, href)
+        if tp is None and fr is None:
+            return href.strip()
+        tp = tp or canon(self.path)
+        try:
+            tp = repo_rel(tp) if repo_root() else tp
+        except (RuntimeError, OSError):
+            pass
+        return f"{tp}#{fr}"
+
+    def sig(self, eid):
+        """What a claim says, for every comparison that decides whether it
+        changed: its rendered text plus struct(). Git keeps the ordered HTML;
+        this is only how two versions of it are compared. Cosmetic markup
+        (whitespace, <em>, attribute order) is not part of it."""
+        return (self.text(eid), self.struct(eid)) if eid in self.elems else None
+
     def rows(self, prefix="dl-"):
         """Decision-log rows from the parser's element spans, so attribute
         order and extra attributes on <tr>/<td> cannot hide a row."""
@@ -259,6 +302,30 @@ BLOCK_RE = re.compile(r"</?(?:%s)\b[^>]*>" % "|".join(BLOCK_TAGS), re.I)
 def claim_text(fragment):
     """Normalized rendered text used for every claim comparison."""
     return norm(BLOCK_RE.sub(" ", fragment), sep="")
+
+
+def sig_key(sig):
+    """A signature as one string, for evidence digests."""
+    if sig is None:
+        return ""
+    text, struct = sig
+    return "\0".join([text or "", *struct])
+
+
+def sig_views(before, after):
+    """(was, now) excerpts for a change between two signatures: the rendered
+    text when it differs, else the cited structure, so a review never sees
+    identical evidence for a change the tool reported."""
+    bt, bs = before if before else (None, ())
+    at, as_ = after if after else (None, ())
+    if bs == as_:
+        return bt, at
+    # cited structure differs: show what left and what arrived; a pure
+    # reorder (the same citations in a different order) shows both lists whole
+    gone = [b for b in bs if b not in as_] or list(bs)
+    came = [a for a in as_ if a not in bs] or list(as_)
+    return (f"{bt} [{', '.join(gone)}]" if before else None,
+            f"{at} [{', '.join(came)}]" if after else None)
 
 
 LABEL_RE = re.compile(r"^\s*<code>((?:dl|watch)-[^<]+)</code>")
@@ -961,12 +1028,12 @@ def has_edge(spec, src, hrefs):
 
 
 def target_text_at(commit, a_path, link_href):
-    """Normalized target text at COMMIT, None when the target is absent."""
+    """Target claim signature at COMMIT, None when the target is absent."""
     tp, fr = resolve(a_path, link_href)
     if fr is None:
         return None
     tspec = file_at(commit, tp or a_path)
-    return tspec.text(fr) if tspec is not None and fr in tspec.elems else None
+    return tspec.sig(fr) if tspec is not None and fr in tspec.elems else None
 
 
 def edge_introduction(root, a_path, src, href, floor):
@@ -1556,14 +1623,14 @@ def classify(cur, base):
         return {i: ("added", None) for i in cur.elems}
     base_by_text = {}
     for i in base.elems:
-        base_by_text.setdefault((base.tags.get(i), base.text(i)), []).append(i)
+        base_by_text.setdefault((base.tags.get(i), base.sig(i)), []).append(i)
     claimed = set()
     for i in cur.elems:
         if i in base.elems:
-            out[i] = ("unchanged", None) if cur.text(i) == base.text(i) else \
-                     ("changed", (base.text(i), cur.text(i)))
+            out[i] = ("unchanged", None) if cur.sig(i) == base.sig(i) else \
+                     ("changed", sig_views(base.sig(i), cur.sig(i)))
         else:
-            cands = [b for b in base_by_text.get((cur.tags.get(i), cur.text(i)), [])
+            cands = [b for b in base_by_text.get((cur.tags.get(i), cur.sig(i)), [])
                      if b not in cur.elems and b not in claimed]
             if cands:
                 claimed.add(cands[0])
@@ -1597,7 +1664,7 @@ def target_dirty(path, frag, cache):
             cache[path] = (file_at("HEAD", path), file_staged(path), working)
         except (HistoryUnavailable, OSError):
             return True  # unavailable evidence must not imply a clean target
-    values = [(frag in spec.elems, spec.text(frag)) if spec else (False, None)
+    values = [(frag in spec.elems, spec.sig(frag)) if spec else (False, None)
               for spec in cache[path]]
     return any(value != values[0] for value in values[1:])
 
@@ -1645,16 +1712,16 @@ def owed_reviews(col, dirty_paths=None, basis="HEAD", pending_seeds=()):
                     rec.update(kind="removed", note=f"{addr(tp, fr)} not at {basis}")
                     owed.append(rec); seen[pair] = rec
                     continue
-                btext = bspec.text(fr) if bspec else None
-                htext = hspec.text(fr)
+                btext = bspec.sig(fr) if bspec else None
+                htext = hspec.sig(fr)
                 if btext is None:
                     # id absent at baseline: renamed or new -> address-only if some element had this text
-                    same = [i for i in (bspec.elems if bspec else []) if bspec.text(i) == htext]
+                    same = [i for i in (bspec.elems if bspec else []) if bspec.sig(i) == htext]
                     rec.update(kind="address", note=f"id absent at baseline"
                                + (f" (text matches former {same[0]!r})" if same else ""))
                     owed.append(rec); seen[pair] = rec
                 elif btext != htext:
-                    rec.update(kind="content", note=(btext, htext))
+                    rec.update(kind="content", note=sig_views(btext, htext))
                     owed.append(rec); seen[pair] = rec
                 # moved source: same href in baseline file under a different source id —
                 # reported only when the pair owes nothing else (one line per obligation)
@@ -1845,7 +1912,7 @@ def disappear_cause(r, col):
         staged = spec_at_basis(tp, "staged")
         if bspec is None or fr not in bspec.elems or staged is None or fr not in staged.elems:
             return "clearance cannot be established (target id absent at a tree)", True
-        if bspec.text(fr) == staged.text(fr):
+        if bspec.sig(fr) == staged.sig(fr):
             return "content reverted to baseline", False
         return "clearance cannot be established (text differs without a baseline)", True
     except HistoryUnavailable as e:
@@ -2116,8 +2183,9 @@ class GateContext(SimpleNamespace):
 
 
 def own_parts(spec, eid):
-    """A claim's own text and links, excluding id'd descendants: a container
-    whose only change is inside a nested claim has not itself changed."""
+    """A claim's own text and cited structure (links and images, in order),
+    excluding id'd descendants: a container whose only change is inside a
+    nested claim has not itself changed."""
     s, e = spec.elems[eid]
     inner = sorted(v for i, v in spec.elems.items() if i != eid and s < v[0] and v[1] <= e)
     pieces, pos = [], s
@@ -2127,7 +2195,8 @@ def own_parts(spec, eid):
         pieces.append(spec.raw[pos:a])
         pos = b
     pieces.append(spec.raw[pos:e])
-    links = sorted((l["href"], l["rel"] or "") for l in spec.links if l["src"] == eid)
+    own_links = [l for l in spec.links if l["src"] == eid]
+    links = [(l["href"], l["rel"] or "") for l in sorted(own_links, key=lambda l: l["off"])]
     # <code> is a mention, not a stated value: the seed's status line names the
     # provisional token without stating a provisional value.
     own = re.sub(r"<code\b[^>]*>.*?</code>", " ", " ".join(pieces), flags=re.S)
@@ -2143,7 +2212,8 @@ def changed_claims(head_specs, staged_specs):
         for eid in (ss.elems if ss else {}):
             if hs is None or eid not in hs.elems:
                 out[(p, eid)] = "added"
-            elif own_parts(hs, eid) != own_parts(ss, eid):
+            elif own_parts(hs, eid)[0] != own_parts(ss, eid)[0] \
+                    or hs.struct(eid, own=True) != ss.struct(eid, own=True):
                 out[(p, eid)] = "changed"
         for eid in (hs.elems if hs else {}):
             if ss is None or eid not in ss.elems:
@@ -2676,6 +2746,8 @@ def sealed_cause(ctx, p, i, staged):
         return "data-sealed marker removed"
     if staged.text(i) != ctx.head_specs[p].text(i):
         return "content changed"
+    if staged.sig(i) != ctx.head_specs[p].sig(i):
+        return "cited source changed"
     return None
 
 
@@ -2696,10 +2768,11 @@ def sealed_items(ctx):
             cause = sealed_cause(ctx, p, i, staged)
             if not cause:
                 continue
-            now = staged.text(i) if staged is not None and i in staged.elems else ""
+            now = staged.sig(i) if staged is not None and i in staged.elems else None
+            was, now_view = sig_views(s.sig(i), now)
             out.append(item("sealed", name, f"sealed claim {name}: {cause}", False,
-                            evidence=digest(cause, s.text(i) or "", now or ""),
-                            excerpt=sealed_excerpt(s.text(i), now),
+                            evidence=digest(cause, sig_key(s.sig(i)), sig_key(now)),
+                            excerpt=sealed_excerpt(was, now_view or ""),
                             question=f"{name} is sealed and this commit changes it ({cause}). "
                                      "Is this a decision change (a decision row added or "
                                      "changed in this commit) or a correction (state the reason)?"))
@@ -2725,7 +2798,7 @@ def confirm_items(ctx):
             continue
         now = col.specs[found[0]].text(found[1]) or ""
         it = item("confirm", name, f"sealed correction awaiting confirmation: {name}", False,
-                  evidence=digest(name, sha, now),
+                  evidence=digest(name, sha, sig_key(col.specs[found[0]].sig(found[1]))),
                   excerpt=f"{name} corrected at {sha[:7]} without a decision row \u2014 {reason}\n"
                           f"now: {shorten(now, 300)}",
                   question=f"A previous session corrected sealed claim {name} without naming "
@@ -2887,7 +2960,7 @@ def derived_item(ctx, head):
             continue
         sources.append(f"{label} {addr(p, eid)} ({kind})")
         staged = col.specs.get(p)
-        texts.append(staged.text(eid) or "" if staged and eid in staged.elems else "")
+        texts.append(sig_key(staged.sig(eid)) if staged and eid in staged.elems else "")
         if (p, eid) in linked:
             cited.add(addr(p, eid))
     if not sources:
@@ -2947,9 +3020,10 @@ def neighbor_relations(ctx):
 
 
 def changed_dependencies(ctx, np_, nid):
-    """Targets of NP_#NID's depends-on links whose rendered text this commit
-    changes. The obligation follows rendered text (owed_reviews), so the
-    review a holds answer records does too: a link-only change owes nothing."""
+    """Targets of NP_#NID's depends-on links whose signature (rendered text
+    or cited structure) this commit changes. The obligation follows the
+    signature (owed_reviews), so the review a holds answer records does too:
+    a re-pointed source owes a review, a cosmetic markup edit does not."""
     col = ctx.staged
     out = []
     for l in col.specs[np_].links_in(nid):
@@ -2957,8 +3031,8 @@ def changed_dependencies(ctx, np_, nid):
         tp = tp or np_
         if l["rel"] != "depends-on" or l["src"] != nid or not fr:
             continue
-        was = ctx.head_specs[tp].text(fr) if tp in ctx.head_specs else None
-        if ctx.changed.get((tp, fr)) in ("added", "changed") and was != col.specs[tp].text(fr):
+        was = ctx.head_specs[tp].sig(fr) if tp in ctx.head_specs else None
+        if ctx.changed.get((tp, fr)) in ("added", "changed") and was != col.specs[tp].sig(fr):
             out.append(addr(tp, fr))
     return out
 
@@ -2976,7 +3050,7 @@ def neighbor_items(ctx):
         lines = [f"{name}: {shorten(ntext, 300)}"]
         lines += [f"  {label}: {snippet}" for label, snippet, _ in rels]
         it = item("neighbor", name, f"neighbor {name}", False,
-                  evidence=digest(ntext, *[ev for _, _, ev in rels]),
+                  evidence=digest(sig_key(col.specs[np_].sig(nid)), *[ev for _, _, ev in rels]),
                   excerpt="\n".join(lines),
                   question=f"Does {name} still hold against the changed claims it "
                            "cites or is cited by? If not, fix it in the files.")
@@ -3027,11 +3101,11 @@ def cause_records(ctx):
 
 def claim_rel(ctx, p, eid, how):
     """A neighbor relation to a changed claim: (label, excerpt, evidence)."""
-    was = ctx.head_specs[p].text(eid) if p in ctx.head_specs else None
-    now_text = ctx.staged.specs[p].text(eid)
-    _, now = change_window(was, now_text, 200)
+    was = ctx.head_specs[p].sig(eid) if p in ctx.head_specs else None
+    now_sig = ctx.staged.specs[p].sig(eid)
+    _, now = change_window(*sig_views(was, now_sig), 200)
     return (f"{how} {addr(p, eid)} ({ctx.changed[(p, eid)]})", now,
-            f"{addr(p, eid)}={now_text}")
+            f"{addr(p, eid)}={sig_key(now_sig)}")
 
 
 def unanchored_links(ctx):

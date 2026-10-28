@@ -1763,9 +1763,9 @@ def print_owed(owed, prefix="REVIEW", col=None):
     owed = [r for r in owed if not r.get("incomplete")]
     if not owed:
         if not line:
-            print(f"{title(prefix)} {status('OWED')}: {paint('none', 'green')}")
+            print(f"{title(prefix)} OWED: {paint('none', 'green')}")   # nothing owed: no alarm
         return
-    print(f"{title(prefix)} {status('OWED')} ({len(owed)})")
+    print(paint(f"{prefix} OWED ({len(owed)})", "bold", "yellow"))   # debt: the whole line alarms
     if any(r["kind"] == "unknown" for r in owed):
         hint = command(col, "review", "CLAIM") if col else "lspec review CLAIM"
         print(f"  CLEARANCE {status('UNKNOWN')}: the available history is ambiguous about these edges; "
@@ -1950,8 +1950,8 @@ def retired_dependencies(col):
 
 _COLOR = False            # stdout's decision for this run
 _COLOR_MODE = "auto"      # the --color flag, so another stream can decide for itself
-_SGR = {"bold": "1", "red": "31", "green": "32", "yellow": "33", "magenta": "35",
-        "cyan": "36", "grey": "90"}
+_SGR = {"bold": "1", "red": "31", "green": "32", "yellow": "33", "blue": "34",
+        "magenta": "35", "cyan": "36", "grey": "90"}
 _TONE = {"PASS": "green", "RECEIPT": "green", "HANDOFF": "green",
          "FAIL": "red", "UNKNOWN": "red",
          "OPEN": "yellow", "REOPENED": "yellow", "OWED": "yellow", "UNCOMMITTED": "yellow",
@@ -1983,8 +1983,9 @@ def paint(text, *styles, stream=None):
 
 
 def title(text):
-    """A section title: bold, the words unchanged."""
-    return paint(text, "bold")
+    """A section title: bold and blue, the words unchanged. Blue is the one
+    basic hue no status uses, so a title never reads as a verdict."""
+    return paint(text, "bold", "blue")
 
 
 def status(word):
@@ -3801,8 +3802,9 @@ def print_checklist(col, ctx, items, receipt):
         for it in open_j:
             kinds[it["kind"]] = kinds.get(it["kind"], 0) + 1
         print()
-        print("  judgment items open: " + ", ".join(f"{k} {n}" for k, n in kinds.items())
-              + f" — one at a time, never scripted: {cmd(command(col, 'reconcile', '--next'))}")
+        print("  judgment items open: " + ", ".join(f"{k} {n}" for k, n in kinds.items()))
+        print("    one at a time, never scripted:")
+        print("    " + cmd(command(col, "reconcile", "--next")))
     stale = [it for it in judged if it.get("stale")]
     if stale:
         print()

@@ -321,7 +321,7 @@ class Color(unittest.TestCase):
             self.assertEqual(lspec.status("PASS"), "\x1b[32mPASS\x1b[0m")
             self.assertEqual(lspec.status("FAIL"), "\x1b[31mFAIL\x1b[0m")
             self.assertEqual(lspec.status("plain"), "plain")      # unknown words stay plain
-            self.assertEqual(lspec.title("READ"), "\x1b[1mREAD\x1b[0m")
+            self.assertEqual(lspec.title("READ"), "\x1b[1m\x1b[34mREAD\x1b[0m")
             self.assertNotIn("\x1b[2m", lspec.paint("x", *lspec._SGR))   # no SGR 2 (dim) anywhere
 
     def test_captured_output_carries_no_codes(self):

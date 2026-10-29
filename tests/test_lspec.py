@@ -324,6 +324,20 @@ class Color(unittest.TestCase):
             self.assertEqual(lspec.title("READ"), "\x1b[1m\x1b[34mREAD\x1b[0m")
             self.assertNotIn("\x1b[2m", lspec.paint("x", *lspec._SGR))   # no SGR 2 (dim) anywhere
 
+    def test_review_owed_label_is_one_title(self):
+        """REVIEW OWED colours as one phrase: blue as a title when clear,
+        yellow as an alarm when debt exists; the colon stays outside and the
+        value keeps its own colour."""
+        owed = [{"dependent": ("a.html", "src"), "target": ("b.html", "tgt"),
+                 "kind": "content", "note": ("was", "now")}]
+        with mock.patch.object(lspec, "_COLOR", True):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                lspec.print_owed([])
+                lspec.print_owed(owed)
+        self.assertIn("\x1b[1m\x1b[34mREVIEW OWED\x1b[0m: \x1b[32mnone\x1b[0m", buf.getvalue())
+        self.assertIn("\x1b[1m\x1b[33mREVIEW OWED (1)\x1b[0m", buf.getvalue())
+
     def test_captured_output_carries_no_codes(self):
         """The CLI under redirect_stdout is the agent-harness case: a pipe."""
         d = repo()

@@ -1772,7 +1772,8 @@ def incomplete_line(owed, prefix="REVIEW"):
     if not rows:
         return None
     if rows[0]["incomplete"] == "no commits yet":
-        return f"{prefix} OWED: none yet — no commits; obligations begin at the first commit"
+        return (f"{title(prefix + ' OWED')}: none yet — no commits; "
+                "obligations begin at the first commit")
     dirty = sum(1 for r in rows if r.get("dirty"))
     return (f"{prefix} CLEARANCE UNKNOWN — shallow clone: {len(rows)} depends-on edge(s) "
             f"not evaluated; nothing is owed or cleared until history is complete: {FETCH_HINT}"
@@ -1830,7 +1831,7 @@ def print_owed(owed, prefix="REVIEW", col=None):
     owed = [r for r in owed if not r.get("incomplete")]
     if not owed:
         if not line:
-            print(f"{title(prefix)} OWED: {paint('none', 'green')}")   # nothing owed: no alarm
+            print(f"{title(prefix + ' OWED')}: {paint('none', 'green')}")   # nothing owed: no alarm
         return
     print(paint(f"{prefix} OWED ({len(owed)})", "bold", "yellow"))   # debt: the whole line alarms
     if any(r["kind"] == "unknown" for r in owed):

@@ -28,6 +28,13 @@ from unittest import mock
 os.environ.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import lspec
+from datetime import timedelta
+
+# A fixture that must be "not yet expired" takes a date past any clock the suite
+# runs under, computed, so no literal silently crosses into the past (five
+# 2026-11-04 literals read as a time bomb until a moved-clock run showed none
+# is load-bearing; this keeps it that way).
+FUTURE = (lspec.datetime.now().date() + timedelta(days=3650)).isoformat()
 
 TIER = os.environ.get("LSPEC_TIER", "all")
 if TIER not in ("fast", "git", "acceptance", "all"):
@@ -175,7 +182,7 @@ class T(unittest.TestCase):
         self.assertEqual(rc, 1); self.assertIn('[label] main.html: dl-x first cell opens with no label', out)
         rc, out = run(main_extra='<tr id="dl-x"><td><code>dl-y</code> wrong</td><td>r</td><td>w</td></tr>')
         self.assertEqual(rc, 1); self.assertIn('opens with <code>dl-y</code>', out)
-        rc, out = run(motor_extra='<table><tr id="watch-fan" data-watch-until="2026-11-04"><td>fan</td><td>b</td><td>c</td></tr></table>')
+        rc, out = run(motor_extra='<table><tr id="watch-fan" data-watch-until="' + FUTURE + '"><td>fan</td><td>b</td><td>c</td></tr></table>')
         self.assertEqual(rc, 1); self.assertIn('[label] motor.html: watch-fan', out)
         rc, out = run(main_extra='<tr id="dl-x"><td><code>dl-x</code> labeled</td><td>r</td><td>w</td></tr>')
         self.assertEqual(rc, 0, out)
@@ -3522,6 +3529,383 @@ class DerivedView(unittest.TestCase):
         self.assertNotIn('derived', [i['kind'] for i in evaluate_in(d, 'review: main.html#claim')[1]])
 
 
+# ------------------------------------------------ consolidated view check (dl-viewcheck)
+
+LONG = "x" * 600
+
+
+class ConsolidatedView(unittest.TestCase):
+    """dl-viewcheck: status-view-to-source relationships are checked by the
+    derived item, with the status line and its sources as evidence; they are
+    not neighbor items. Independently triggered neighbor relationships are
+    unchanged. Pilot runs 2026-10-30/31: 21-22 status back-edge items per
+    status-touching commit, replaced by one item at no loss on the fixtures."""
+
+    def fixture(self, long_x=False, extra_link=False):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        decision_row(d, 'dl-x', cells=((LONG if long_x else 's'), 'r', 'w'))
+        decision_row(d, 'dl-y', cells=(LONG, 'r', 'w'))
+        edit(d, 'main.html', '<p id="status">Status: forward design. Locked: nothing. Open: nothing. Top risk: none.</p>',
+             '<p id="status">Status: forward design.<br>Locked: <a href="#dl-x">dl-x</a>, <a href="#dl-y">dl-y</a>.'
+             '<br>Open: nothing.</p>'
+             + ('<p id="cite">The plan rests on <a href="#dl-x">dl-x</a>.</p>' if extra_link else ''))
+        commit(d, 'docs: link the status line')
+        ensure_request(d)
+        return d
+
+    def test_status_only_change_triggers_the_view_check_and_no_back_edge_neighbors(self):
+        d = self.fixture()
+        edit(d, 'main.html', 'Status: forward design.<br>', 'Status: forward design, converging.<br>')
+        sh('git', 'add', '-A', cwd=d)
+        items = evaluate_in(d, 'docs: reword')[1]
+        kinds = [i['kind'] for i in items]
+        self.assertIn('derived', kinds)
+        self.assertNotIn('neighbor', kinds)                  # dl-x, dl-y: not asked as neighbors
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertTrue(it['status_only'])
+        self.assertIn('bootloader main.html#status (changed)', it['excerpt'])
+        self.assertIn('was: Status: forward design.', it['excerpt'])
+        self.assertIn('now: Status: forward design, converging.', it['excerpt'])
+        self.assertIn('every source the status line links (2)', it['excerpt'])
+
+    def test_a_removed_clause_keeps_its_former_sources_whole(self):
+        d = self.fixture(long_x=True)
+        edit(d, 'main.html', '<br>Locked: <a href="#dl-x">dl-x</a>, <a href="#dl-y">dl-y</a>.', '')
+        sh('git', 'add', '-A', cwd=d)
+        it = next(i for i in evaluate_in(d, 'docs: drop the lock')[1] if i['kind'] == 'derived')
+        # the line no longer links dl-x, so it is not in the staged source list; its
+        # former text is still what the removed clause asserted about, shown via was:
+        self.assertIn('was: Status: forward design. Locked: dl-x, dl-y.', it['excerpt'])
+        self.assertIn('sources a changed or removed clause linked at HEAD, no longer linked (2)', it['excerpt'])
+        self.assertIn('main.html#dl-x: dl-x ' + LONG, it['excerpt'])         # whole, not capped
+        self.assertNotIn('every source the status line links', it['excerpt'])  # nothing is linked now
+
+    def test_a_changed_source_is_shown_whole_when_the_status_text_is_unchanged(self):
+        d = self.fixture(long_x=True)
+        edit(d, 'main.html', '<code>dl-x</code> ' + LONG, '<code>dl-x</code> ' + LONG + ' changed')
+        sh('git', 'add', '-A', cwd=d)
+        it = next(i for i in evaluate_in(d, 'docs: change x')[1] if i['kind'] == 'derived')
+        self.assertFalse(it['status_only'])
+        self.assertEqual(it['cited'], ['main.html#dl-x'])
+        self.assertIn('main.html#dl-x (changed): dl-x ' + LONG + ' changed', it['excerpt'])   # whole
+        self.assertRegex(it['excerpt'], r"main\.html#dl-y: dl-y x{300,}.*\[\+\d+ chars: .*show '?main\.html#dl-y'?\]")  # capped, with the route
+
+    def test_an_independent_neighbor_relationship_survives_the_suppression(self):
+        d = self.fixture(extra_link=True)
+        edit(d, 'main.html', 'Status: forward design.<br>', 'Status: forward design, converging.<br>')
+        sh('git', 'add', '-A', cwd=d)
+        self.assertEqual([i['kind'] for i in evaluate_in(d, 'docs: reword')[1] if i['kind'] == 'neighbor'], [])
+        edit(d, 'main.html', 'The plan rests on', 'The whole plan rests on')
+        sh('git', 'add', '-A', cwd=d)
+        nb = [i for i in evaluate_in(d, 'docs: reword and cite')[1] if i['kind'] == 'neighbor']
+        self.assertEqual([i['key'] for i in nb], ['neighbor:main.html#dl-x'])
+        self.assertIn('cited by main.html#cite', nb[0]['excerpt'])
+        self.assertNotIn('main.html#status', nb[0]['excerpt'])        # only the independent relation
+
+    def test_consistent_reopens_when_the_view_or_a_source_changes(self):
+        d = self.fixture()
+        edit(d, 'main.html', 'Status: forward design.<br>', 'Status: forward design, converging.<br>')
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = settle(d, 'docs: reword', answers={'derived': ['consistent', 'Locked', 'clause', 'against', 'dl-x']})
+        self.assertEqual(rc, 0, out)
+        self.assertIn('Reconciled: bootloader consistent \u2014 Locked clause against dl-x',
+                      lspec.compose_message(lspec.json.loads(state_file(d, 'receipt.json').read_text())))
+        edit(d, 'main.html', 'converging.<br>', 'converging now.<br>'); sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'reconcile')
+        self.assertEqual(rc, 1); self.assertIn('derived 1', out)      # reopened by the view edit
+        answer_all(d, {'derived': ['consistent', 'Locked', 'clause', 'rechecked']})
+        self.assertEqual(cli(d, 'reconcile')[0], 0)
+        edit(d, 'main.html', '<code>dl-x</code> s', '<code>dl-x</code> s2'); sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'reconcile')
+        self.assertEqual(rc, 1); self.assertIn('derived 1', out)      # reopened by the source edit
+
+    def test_consistent_cannot_replace_an_answer_a_source_change_requires(self):
+        d = self.fixture()
+        edit(d, 'main.html', '<code>dl-x</code> s', '<code>dl-x</code> s, changed'); sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: change x')
+        it = next(i for i in items if i['kind'] == 'derived')
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            with self.assertRaisesRegex(ValueError, 'consistent is for a changed status line'):
+                lspec.validate(it, given(['consistent', 'it', 'still', 'matches']), ctx, set())
+            with self.assertRaisesRegex(ValueError, 'unaffected is refused'):          # as at HEAD
+                lspec.validate(it, given(['unaffected', 'nothing', 'cites', 'it']), ctx, set())
+            self.assertEqual(lspec.validate(it, {'answer': 'rederived'}, ctx, set())[1],
+                             'Reconciled: bootloader rederived')
+        finally:
+            os.chdir(cwd)
+        # and on a status-only change, unaffected is refused: the line itself moved
+        edit(d, 'main.html', '<code>dl-x</code> s, changed', '<code>dl-x</code> s')
+        edit(d, 'main.html', 'Status: forward design.<br>', 'Status: forward design, converging.<br>')
+        sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: reword')
+        it = next(i for i in items if i['kind'] == 'derived')
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            with self.assertRaisesRegex(ValueError, 'status line itself changed'):
+                lspec.validate(it, given(['unaffected', 'nothing', 'has', 'moved']), ctx, set())
+        finally:
+            os.chdir(cwd)
+
+    def test_a_mixed_edit_cannot_answer_unaffected_for_a_changed_status_line(self):
+        """A status edit plus an unlinked source change: the status line's
+        neighbor items are suppressed, so the view item must still refuse
+        unaffected; consistent stays legal while no linked source changed,
+        and is refused once one does."""
+        d = self.fixture()
+        edit(d, 'main.html', 'Status: forward design.<br>', 'Status: nothing remains locked.<br>')
+        decision_row(d, 'dl-z'); sh('git', 'add', '-A', cwd=d)          # unlinked row: a source, not cited
+        ctx, items, _ = evaluate_in(d, 'docs: mixed')
+        self.assertEqual([i for i in items if i['kind'] == 'neighbor'], [])
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertFalse(it['status_only']); self.assertTrue(it['status_changed']); self.assertNotIn('cited', it)
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            with self.assertRaisesRegex(ValueError, 'status line itself changed'):
+                lspec.validate(it, given(['unaffected', 'dl-z', 'is', 'not', 'linked']), ctx, set())
+            self.assertEqual(lspec.validate(it, given(['consistent', 'Locked', 'clause', 'checked']), ctx, set())[1],
+                             'Reconciled: bootloader consistent \u2014 Locked clause checked')
+        finally:
+            os.chdir(cwd)
+        edit(d, 'main.html', '<code>dl-x</code> s', '<code>dl-x</code> s, changed'); sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: mixed with a linked change')
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertEqual(it['cited'], ['main.html#dl-x'])
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            with self.assertRaisesRegex(ValueError, 'consistent is for'):
+                lspec.validate(it, given(['consistent', 'Locked', 'clause', 'checked']), ctx, set())
+            with self.assertRaisesRegex(ValueError, 'status line itself changed'):
+                lspec.validate(it, given(['unaffected', 'nothing', 'to', 'see']), ctx, set())
+        finally:
+            os.chdir(cwd)
+
+    def test_a_nested_edit_in_the_status_line_counts_as_a_status_change(self):
+        """ctx.changed attributes an id'd descendant's change to the descendant,
+        not the line; the view item keys on the whole signature instead, for
+        the trigger, the evidence and the answer rules (watch-viewbind)."""
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        decision_row(d, 'dl-x'); decision_row(d, 'dl-y'); decision_row(d, 'dl-z', cells=('z', 'r', 'w'))
+        edit(d, 'main.html', '<p id="status">Status: forward design. Locked: nothing. Open: nothing. Top risk: none.</p>',
+             '<p id="status">Status: forward design.<br><span id="lock-summary">Locked: <a href="#dl-x">dl-x</a></span>.'
+             '<br>Open: nothing.</p>')
+        commit(d, 'docs: nested status'); ensure_request(d)
+        # nested text change, alone
+        edit(d, 'main.html', 'Locked: <a href="#dl-x">dl-x</a></span>', 'Nothing remains locked: <a href="#dl-x">dl-x</a></span>')
+        sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: nested text')
+        self.assertNotIn(('main.html', 'status'), ctx.changed)                 # the blind spot, as inherited
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertTrue(it['status_changed']); self.assertTrue(it['status_only'])
+        self.assertIn('was: Status: forward design. Locked: dl-x. Open: nothing.', it['excerpt'])
+        self.assertIn('now: Status: forward design. Nothing remains locked: dl-x. Open: nothing.', it['excerpt'])
+        self.assertEqual([i for i in items if i['kind'] == 'neighbor'], [])
+        # mixed with an unlinked source change: unaffected still refused
+        edit(d, 'main.html', '<code>dl-z</code> z', '<code>dl-z</code> z2'); sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: nested text plus z')
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertTrue(it['status_changed']); self.assertFalse(it['status_only'])
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            with self.assertRaisesRegex(ValueError, 'status line itself changed'):
+                lspec.validate(it, given(['unaffected', 'dl-z', 'is', 'unlinked']), ctx, set())
+        finally:
+            os.chdir(cwd)
+        # nested citation change under an unchanged label: a status change, no back-edge neighbor
+        edit(d, 'main.html', '<code>dl-z</code> z2', '<code>dl-z</code> z')
+        edit(d, 'main.html', 'Nothing remains locked: <a href="#dl-x">dl-x</a>', 'Locked: <a href="#dl-y">dl-x</a>')
+        sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: nested citation')
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertTrue(it['status_changed'])
+        self.assertIn('main.html#dl-y: dl-y', it['excerpt'])                 # the new source, shown
+        self.assertEqual([i for i in items if i['kind'] == 'neighbor'], [])  # lock-summary's link is the line's
+
+    def test_a_nested_edit_in_a_linked_source_counts_as_a_source_change(self):
+        """A linked source moved when its whole signature did, descendants
+        included: the view item fires, cites it, shows it whole, and refuses
+        unaffected and consistent alike (watch-viewbind)."""
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        decision_row(d, 'dl-x', cells=('x is <span id="x-state">locked</span>', 'r', 'w'))
+        decision_row(d, 'dl-z', cells=('z', 'r', 'w'))
+        edit(d, 'main.html', 'Locked: nothing.', 'Locked: <a href="#dl-x">dl-x</a>.')
+        commit(d, 'docs: lock x'); ensure_request(d)
+        edit(d, 'main.html', '<span id="x-state">locked</span>', '<span id="x-state">open</span>')
+        sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: nested source')
+        self.assertNotIn(('main.html', 'dl-x'), ctx.changed)                  # the inherited blind spot
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertEqual(it['cited'], ['main.html#dl-x'])
+        self.assertIn('decision row main.html#dl-x (changed)', it['excerpt'])
+        self.assertIn('main.html#dl-x (changed): dl-x x is open', it['excerpt'])
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            with self.assertRaisesRegex(ValueError, 'unaffected is refused'):
+                lspec.validate(it, given(['unaffected', 'nothing', 'moved', 'here']), ctx, set())
+            with self.assertRaisesRegex(ValueError, 'consistent is for'):
+                lspec.validate(it, given(['consistent', 'Locked', 'clause', 'checked']), ctx, set())
+        finally:
+            os.chdir(cwd)
+        # with an unlinked change and a status edit too: still only rederived
+        edit(d, 'main.html', '<code>dl-z</code> z', '<code>dl-z</code> z2')
+        edit(d, 'main.html', 'Status: forward design.', 'Status: forward design, converging.')
+        sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: mixed')
+        it = next(i for i in items if i['kind'] == 'derived')
+        self.assertTrue(it['status_changed']); self.assertEqual(it['cited'], ['main.html#dl-x'])
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            with self.assertRaisesRegex(ValueError, 'status line itself changed'):
+                lspec.validate(it, given(['unaffected', 'dl-z', 'is', 'unlinked']), ctx, set())
+            with self.assertRaisesRegex(ValueError, 'consistent is for'):
+                lspec.validate(it, given(['consistent', 'Locked', 'clause', 'checked']), ctx, set())
+            self.assertEqual(lspec.validate(it, {'answer': 'rederived'}, ctx, set())[1],
+                             'Reconciled: bootloader rederived')
+        finally:
+            os.chdir(cwd)
+
+    def test_a_redirected_citation_with_an_unchanged_label_reopens_the_answer(self):
+        """The digest binds the status line's cited structure, not only its
+        text: re-pointing a citation while keeping its label is a change."""
+        d = self.fixture()
+        edit(d, 'main.html', '<br>Open: nothing.</p>', '<br>Open: nothing.<br>Top risk: <a href="#dl-x">the x lock</a>.</p>')
+        commit(d, 'docs: risk clause')
+        edit(d, 'main.html', 'Status: forward design.<br>', 'Status: forward design, converging.<br>')
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = settle(d, 'docs: reword', answers={'derived': ['consistent', 'Locked', 'clause', 'against', 'dl-x']})
+        self.assertEqual(rc, 0, out)
+        edit(d, 'main.html', 'Top risk: <a href="#dl-x">the x lock</a>', 'Top risk: <a href="#dl-y">the x lock</a>')
+        sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'reconcile')
+        self.assertEqual(rc, 1); self.assertIn('derived 1', out)      # rendered text identical; structure moved
+
+    def test_a_review_commit_keeps_the_status_lines_neighbor_checks(self):
+        """A review: commit gets no view item (as at HEAD), so the status
+        line's source relationships stay neighbor items there: a changed
+        status is never checked by nothing."""
+        d = self.fixture()
+        edit(d, 'main.html', 'Locked: <a href="#dl-x">dl-x</a>,', 'Locked: <a rel="depends-on" href="#dl-x">dl-x</a>,')
+        commit(d, 'docs: status depends on x')
+        edit(d, 'main.html', '<code>dl-x</code> s', '<code>dl-x</code> s, changed'); commit(d, 'docs: change x')
+        edit(d, 'main.html', 'Status: forward design.<br>', 'Status: forward design, reviewed.<br>')
+        sh('git', 'add', '-A', cwd=d)
+        items = evaluate_in(d, 'review: main.html#status')[1]
+        kinds = [i['kind'] for i in items]
+        self.assertNotIn('derived', kinds)
+        nb = sorted(i['key'] for i in items if i['kind'] == 'neighbor')
+        self.assertEqual(nb, ['neighbor:main.html#dl-x', 'neighbor:main.html#dl-y'])
+        self.assertTrue(all('cited by main.html#status' in i['excerpt'] for i in items if i['kind'] == 'neighbor'))
+        # and the same change under a docs: subject is covered by the view item instead
+        items = evaluate_in(d, 'docs: reword')[1]
+        self.assertIn('derived', [i['kind'] for i in items])
+        self.assertEqual([i for i in items if i['kind'] == 'neighbor'], [])
+
+    def test_former_sources_are_found_through_the_parser_whatever_the_markup(self):
+        """Single-quoted hrefs and <br/> spellings: the parser's links, not a
+        double-quote regex, decide which former sources a removed clause had."""
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        decision_row(d, 'dl-x', cells=(LONG, 'r', 'w'))
+        edit(d, 'main.html', '<p id="status">Status: forward design. Locked: nothing. Open: nothing. Top risk: none.</p>',
+             "<p id=\"status\">Status: forward design.<br/>Locked: <a href='#dl-x'>dl-x</a>.<BR />Open: nothing.</p>")
+        commit(d, 'docs: odd markup'); ensure_request(d)
+        edit(d, 'main.html', "<br/>Locked: <a href='#dl-x'>dl-x</a>.", '')
+        sh('git', 'add', '-A', cwd=d)
+        it = next(i for i in evaluate_in(d, 'docs: drop the lock')[1] if i['kind'] == 'derived')
+        self.assertIn('no longer linked (1)', it['excerpt'])
+        self.assertIn('main.html#dl-x: dl-x ' + LONG, it['excerpt'])
+
+
+    def test_a_link_outside_the_collection_is_not_a_source(self):
+        """A status-line citation to a file the collection does not parse
+        (rel=external) cannot be compared, so it never reports as added nor
+        fires the view item on every later commit."""
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        edit(d, 'main.html', 'Top risk: none.',
+             'Top risk: <a rel="external" href="other.html#x">outside</a>.')
+        Path(d, 'other.html').write_text('<p id="x">outside</p>')
+        commit(d, 'docs: cite outside'); ensure_request(d)
+        edit(d, 'motor.html', '120 kW', '121 kW'); sh('git', 'add', '-A', cwd=d)
+        self.assertEqual([i for i in evaluate_in(d, 'docs: unrelated')[1]
+                          if i['kind'] == 'derived'], [])
+
+    def test_the_question_offers_exactly_what_validate_accepts(self):
+        """The question keys on a changed line and cited sources, as the answer
+        rules do: a status edit mixed with an unlinked change is asked for
+        consistent, not unaffected; a changed line with a changed linked source
+        is asked only to re-derive; a source-only move still offers unaffected."""
+        d = self.fixture()
+        edit(d, 'main.html', 'Status: forward design.<br>', 'Status: nothing remains locked.<br>')
+        decision_row(d, 'dl-z'); sh('git', 'add', '-A', cwd=d)
+        it = next(i for i in evaluate_in(d, 'docs: mixed')[1] if i['kind'] == 'derived')
+        self.assertFalse(it['status_only'])
+        self.assertEqual(it['title'], 'does the status line match its sources?')
+        self.assertIn('Answer consistent', it['question']); self.assertNotIn('unaffected', it['question'])
+        edit(d, 'main.html', '<code>dl-x</code> s', '<code>dl-x</code> s, changed'); sh('git', 'add', '-A', cwd=d)
+        it = next(i for i in evaluate_in(d, 'docs: mixed and cited')[1] if i['kind'] == 'derived')
+        self.assertEqual(it['title'], 'is the bootloader re-derived?')
+        self.assertIn('answer rederived', it['question'])
+        self.assertNotIn('unaffected', it['question']); self.assertNotIn('consistent', it['question'])
+        edit(d, 'main.html', 'Status: nothing remains locked.<br>', 'Status: forward design.<br>')
+        sh('git', 'add', '-A', cwd=d)
+        it = next(i for i in evaluate_in(d, 'docs: source only')[1] if i['kind'] == 'derived')
+        self.assertIn('unaffected by this change', it['question'])
+
+
+class TickShowsNext(unittest.TestCase):
+    """--tick answers its item and then prints the next open one exactly as
+    --next would, so an agent needs no --next between answers; once nothing
+    is open it prints the checklist and the receipt instead."""
+
+    def test_each_tick_prints_the_next_item_until_the_checklist(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        decision_row(d, 'dl-x')
+        edit(d, 'main.html', 'Locked: nothing.', 'Locked: <a href="#dl-x">dl-x</a>.')
+        commit(d, 'docs: lock x'); ensure_request(d)
+        edit(d, 'main.html', '<code>dl-x</code> s', '<code>dl-x</code> s, changed'); sh('git', 'add', '-A', cwd=d)
+        rc, out = cli(d, 'reconcile', '--subject', 'docs: change x')
+        self.assertIn('each --tick then shows the next', out)          # the checklist points at the flow
+        rc, out = cli(d, 'reconcile', '--next')
+        self.assertIn('no --next is needed between answers', out)      # and so does every item
+        shown = 0
+        for n in range(20):
+            tok = re.search(r'token: (\w+)', out)
+            if not tok:
+                break
+            shown_item = out[out.index('ITEM '):]                     # past any 'answered [...]' line
+            kind = re.search(r'ITEM \d+ of \d+ \[(\w+)\]', shown_item).group(1)
+            rc, out = cli(d, 'reconcile', '--tick', tok.group(1),
+                          *reply_argv(d, shown_item, DEFAULT_ANSWERS[kind](n)))
+            self.assertIn('answered [' + kind + ']', out)
+            if 'token:' in out:
+                shown += 1
+                self.assertEqual(rc, 1)
+                self.assertNotIn('CHECKLIST', out)                     # the item, not the checklist
+                nxt = cli(d, 'reconcile', '--next')[1]
+                self.assertEqual(re.search(r'token: (\w+)', out).group(1),
+                                 re.search(r'token: (\w+)', nxt).group(1))   # the item --next shows
+        else:
+            self.fail('checklist did not converge')
+        self.assertGreaterEqual(shown, 1, 'the fixture must have two or more judgment items')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('CHECKLIST', out); self.assertIn('RECEIPT', out)
+
+    def test_a_refused_answer_prints_no_next_item(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        decision_row(d, 'dl-x'); commit(d, 'docs: x'); ensure_request(d)
+        edit(d, 'main.html', '<code>dl-x</code> s', '<code>dl-x</code> s, changed'); sh('git', 'add', '-A', cwd=d)
+        cli(d, 'reconcile', '--subject', 'docs: change x')
+        out = cli(d, 'reconcile', '--next')[1]
+        tok = re.search(r'token: (\w+)', out).group(1)
+        rc, out = cli(d, 'reconcile', '--tick', tok, '--answer', 'no-such-answer')
+        self.assertNotEqual(rc, 0); self.assertNotIn('token:', out)
+
 # ---------------------------------------------------- re-seed gate (bench #4 C10)
 
 class Reseed(unittest.TestCase):
@@ -4549,20 +4933,20 @@ class Checklist(unittest.TestCase):
                       cli(d, 'reconcile', '--next')[1])
 
     def test_watch_entries_are_rows_with_the_watch_prefix(self):
-        rc, out = run(motor_extra='<table><tr id="w-fan" data-watch-until="2026-11-04">'
+        rc, out = run(motor_extra='<table><tr id="w-fan" data-watch-until="' + FUTURE + '">'
                                   '<td>a</td><td>b</td><td>c</td></tr></table>')
         self.assertEqual(rc, 1); self.assertIn('[watch] motor.html: data-watch-until on #w-fan', out)
-        rc, out = run(motor_extra='<p id="watch-x" data-watch-until="2026-11-04">x</p>')
+        rc, out = run(motor_extra='<p id="watch-x" data-watch-until="' + FUTURE + '">x</p>')
         self.assertEqual(rc, 1); self.assertIn('it belongs on a watch entry', out)
-        rc, out = run(motor_extra='<table><tr id="watch-fan" data-watch-until="2026-11-04">'
+        rc, out = run(motor_extra='<table><tr id="watch-fan" data-watch-until="' + FUTURE + '">'
                                   '<td><code>watch-fan</code> a</td><td>b</td><td>c</td></tr></table>')
         self.assertEqual(rc, 0, out)
         d = self.fixture()
-        edit(d, 'motor.html', '</main>', '<table><tr id="watch-a" data-watch-until="2026-11-04">'
+        edit(d, 'motor.html', '</main>', '<table><tr id="watch-a" data-watch-until="' + FUTURE + '">'
              '<td><code>watch-a</code> a</td><td>b</td><td>c</td></tr><tr id="watch-b"><td><code>watch-b</code> a</td><td>b</td><td>c</td>'
              '</tr></table></main>')
         commit(d, 'docs: two watches')
-        line = 'WATCH ENTRIES (2):\n  motor.html#watch-a (until 2026-11-04)\n  motor.html#watch-b'
+        line = 'WATCH ENTRIES (2):\n  motor.html#watch-a (until ' + FUTURE + ')\n  motor.html#watch-b'
         self.assertIn(line, cli(d, 'start')[1])
         self.assertIn(line, cli(d, 'finish')[1])
 

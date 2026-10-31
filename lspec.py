@@ -2148,7 +2148,7 @@ ANSWERS = {
     "sealed": {"decision": (True, False), "correction": (False, True)},
     "confirm": {"confirmed": (False, True)},
     "reseed": {"reseed": (False, True)},
-    "derived": {"rederived": (False, False), "unaffected": (False, True)},
+    "derived": {"rederived": (False, False), "consistent": (False, True), "unaffected": (False, True)},
     "removed": {"replaced": (True, False), "retired": (False, True)},
     "cause": {"established": (True, True), "unverified": (True, False),
               "recurrence": (True, False)},
@@ -2169,6 +2169,7 @@ REF_NAMES = {"read-whole": "ID", "decision": "ROW", "replaced": "ROW", "establis
 # session's confirmation: --ref is optional, and the two forms differ in effect.
 REF_OPTIONAL = {"correction"}
 WAIVABLE = ("caveat", "placeholder", "empty")
+VIEW_SOURCE_CAP = 400   # chars of a linked source shown on the view item when no clause under test links it
 QUESTION_ORDER = ("read", "reseed", "caveat", "placeholder", "empty", "sealed", "confirm",
                   "removed", "cause", "watched", "decided", "derived", "neighbor")
 # Sealed records in commit trailers, newest first decides a claim's state.
@@ -2929,64 +2930,192 @@ def asked_items(ctx, head, records):
 
 def derived_item(ctx, head):
     """The bootloader is a derived view of the lock, open and risk lists
-    (P14, dl-bootloader): when a source moves — any element a status line
-    links, in any file of the collection, or a watch entry, decision row or
-    sealed claim added, changed or removed — the line is regenerated whole,
-    or the commit says why it is unaffected. A linked source is a source by
-    construction, whatever its id, so unaffected is refused for it; the
-    contract's row types catch additions the line does not link yet. Asked
-    of every commit but a review; bench #4 left the line stale in 2/6 cells
-    (dl-asked)."""
+    (P14, dl-bootloader). One item checks it against its sources, asked when
+    a source moves — any element a status line links, in any file of the
+    collection, or a watch entry, decision row or sealed claim added, changed
+    or removed — and, since dl-viewcheck, when the status line itself
+    changes. Its evidence is the whole status line (was/now when changed)
+    and every source it links: whole for a source a changed or removed
+    clause links or that itself changed, else its opening with a route to
+    the rest. Status-view-to-source relationships are checked here and not
+    as neighbor items (neighbor_relations, dl-viewcheck). A linked source is
+    a source by construction, whatever its id, so unaffected is refused for
+    it, and for a status line that itself changed; `consistent` is legal only
+    for a changed status line whose linked sources did not change, so it never
+    replaces an answer a source change required. Asked of every commit but a
+    review; bench #4 left the line stale in 2/6 cells (dl-asked)."""
     col = ctx.staged
     if subject_type(ctx.subject, "review") is not None:
         return None
     status = [(p, s) for p, s in col.specs.items() if "status" in s.elems]
-    # What each status line links, resolved across files: (path, id) -> citing line.
-    linked = {}
+    # What each status line links, resolved across files, in document order.
+    linked, linked_by = [], {}
     for p, s in status:
         for l in s.links_in("status"):
             tp, fr = resolve(p, l["href"])
-            if fr:
-                linked.setdefault((tp or p, fr), addr(p, "status"))
+            tp = tp or p
+            # A target outside the collection (a rel=external file) is not a
+            # source this tool can read or compare; including it would report
+            # it added on every commit.
+            if fr and (tp in col.specs or tp in ctx.head_specs) \
+                    and (tp, fr) not in linked_by:
+                linked_by[(tp, fr)] = addr(p, "status")
+                linked.append((tp, fr))
+    # A linked source moved when its whole signature did, descendants
+    # included; ctx.changed attributes a nested edit to the child (watch-viewbind).
+    def source_kind(tp, fr):
+        hs = ctx.head_specs.get(tp)
+        if hs is None or fr not in hs.elems:
+            return "added"
+        if tp not in col.specs or fr not in col.specs[tp].elems:
+            return "removed"
+        return "changed" if hs.sig(fr) != col.specs[tp].sig(fr) else None
+    moved_sources = {(tp, fr): source_kind(tp, fr) for (tp, fr) in linked}
+    moved_sources = {k: v for k, v in moved_sources.items() if v}
     sources, texts, cited = [], [], set()
-    for (p, eid), kind in sorted(ctx.changed.items()):
+    seen_changed = dict(ctx.changed)
+    for k, v in moved_sources.items():
+        seen_changed.setdefault(k, v)
+    for (p, eid), kind in sorted(seen_changed.items()):
         if eid == "status":
             continue
         spec = col.specs.get(p) or ctx.head_specs.get(p)
         label = ("watch entry" if eid.startswith(WATCH_PREFIX) else
                  "decision row" if eid.startswith("dl-") else
                  "sealed claim" if spec is not None and eid in spec.sealed else
-                 "linked source" if (p, eid) in linked else None)
+                 "linked source" if (p, eid) in linked_by else None)
         if not label:
             continue
         sources.append(f"{label} {addr(p, eid)} ({kind})")
         staged = col.specs.get(p)
         texts.append(sig_key(staged.sig(eid)) if staged and eid in staged.elems else "")
-        if (p, eid) in linked:
+        if (p, eid) in linked_by and (p, eid) in moved_sources:
             cited.add(addr(p, eid))
-    if not sources:
+    # A status line changed when its whole signature did: text and cited
+    # structure including id'd descendants, which ctx.changed attributes to
+    # the descendant and not to the line (watch-viewbind).
+    def moved(p, s):
+        if p not in ctx.head_specs or "status" not in ctx.head_specs[p].elems:
+            return True
+        return ctx.head_specs[p].sig("status") != s.sig("status")
+    status_changed = [(p, s) for p, s in status if moved(p, s)]
+    if not sources and not status_changed:
         return None
-    view = "".join(f"\nbootloader {addr(p, 'status')}"
-                   f"{' (' + ctx.changed[(p, 'status')] + ')' if (p, 'status') in ctx.changed else ''}: "
-                   f"{shorten(s.text('status') or '', 300)}" for p, s in status) \
-        or "\nbootloader: the top matter (no element with id status)"
-    # The answer is bound to what it reviewed: the sources' staged text and the
-    # status line itself, so a later edit to either reopens the question.
-    bound = texts + [s.text("status") or "" for _, s in status]
-    # A status line that links a changed source is affected by construction:
-    # unaffected is refused for it (bench watch-unaffected).
+    # The view, whole: a clause under test must not be truncated away.
+    view, whole = [], set()
+    for p, s in status:
+        now = s.text("status") or ""
+        if (p, s) in status_changed and p in ctx.head_specs and "status" in ctx.head_specs[p].elems:
+            was_raw = ctx.head_specs[p].raw[slice(*ctx.head_specs[p].elems["status"])]
+            now_raw = s.raw[slice(*s.elems["status"])]
+            view.append(f"bootloader {addr(p, 'status')} (changed)")
+            view.append("  was: " + (ctx.head_specs[p].text("status") or ""))
+            view.append("  now: " + now)
+            for href in changed_clause_links(ctx.head_specs[p], s, "status"):
+                tp, fr = resolve(p, href)
+                if fr:
+                    whole.add((tp or p, fr))
+        else:
+            view.append(f"bootloader {addr(p, 'status')}{' (added)' if (p, s) in status_changed else ''}: {now}")
+    if not status:
+        view.append("bootloader: the top matter (no element with id status)")
+    for (tp, fr) in linked:
+        if (tp, fr) in moved_sources:
+            whole.add((tp, fr))
+    # The answer is bound to what it reviewed: the status line's text AND its
+    # cited structure (a redirected citation with an unchanged label is a
+    # change), and each linked source's identity and signature.
+    bound = texts + [sig_key(s.sig("status")) for _, s in status]
+    if linked:
+        view.append(f"every source the status line links ({len(linked)}), as staged"
+                    + (f"; whole where a changed or removed clause links it or the source itself changed ({len(whole & set(linked))})"
+                       if whole & set(linked) else "") + ":")
+    for tp, fr in linked:
+        if tp not in col.specs or fr not in col.specs[tp].elems:
+            view.append(f"  {addr(tp, fr)}: (missing — the link does not resolve)")
+            continue
+        t = col.specs[tp].text(fr) or ""
+        bound.append(f"{addr(tp, fr)}={sig_key(col.specs[tp].sig(fr))}")
+        kind = moved_sources.get((tp, fr))
+        tag = f" ({kind})" if kind else ""
+        if (tp, fr) in whole or len(t) <= VIEW_SOURCE_CAP:
+            view.append(f"  {addr(tp, fr)}{tag}: {t}")
+        else:
+            view.append(f"  {addr(tp, fr)}{tag}: {t[:VIEW_SOURCE_CAP]} [+{len(t) - VIEW_SOURCE_CAP} chars: "
+                        + command(col, "show", addr(tp, fr)) + "]")
+    # Former sources: a removed or re-pointed clause's targets no longer linked.
+    former = [(tp, fr) for (tp, fr) in sorted(whole) if (tp, fr) not in linked_by]
+    if former:
+        view.append(f"sources a changed or removed clause linked at HEAD, no longer linked ({len(former)}), as staged:")
+        for tp, fr in former:
+            if tp in col.specs and fr in col.specs[tp].elems:
+                t = col.specs[tp].text(fr) or ""
+                bound.append(f"{addr(tp, fr)}={sig_key(col.specs[tp].sig(fr))}")
+                view.append(f"  {addr(tp, fr)}: {t}")
+            else:
+                view.append(f"  {addr(tp, fr)}: (not in the staged collection)")
     cited = sorted(cited)
-    it = item("derived", "bootloader", "is the bootloader re-derived?", False,
-                evidence=digest(head, *sources, *bound),
-                excerpt="\n".join(sources) + view,
-                question="These sources of the bootloader moved. Was the status line re-derived "
-                         "whole from the locked list, open table and top-risk source (answer "
-                         "rederived, after doing it in the files), or is it unaffected by this "
-                         "change (state why)?")
+    status_only = bool(status_changed) and not sources
+    # The question offers exactly the answers validate accepts: keyed, like
+    # them, on a changed line and on cited sources, not on status_only.
+    checkable = bool(status_changed) and not cited
+    if checkable:
+        question = ("The status line is a derived view (P14): each clause restates a source it "
+                    "links, shown above. Check every clause against its source. Answer consistent "
+                    "(state the clause and source you checked most closely) when the line matches "
+                    "every source, rederived if you regenerated it whole in this commit; a clause "
+                    "that misstates its source: fix the line.")
+    elif status_changed:
+        question = ("The status line changed and so did a source it links. Re-derive the line "
+                    "whole from the locked list, open table and top-risk source, in the files, and "
+                    "answer rederived.")
+    else:
+        question = ("These sources of the bootloader moved. Was the status line re-derived whole "
+                    "from the locked list, open table and top-risk source (answer rederived, after "
+                    "doing it in the files), or is it unaffected by this change (state why)?")
+    it = item("derived", "bootloader",
+              "does the status line match its sources?" if checkable else "is the bootloader re-derived?",
+              False, evidence=digest(head, *sources, *bound),
+              excerpt="\n".join(sources + view), question=question)
+    it["status_only"] = status_only
+    it["status_changed"] = bool(status_changed)
     if cited:
         it["cited"] = cited
         it["excerpt"] += "\nthe status line links changed source(s): " + ", ".join(cited)
     return it
+
+
+BR = re.compile(r"<br\s*/?>", re.I)
+
+
+def changed_clause_links(head_spec, staged_spec, eid):
+    """hrefs of the parser's links inside the <br>-delimited clauses of EID
+    that a change touched, in both the HEAD and the staged markup, so a
+    removed clause's former sources are included (dl-viewcheck). Links come
+    from the parser, not a regex, so quoting style cannot hide one."""
+    import difflib
+    out = []
+    spans = [(sp, sp.raw[slice(*sp.elems[eid])], sp.elems[eid][0]) for sp in (staged_spec, head_spec)]
+    (now_sp, now_raw, now_base), (was_sp, was_raw, was_base) = spans
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, was_raw, now_raw).get_opcodes():
+        if tag == "equal":
+            continue
+        for sp, raw, base, a, b in ((now_sp, now_raw, now_base, j1, j2), (was_sp, was_raw, was_base, i1, i2)):
+            brs = [(m.start(), m.end()) for m in BR.finditer(raw)]
+            lo = max([e for s_, e in brs if s_ < a], default=0)
+            hi = min([s_ for s_, e in brs if s_ >= b], default=len(raw))
+            out += [l["href"] for l in sp.links_in(eid) if base + lo <= l["off"] < base + hi]
+    return out
+
+
+def within_status(spec, eid):
+    """EID is the status line or an id'd element nested in it: its links are
+    the derived view's own (dl-viewcheck)."""
+    if "status" not in spec.elems or eid not in spec.elems:
+        return False
+    s0, e0 = spec.elems["status"]
+    s1, e1 = spec.elems[eid]
+    return s0 <= s1 and e1 <= e0
 
 
 def neighbor_relations(ctx):
@@ -3000,6 +3129,9 @@ def neighbor_relations(ctx):
     for (p, eid), kind in ctx.changed.items():
         if kind == "removed" or p not in col.specs:
             continue
+        if within_status(col.specs[p], eid) and subject_type(ctx.subject, "review") is None:
+            continue   # status-view-to-source relationships: derived_item (dl-viewcheck);
+                       # a review: commit gets no view item, so its neighbors stay
         for l in col.specs[p].links:
             if l["src"] != eid:
                 continue
@@ -3422,6 +3554,14 @@ def validate(it, given, ctx, other_reasons):
     if kind == "derived":
         if answer == "rederived":
             return [answer], "Reconciled: bootloader rederived"
+        if answer == "consistent":
+            if not it.get("status_changed") or it.get("cited"):
+                raise ValueError("consistent is for a changed status line whose linked sources did not "
+                                 "change: re-derive the line and answer rederived, or unaffected with why")
+            return [answer, text], f"Reconciled: bootloader consistent \u2014 {text}"
+        if it.get("status_changed"):
+            raise ValueError("the status line itself changed in this commit: unaffected is refused; "
+                             "check each clause against its source and answer consistent or rederived")
         if it.get("cited"):
             raise ValueError("the status line links " + ", ".join(it["cited"]) + ", which this "
                              "commit changed: unaffected is refused; re-derive it and answer rederived")
@@ -3878,7 +4018,7 @@ def print_checklist(col, ctx, items, receipt):
             kinds[it["kind"]] = kinds.get(it["kind"], 0) + 1
         print()
         print("  judgment items open: " + ", ".join(f"{k} {n}" for k, n in kinds.items()))
-        print("    one at a time, never scripted:")
+        print("    one at a time, never scripted; start with the first, and each --tick then shows the next:")
         print("    " + cmd(command(col, "reconcile", "--next")))
     stale = [it for it in judged if it.get("stale")]
     if stale:
@@ -3898,6 +4038,45 @@ def print_checklist(col, ctx, items, receipt):
         print()
         print("Fix the mechanical items in the files, restage, and rerun "
               + cmd(command(col, "reconcile")) + ".")
+
+
+def print_next(col, judged):
+    """Print the first open judgment item of JUDGED — evidence, question,
+    token and legal answers — for --next, and after a --tick. False when
+    none is open."""
+    open_j = [it for it in judged if it["status"] == "open"]
+    if not open_j:
+        return False
+    it = open_j[0]
+    done = len(judged) - len(open_j)
+    print()
+    print(f"{title(f'ITEM {done + 1} of {len(judged)}')} [{it['kind']}] {it['title']}")
+    if it.get("stale"):
+        print(f"  earlier answer no longer valid: {it['stale']}")
+    print()
+    print("  evidence:")
+    for line in it["excerpt"].splitlines():
+        print("    " + line)
+    print()
+    print("  question: " + it["question"])
+    tok = token(it)
+    print(f"  token: {tok}")
+    print()
+    print("  answer with one of:")
+    for form in legal_forms(it["kind"], bool(it.get("probe"))):
+        if it["kind"] == "derived" and "rederived" not in form:
+            ok = ((bool(it.get("status_changed")) and not it.get("cited")) if "consistent" in form
+                  else not it.get("status_changed"))
+            if not ok:
+                continue   # consistent: changed line, linked sources still; unaffected: line unchanged
+        print("    " + cmd(command(col, "reconcile", "--tick", tok) + " " + form))
+    print()
+    print("  The --tick prints the next open item, or the checklist and receipt once none "
+          "is left: no --next is needed between answers.")
+    print("  Answer this item from the evidence above. Never script the "
+          "--next/--tick loop, answer items in bulk, or tick an item you have "
+          "not read: that is lying about having done the check.")
+    return True
 
 
 def cmd_reconcile(args):
@@ -3929,32 +4108,9 @@ def cmd_reconcile(args):
               file=sys.stderr)
         return 1
     if args.next:
-        open_j = [it for it in judged if it["status"] == "open"]
-        if not open_j:
+        if not print_next(col, judged):
             print("no judgment items open")
         else:
-            it = open_j[0]
-            done = len(judged) - len(open_j)
-            print()
-            print(f"{title(f'ITEM {done + 1} of {len(judged)}')} [{it['kind']}] {it['title']}")
-            if it.get("stale"):
-                print(f"  earlier answer no longer valid: {it['stale']}")
-            print()
-            print("  evidence:")
-            for line in it["excerpt"].splitlines():
-                print("    " + line)
-            print()
-            print("  question: " + it["question"])
-            tok = token(it)
-            print(f"  token: {tok}")
-            print()
-            print("  answer with one of:")
-            for form in legal_forms(it["kind"], bool(it.get("probe"))):
-                print("    " + cmd(command(col, "reconcile", "--tick", tok) + " " + form))
-            print()
-            print("  Answer this item from the evidence above. Never script the "
-                  "--next/--tick loop, answer items in bulk, or tick an item you have "
-                  "not read: that is lying about having done the check.")
             return 0
     if args.tick:
         tok = args.tick
@@ -3987,6 +4143,10 @@ def cmd_reconcile(args):
             print(f"answered [{it['kind']}] {it['title']}: {' '.join(answer)}")
             ctx, items, state = evaluate(col, ctx=ctx)
     receipt = issue_or_clear(col, ctx, items, state)
+    # A tick shows the next open item itself, saving a --next round trip; the
+    # checklist (mechanical items, receipt) prints once nothing is left to answer.
+    if args.tick and print_next(col, [it for it in items if not it["mech"]]):
+        return 1
     print_checklist(col, ctx, items, receipt)
     return 0 if receipt else 1
 
@@ -4782,7 +4942,8 @@ Judgment items are answered one at a time: --next shows the first open item,
 its evidence, the question, a token for that item alone and one ready command
 per legal answer; --tick TOKEN --answer ANSWER answers it, with --ref ID or
 --reason "TEXT" where the answer needs one (reasons: three words or more, not
-another item's). Each answer is recorded as a Reconciled: trailer.
+another item's), then shows the next open item the way --next does, or the
+checklist once none is left. Each answer is recorded as a Reconciled: trailer.
   read         main, every edited collection file, and files holding targets of
                their dependencies: read-whole --ref ID, the id directly after the
                probed id in document order; a wrong id moves the probe. One
@@ -4808,8 +4969,13 @@ another item's). Each answer is recorded as a Reconciled: trailer.
   derived      a source the status line links (any file), or a watch entry,
                decision row or sealed claim, changed: was the bootloader
                re-derived whole? rederived | unaffected --reason; unaffected
-               is refused when a status element links a changed source
-  neighbor     each unchanged claim one hop from a changed one: holds (else fix the
+               is refused when a status element links a changed source. The
+               status line itself changed with no source moved: does each
+               clause match its source, all shown? consistent --reason |
+               rederived. Status-view-to-source relationships are checked
+               here, not as neighbor items (dl-viewcheck)
+  neighbor     each unchanged claim one hop from a changed one, the status
+               line's own links excepted (derived): holds (else fix the
                file). On a dependent of a target this commit changed, holds is the
                review: the trailer Reconciled: reviewed PATH#ID is the edge's
                baseline, as a review: commit would be.""",
@@ -4901,7 +5067,7 @@ def main(argv):
     g.add_argument("--subject", help="the commit subject: one typed transition line")
     g.add_argument("--body", help="commit body (review and seed assessments)")
     g.add_argument("--next", action="store_true", help="show one open judgment item and its token")
-    g.add_argument("--tick", metavar="TOKEN", help="answer the item whose token this is")
+    g.add_argument("--tick", metavar="TOKEN", help="answer the item whose token this is, then show the next open one")
     g.add_argument("--answer", help="the answer (see --next for the legal answers)")
     g.add_argument("--ref", metavar="ID", help="the row or watch entry the answer names")
     g.add_argument("--reason", metavar="TEXT", help="the reason, quoted")

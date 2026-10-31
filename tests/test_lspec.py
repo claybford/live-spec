@@ -345,6 +345,42 @@ class Color(unittest.TestCase):
         self.assertIn("\x1b[1m\x1b[34mREVIEW OWED\x1b[0m: \x1b[32mnone\x1b[0m", buf.getvalue())
         self.assertIn("\x1b[1m\x1b[33mREVIEW OWED (1)\x1b[0m", buf.getvalue())
 
+    def test_item_evidence_uses_the_console_palette(self):
+        """The generated evidence lines carry the report's palette: a
+        bootloader subhead blue, old values grey, new values bold, change tags
+        yellow, addresses bold, broken links red."""
+        with mock.patch.object(lspec, "_COLOR", True):
+            self.assertEqual(
+                lspec.evidence_line("bootloader main.html#status (changed)"),
+                "\x1b[1m\x1b[34mbootloader\x1b[0m "
+                "\x1b[1mmain.html#status\x1b[0m \x1b[33m(changed)\x1b[0m")
+            self.assertEqual(lspec.evidence_line("  now: Status: live."),
+                             "  \x1b[1mnow:\x1b[0m Status: live.")
+            self.assertEqual(lspec.evidence_line("  was: Status: draft."),
+                             "  \x1b[90mwas:\x1b[0m Status: draft.")
+            line = lspec.evidence_line("main.html#dl-x (changed): text")
+            self.assertIn("\x1b[1mmain.html#dl-x\x1b[0m", line)
+            self.assertIn("\x1b[33m(changed)\x1b[0m", line)
+            self.assertIn("\x1b[31mmissing — the link does not resolve\x1b[0m",
+                          lspec.evidence_line(
+                              "  main.html#gone: missing — the link does not resolve"))
+
+    def test_item_header_colours_kind_and_title(self):
+        it = lspec.item("derived", "bootloader", "is the bootloader re-derived?", False,
+                        excerpt="bootloader main.html#status (changed)", question="q?")
+        it["status"] = "open"
+        with mock.patch.object(lspec, "_COLOR", True), \
+                mock.patch.object(lspec, "command", lambda *a: "python3 lspec.py"):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertTrue(lspec.print_next(None, [it]))
+        out = buf.getvalue()
+        self.assertIn("\x1b[1m\x1b[34mITEM 1 of 1\x1b[0m", out)
+        self.assertIn("\x1b[90m[derived]\x1b[0m", out)
+        self.assertIn("\x1b[1m\x1b[34mis the bootloader re-derived?\x1b[0m", out)
+        self.assertIn("\x1b[90mevidence:\x1b[0m", out)
+        self.assertIn("\x1b[90mtoken:\x1b[0m", out)
+
     def test_captured_output_carries_no_codes(self):
         """The CLI under redirect_stdout is the agent-harness case: a pipe."""
         d = repo()

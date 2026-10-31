@@ -2067,6 +2067,52 @@ def cmd(text):
     return paint(text, "cyan")
 
 
+CHANGE_TAG = re.compile(r"\((?:added|changed|removed)\)")
+EVIDENCE_ADDR = re.compile(r"[\w./-]+#[\w.-]+")
+TRUNCATED = re.compile(r"^(\s*)(.*?)(\[\+\d+ chars: )(.*)\]$")
+EVIDENCE_KINDS = ("decision row", "watch entry", "sealed claim", "linked source")
+MISSING_LINK = "missing — the link does not resolve"
+
+
+def style_inline(text):
+    """Colour an evidence line's generated tokens: change tags yellow,
+    addresses bold, a broken link red. Free text passes through."""
+    text = CHANGE_TAG.sub(lambda m: paint(m.group(0), "yellow"), text)
+    text = EVIDENCE_ADDR.sub(lambda m: paint(m.group(0), "bold"), text)
+    if MISSING_LINK in text:
+        text = text.replace(MISSING_LINK, paint(MISSING_LINK, "red"))
+    return text
+
+
+def evidence_line(line):
+    """An evidence line, coloured by its generated shape; the words never
+    change. The derived view, sealed excerpts and row lists all route here."""
+    m = re.match(r"^(\s*)(was|now):(.*)$", line)
+    if m:
+        tone = "grey" if m.group(2) == "was" else "bold"
+        return m.group(1) + paint(m.group(2) + ":", tone) + style_inline(m.group(3))
+    if line.startswith("bootloader "):
+        return (paint("bootloader", "bold", "blue") + " "
+                + style_inline(line[len("bootloader "):]))
+    if line.startswith(("every source the status line links",
+                        "sources a changed or removed clause linked")):
+        return title(line)
+    if line.startswith("the status line links changed source(s):"):
+        lead, _, rest = line.partition(":")
+        return paint(lead + ":", "yellow") + style_inline(rest)
+    prefix = ""
+    for kind in EVIDENCE_KINDS:
+        if line.startswith(kind + " "):
+            prefix = paint(kind, "grey")
+            line = line[len(kind):]
+            break
+    m = TRUNCATED.match(line)
+    if m:
+        return (prefix + m.group(1) + style_inline(m.group(2))
+                + paint(m.group(3), "grey") + cmd(m.group(4)) + paint("]", "grey"))
+    return prefix + style_inline(line)
+
+
 def deliver(path, raw):
     """Print a spec whole between header and end lines (show FILE)."""
     r = rel(path)
@@ -4009,7 +4055,8 @@ def print_checklist(col, ctx, items, receipt):
     if mech:
         print()
     for it in mech:
-        print(f"  {status('OPEN')} [{it['kind']}] {it['title']}")
+        print(f"  {status('OPEN')} {paint('[' + it['kind'] + ']', 'grey')} "
+              f"{paint(it['title'], 'bold')}")
         if it["detail"]:
             print(paint(f"    {it['detail']}", "grey"))
     if open_j:
@@ -4024,7 +4071,8 @@ def print_checklist(col, ctx, items, receipt):
     if stale:
         print()
     for it in stale:
-        print(f"  {status('REOPENED')} [{it['kind']}] {it['title']}: {it['stale']}")
+        print(f"  {status('REOPENED')} {paint('[' + it['kind'] + ']', 'grey')} "
+              f"{paint(it['title'], 'bold')}: {it['stale']}")
     if ctx.notes:
         print()
     for n in ctx.notes:
@@ -4050,19 +4098,20 @@ def print_next(col, judged):
     it = open_j[0]
     done = len(judged) - len(open_j)
     print()
-    print(f"{title(f'ITEM {done + 1} of {len(judged)}')} [{it['kind']}] {it['title']}")
+    print(f"{title(f'ITEM {done + 1} of {len(judged)}')} "
+          f"{paint('[' + it['kind'] + ']', 'grey')} {title(it['title'])}")
     if it.get("stale"):
-        print(f"  earlier answer no longer valid: {it['stale']}")
+        print(f"  {paint('earlier answer no longer valid:', 'yellow')} {it['stale']}")
     print()
-    print("  evidence:")
+    print(f"  {paint('evidence:', 'grey')}")
     for line in it["excerpt"].splitlines():
-        print("    " + line)
+        print("    " + evidence_line(line))
     print()
-    print("  question: " + it["question"])
+    print(f"  {paint('question:', 'grey')} {it['question']}")
     tok = token(it)
-    print(f"  token: {tok}")
+    print(f"  {paint('token:', 'grey')} {paint(tok, 'bold')}")
     print()
-    print("  answer with one of:")
+    print(f"  {paint('answer with one of:', 'grey')}")
     for form in legal_forms(it["kind"], bool(it.get("probe"))):
         if it["kind"] == "derived" and "rederived" not in form:
             ok = ((bool(it.get("status_changed")) and not it.get("cited")) if "consistent" in form

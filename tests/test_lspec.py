@@ -144,20 +144,39 @@ class T(unittest.TestCase):
         rc, out = run(files={"stray.html": "<p>x</p>"})
         self.assertEqual(rc, 0); self.assertIn("disconnected", out)
 
-    def test_independent_main_is_not_noted(self):
-        """A4: a disconnected file that declares its own commit vocabulary is
-        another collection's main (a supporting spec may not declare one), so
-        it and its collection are independent by construction — no note."""
-        other = ('<html><body><main><p id="status">Status: other.</p><p id="c">Types: <code data-commit-types>docs fix seed audit review'
-                 '</code></p><table><tr id="dl-split-sub"><td><code>dl-split-sub</code> <a href="sub.html">sub.html</a>'
-                 ' holds it</td><td>keep</td><td>why.</td></tr></table></main></body></html>')
-        files = {"bench/other.html": other, "bench/sub.html": '<p id="s">sub</p>',
+    OTHER = ('<html><body><main><p id="status">Status: other.</p><p id="c">Types: <code data-commit-types>docs fix seed audit review'
+             '</code></p><table><tr id="dl-split-sub"><td><code>dl-split-sub</code> <a href="sub.html">sub.html</a>'
+             ' holds it</td><td>keep</td><td>why.</td></tr></table></main></body></html>')
+
+    def test_second_operating_main_is_refused(self):
+        """dl-onemain: a stray file declaring its own commit vocabulary outside
+        imports/ is a second operating main, a failure — not an independent
+        collection to be quietly walked (that walk recursed: watch-twomains)."""
+        files = {"bench/other.html": self.OTHER, "bench/sub.html": '<p id="s">sub</p>',
                  "bench/stray.html": "<p>x</p>"}
         rc, out = run(files=files)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("bench/other.html declares its own commit vocabulary", out)
+        self.assertIn("one operating main per repository", out)
+        self.assertIn("bench/stray.html is not linked", out)   # still a note
+
+    def test_two_mains_in_one_directory_do_not_recurse(self):
+        """watch-twomains: before dl-onemain, main.html and other.html each
+        found the other stray and built its collection, without end."""
+        rc, out = run(files={"other.html": self.OTHER, "sub.html": '<p id="s">sub</p>'})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("other.html declares its own commit vocabulary", out)
+        self.assertNotIn("recursion", out)
+
+    def test_main_under_imports_is_imported_content(self):
+        """dl-importdir: a main under imports/ is an imported unit whose
+        declarations are inert here — no second-main failure; unreached, it
+        is noted like any stray until its split row lands."""
+        rc, out = run(files={"imports/rules/other.html": self.OTHER,
+                             "imports/rules/sub.html": '<p id="s">sub</p>'})
         self.assertEqual(rc, 0, out)
-        self.assertNotIn("other.html", out)
-        self.assertNotIn("sub.html", out)                 # its collection too
-        self.assertIn("bench/stray.html is not linked", out)  # an undeclared file still is
+        self.assertNotIn("second operating main", out)
+        self.assertIn("imports/rules/other.html is not linked", out)
 
     def test_two_parents(self):
         rc, out = run(motor_extra='<table><tr id="dl-split-again"><td><code>dl-split-again</code> <a href="main.html">m</a></td><td>r</td><td>w</td></tr></table>')

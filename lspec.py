@@ -1290,18 +1290,24 @@ class Collection:
         root = os.path.dirname(self.main)
         stray = [fp for fp in html_files(root, self.basis)
                  if fp not in self.specs and fp not in self.orphans]
-        # A stray file declaring its own commit vocabulary is another
-        # collection's main (a supporting spec may not declare one), so it and
-        # what its split rows reach are independent by construction: nothing to
-        # note, and no manifest needed to say so (dl-graphderived).
-        independent = set()
+        # One operating main per repository (reuse.html dl-onemain): a stray
+        # file declaring its own commit vocabulary outside imports/ is a second
+        # operating main, refused. Under imports/ it is imported content — a
+        # mirrored main's declarations are inert there (dl-importdir). Nothing
+        # recurses into another file's collection: two mains in one directory
+        # once built each other without end (watch-twomains).
+        self.disconnected = []
         for fp in stray:
-            if fp in independent:
+            if under_imports(fp, root):
+                self.disconnected.append(fp)
                 continue
             s, err = self._read(fp)
             if s is not None and not err and commit_type_decls(s):
-                independent |= set(Collection(fp, basis=self.basis).specs)
-        self.disconnected = [fp for fp in stray if fp not in independent]
+                self.fails.append(f"[collection] {rel(fp)} declares its own commit vocabulary: "
+                                  f"a second operating main — one operating main per repository; "
+                                  f"another repository's main is imported under {IMPORTS_DIR}/")
+            else:
+                self.disconnected.append(fp)
 
     # ---- addressing
     def parse_target(self, target):
@@ -1332,6 +1338,16 @@ class Collection:
         for fp, l, tp, fr in self.edges():
             if l["rel"] == "depends-on":
                 yield fp, l, tp, fr
+
+
+IMPORTS_DIR = "imports"   # imported units live under imports/<name>/ beside main (dl-importdir)
+
+
+def under_imports(path, root):
+    """PATH lies under ROOT's imports/ folder: imported content, never an
+    operating main of this repository."""
+    base = canon(os.path.join(root, IMPORTS_DIR))
+    return canon(path).startswith(base + os.sep)
 
 
 def html_files(root, basis="worktree"):
@@ -5040,9 +5056,10 @@ command for a follow-up.""",
 
 "check": """\
 Validates structure: anchors, ids, counts, cell caps, row labels, markers.
-Notes an .html file under main's directory that the collection does not reach,
-unless it declares its own data-commit-types (another instance's main: independent
-by construction). --staged validates the index; --template skips the
+Notes an .html file under main's directory that the collection does not reach;
+one that declares its own data-commit-types outside imports/ is a second
+operating main and fails (one operating main per repository; another
+repository's main is imported under imports/). --staged validates the index; --template skips the
 [ADAPT]/[PROJECT] gate; --diff BASE and --neighborhood TARGET print neighborhoods;
 --clean lists staged, unstaged and untracked files repo-wide (silent, 0 when none).
 Hooks do not clone; run check in CI.""",

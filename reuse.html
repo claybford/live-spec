@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<!-- Reuse and composition: how a living specification's content moves between repositories. A supporting spec of live-spec.html by its split row (dl-split-reuse). -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Living Specification - reuse and composition</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css">
+</head>
+<body>
+
+<main>
+
+<h1 id="top">The Living Specification &mdash; Reuse and Composition</h1>
+<p id="about">A <a href="live-spec.html#v-supporting">supporting spec</a> of <a href="live-spec.html#top">live-spec.html</a>, which is the entry point and holds the state; this file exists by its split row there (<a href="live-spec.html#dl-split-reuse">dl-split-reuse</a>). It holds the rules under which one collection's content is taken up by another repository: importing, exporting, graduating a supporting spec, and copying a main to start a new project (<a href="live-spec.html#dl-reuse">dl-reuse</a>). Read it whole when a move does any of those, or changes the tool's import, export or graduation surface; a session maintaining main does not load it. Decisions establish the required behavior stated here; the tool establishes actual behavior, and where they differ the gap is an open item (<a href="#open-reuse-tool">open-reuse-tool</a>, <a href="live-spec.html#p7">P7</a>).</p>
+
+<hr>
+<h2 id="routes">The routes</h2>
+<p>Reusable content is any subject-shaped knowledge a collection holds: principles, criteria, values, decisions with their reasons, scope boundaries, and deliberately unresolved parameters. Its origin does not limit where it applies. Four routes move it, each with its own continuing relationship (<a href="#dl-settings">dl-settings</a>, <a href="#dl-export">dl-export</a>, <a href="#dl-graduate">dl-graduate</a>, <a href="#dl-copymain">dl-copymain</a>):</p>
+<ul id="route-list" data-count="routes">
+  <li><strong><a href="#import">Import</a></strong> &mdash; adopt a subject or component maintained upstream; source, revision, settings and update lineage are recorded.</li>
+  <li><strong><a href="#export">Export</a></strong> &mdash; transfer selected subject knowledge once, without restructuring the source; no continuing obligation either way.</li>
+  <li><strong><a href="#graduation">Graduation</a></strong> &mdash; give a supporting spec its own operational life in its own repository; the former parent becomes an importer.</li>
+  <li><strong><a href="#copy">Copy a main</a></strong> &mdash; start a new project from project-shaped inherited material; the source is provenance, not an upstream.</li>
+</ul>
+<p>Preparing material for reuse takes no route of its own: author it whole-cloth, or pinch a subject off into a supporting spec (a <a href="live-spec.html#v-splitrow">split row</a> at its parent, <a href="live-spec.html#p19">P19</a>). A pinched-off spec stays in its collection while other repositories import it; reuse alone never requires graduation. Whole-cloth content need not carry <code data-literal>[ADAPT]</code> slots; an extracted spec ordinarily carries actual values, and introducing slots is a deliberate generalization.</p>
+
+<hr>
+<h2 id="vocab">Vocabulary</h2>
+<table>
+<thead><tr><th>Term</th><th>Definition</th></tr></thead>
+<tbody>
+<tr id="v-import"><td><strong>Import</strong></td><td>The relationship between an <em>importer</em> (the adopting repository) and <em>upstream</em> (the repository the content comes from). The <em>imported unit</em> is what is taken (<a href="#dl-settings">dl-settings</a>).</td></tr>
+<tr id="v-edits"><td><strong>Edits setting</strong></td><td><em>Mirrored</em>: the importer never edits its copy. <em>Melded</em>: the importer owns its copy and may edit it. Explicit on every import; neither is a default.</td></tr>
+<tr id="v-version"><td><strong>Version setting</strong></td><td><em>Pinned</em>: the import stays at its recorded upstream revision until a deliberate upgrade. <em>Tracking</em>: the importer undertakes to follow upstream, with checks at <code>start</code> and explicit updates (<a href="#dl-tracking">dl-tracking</a>).</td></tr>
+<tr id="v-opmain"><td><strong>Operating main</strong></td><td>The one main per repository whose status line, open items, watches and commit rules are live there (<a href="#dl-onemain">dl-onemain</a>). An imported main is not one: mirrored, its declarations are inert text; melded, it is demoted (<a href="#v-demotion">demotion</a>).</td></tr>
+<tr id="v-demotion"><td><strong>Demotion</strong></td><td>Turning a melded imported main into a supporting spec in place: its operating declarations removed, its content and obligations the importer's. The reverse of graduation (<a href="#dl-demote">dl-demote</a>).</td></tr>
+<tr id="v-slot"><td><strong>Slot</strong></td><td>A deliberate <code data-literal>[ADAPT]</code> choice in imported content, answered by the importer (<a href="#slots">parameters</a>).</td></tr>
+<tr id="v-answer"><td><strong>Answer</strong></td><td>The importer's own claim resolving a slot, with its status and provenance, linked to the slot by an <em>answering</em> link distinct from <code>depends-on</code> (<a href="#dl-slots">dl-slots</a>).</td></tr>
+</tbody>
+</table>
+<p>Describe a relationship by its settings &mdash; &ldquo;the camper imports electrical mirrored, pinned&rdquo; &mdash; never by a verb on the imported thing. Frozen, adapted, forked, owned and editable are not setting names (<a href="#dl-settings">dl-settings</a>).</p>
+
+<hr>
+<h2 id="onemain">One operating main per repository</h2>
+<p id="onemain-rule">A repository has exactly one <a href="#v-opmain">operating main</a>. Importing exists only between repositories: an independently operating collection requires its own repository, with or without a remote. Collection discovery treats everything under <code>imports/</code> as imported content, never as an operating main (<a href="#dl-onemain">dl-onemain</a>, <a href="#dl-importdir">dl-importdir</a>).</p>
+
+<hr>
+<h2 id="import">Import</h2>
+
+<h3 id="unit">The unit matches the need</h3>
+<p id="unit-rule">The imported unit is one of: a single subject-shaped supporting file; a main whose whole content is the consumed subject (a free-standing rules set, <a href="#dl-rulesset">dl-rulesset</a>); or a whole collection integrated as a component. The importer never takes a broader collection to reach one tangled-in part: it waits for upstream to pinch off or graduate the subject. Adoption answers one judgment the tool cannot infer &mdash; <em>is the whole imported unit the subject or component you are adopting?</em> &mdash; and records it (<a href="#dl-unit">dl-unit</a>). A navigation link with <code>rel="external"</code> leaves another collection independent and establishes no import.</p>
+
+<h3 id="record">The receiving split row and the import folder</h3>
+<p id="record-rule">Each import is justified by a split row at the importer (<a href="live-spec.html#v-splitrow">split row</a>) recording the upstream source, the adopted revision, the edits setting, the version setting and the adoption reason, with the alternatives rejected. The selection cell links exactly one file, the unit's entry file at its imported path; the upstream reference lives in another cell. The recorded revision is the upstream revision the local copy descends from &mdash; for a melded import the merge base, not a claim that local bytes equal upstream's (<a href="#dl-versionrec">dl-versionrec</a>).</p>
+<p id="folder-rule">Each import lives in <code>imports/&lt;name&gt;/</code>, the name chosen by the importer and stable across updates, with upstream's internal layout preserved so its relative links resolve without rewriting mirrored bytes. The importer links into imported claims by ordinary paths, <code>imports/electrical/battery.html#capacity</code>. A melded main is demoted at that path; its supporting files keep their positions (<a href="#dl-importdir">dl-importdir</a>).</p>
+
+<h3 id="selection">File selection</h3>
+<p id="selection-rule">The importer names one entry file in an upstream repository at a revision. The unit is that file; everything reachable from it through split rows (<a href="live-spec.html#p19">P19</a>), upstream's own imports included; and every other file of that repository those spec files link, so mirrored internal links do not break. External URLs are unchanged; everything else stays behind, upstream's tool copy included &mdash; the importer carries its own (<a href="live-spec.html#dl-rule-locality">dl-rule-locality</a>). The tool lists the selection before writing anything (<a href="#dl-selection">dl-selection</a>). For a melded import this is the starting copy, and the meld commit leaves every link in the melded content resolving in the importer &mdash; keep the file, re-point the link, or drop it.</p>
+
+<h3 id="participation">Participation follows the edits setting</h3>
+<p>Both settings include imported files in the receiving collection for reading and dependency purposes; the importer may link <code>depends-on</code> to any imported claim, an imported main's included, and a changed target owes review. There is no third participation switch (<a href="#dl-participation">dl-participation</a>).</p>
+<table id="participation-table">
+<thead><tr><th>Concern</th><th>Mirrored</th><th>Melded</th></tr></thead>
+<tbody>
+<tr><td>Local edits</td><td>Prohibited; changes arrive only by upgrade</td><td>Permitted</td></tr>
+<tr><td>Watches, open items, sweep obligations, sealed-claim answers in the import</td><td>Upstream's; reported as FYI</td><td>The importer's</td></tr>
+<tr><td>An imported main's operating declarations</td><td>Retained as inert text</td><td>Removed by <a href="#v-demotion">demotion</a></td></tr>
+<tr><td>Defects wholly internal to imported content</td><td>FYI; upstream repairs</td><td>The importer's ordinary structural obligations</td></tr>
+<tr><td>A broken importer-owned link into the import</td><td>Blocks the commit</td><td>Blocks the commit</td></tr>
+</tbody>
+</table>
+
+<h3 id="authority">Operation and claim authority</h3>
+<p id="authority-rule">The importer governs the operation of its collection &mdash; commit types, the gate, the entry file, the bootloader, the tooling instruction; an imported main's corresponding declarations have no authority over it, and its status line never becomes the importer's bootloader, though the importer may link it. The content governs what it claims: its decisions, reasons and authority ranking travel with it (<a href="#dl-operate">dl-operate</a>, <a href="live-spec.html#p7">P7</a>). A broken link between two mirrored files is FYI; a defect that breaks the importer's own link into the import blocks, a missing <code>depends-on</code> or answering target included.</p>
+
+<h3 id="demotion">Demoting a melded main</h3>
+<p id="demotion-rule">At melding, remove the imported main's status line, conventions, commit-type declaration and tooling instruction; retain its split rows and supporting files, now one hop further down the importer's collection; retain its open items, watches and decision rows as the importer's. A later upstream edit to a removed part surfaces as a merge conflict the tool resolves by dropping that part; every other conflict is resolved by hand (<a href="#dl-demote">dl-demote</a>). A modified component that must remain a main is operated in its own repository under its upstream tracking relationship and imported from there &mdash; a separate route, not a setting (<a href="#open-reuse-tool">open-reuse-tool</a>).</p>
+
+<h3 id="links">Relationships across the boundary</h3>
+<table id="links-table">
+<thead><tr><th>Direction</th><th>Mirrored</th><th>Melded</th></tr></thead>
+<tbody>
+<tr><td>Importer &rarr; imported claim</td><td>Allowed</td><td>Allowed</td></tr>
+<tr><td>Imported content &rarr; importer, or &rarr; another import</td><td>Represented in the importer's own content, pointing at the import; mirrored bytes are never rewritten</td><td>Allowed as a local edit, carried through updates like any other</td></tr>
+</tbody>
+</table>
+<p>Upstream's own nested imports are relationships already packaged in its tree, not a request for the outer importer to supply or remap anything (<a href="#nested">nested imports</a>, <a href="#dl-linkdir">dl-linkdir</a>).</p>
+
+<h3 id="slots">Parameters: slots, answers and overrides</h3>
+<p id="slots-mirrored">A mirrored import's slots are answered in the importer's own canonical store, normally its Key Parameters: each answer an ordinary claim with its own status and provenance, linked to the slot by an answering link that behaves like <code>depends-on</code> &mdash; an upgrade that changes the slot's text owes review of the answer. The imported file never holds the importer's value. Every slot has one disposition in the importer's own content, and a slot with none blocks the commit (<a href="#dl-slots">dl-slots</a>, <a href="live-spec.html#p6">P6</a>):</p>
+<table id="dispositions">
+<thead><tr><th>Disposition</th><th>Required content</th></tr></thead>
+<tbody>
+<tr><td>Answer</td><td>A parameter row with an answering link to the slot</td></tr>
+<tr><td>Open item</td><td>A row linking the slot and stating what resolves it</td></tr>
+<tr><td>Does not apply</td><td>An answer row and answering link, with the reason it does not apply</td></tr>
+</tbody>
+</table>
+<p id="slots-rules">Two answers to one slot in one collection's own files block: one value, two homes (<a href="live-spec.html#p1">P1</a>). Different collections answer the same slot differently, and one collection's dependence on another's answer is an ordinary <code>depends-on</code> link; the tool infers no cross-collection conflict. A melded import's slots are the importer's own <code data-literal>[ADAPT]</code>s, filled in place before commit or replaced by an open item &mdash; the value itself, or a pointer to a canonical row in the importer's parameters; an upstream rewording of a filled slot is a merge conflict resolved by hand. Changing the edits setting preserves one home per value: mirrored to melded moves answers into the slots or points the slots at parameter rows; melded to mirrored drops local edits and moves answers out to the parameters table.</p>
+<p id="override-rule">An omission is not an override. A mirrored import is taken as written: the importer answers an intentional blank and never overrides a concrete upstream value from its own files, because overriding a fuse rating while mirroring the wire-gauge claims sized for it leaves the importer relying on claims it cannot repair. Departing from a concrete value takes a melded import and a local edit (<a href="#dl-slots">dl-slots</a>).</p>
+<p id="slot-gone">When upstream removes or fills an answered slot, the answering link breaks and blocks. The importer disposes of the answer without a broken link or a second home: delete it when upstream settled the fact; re-home the value with new provenance and no answering link when upstream no longer holds a fact the importer still needs; or import melded and edit when it disagrees with upstream's new value. A re-homed value neither restates a value upstream now holds nor contradicts it.</p>
+
+<h3 id="nested">Nested imports and duplicate subjects</h3>
+<p id="nested-rule">A component's own imports arrive inside its tree at the revisions the component reviewed against; only the component updates those relationships, and the outer importer receives a newer nested copy only by taking a newer component. A unit the outer importer also imports directly gets its own copy at its own path, identical bytes or not; sharing one copy would mean remapping links inside mirrored content (<a href="#dl-nested">dl-nested</a>).</p>
+
+<h3 id="versions">Versions, transport and updates</h3>
+<table id="combinations">
+<thead><tr><th>Settings</th><th>Local content</th><th>Update obligation</th></tr></thead>
+<tbody>
+<tr><td>Mirrored, pinned</td><td>Unmodified copy of the recorded revision</td><td>Replace only on a deliberate upgrade</td></tr>
+<tr><td>Mirrored, tracking</td><td>Unmodified copy of the recorded revision</td><td>Check at <code>start</code>; apply updates explicitly</td></tr>
+<tr><td>Melded, pinned</td><td>Recorded base plus local edits</td><td>Merge selected later upstream changes deliberately</td></tr>
+<tr><td>Melded, tracking</td><td>Recorded base plus local edits</td><td>Hand-merge upstream changes as they come</td></tr>
+</tbody>
+</table>
+<p id="transport-rule"><code>lspec import</code> fetches the unit from upstream at a revision, writes ordinary files into the importer's repository, and fills in the split row; the result is staged changes that pass <code>reconcile</code> and one typed commit. No transport operation creates a commit, and upstream's commit history is not imported: the importer's history records each adoption and update with its upstream hash (<a href="#dl-transport">dl-transport</a>). A mirrored update replaces the files with the new revision's bytes and the split row's hash; a melded update three-way-merges the recorded base, the new revision and the local copy, leaving conflicts for hand resolution except the demoted parts (<a href="#demotion">demotion</a>). An update commit passes the gate like any other, and recording a new hash discharges no review it triggers (<a href="live-spec.html#dl-reviewgit">dl-reviewgit</a>).</p>
+<p id="tracking-rule"><code>lspec start</code> checks each tracking import and reports when it is behind (&ldquo;electrical: upstream has 3 new commits since abc123&rdquo;) &mdash; a notice, not a block; pinned imports are not checked; an unreachable upstream is reported and <code>start</code> continues. <code>lspec import --update &lt;name&gt;</code> fetches, replaces or merges, and leaves the changes staged for the gate (<a href="#dl-tracking">dl-tracking</a>).</p>
+
+<hr>
+<h2 id="graduation">Graduation</h2>
+<p id="graduation-rule">Graduation changes who runs a subject, not who can use it: a supporting spec graduates when it needs its own status line, open items, watches, sessions, commit vocabulary or maintainer. It moves into a new repository and its existing file is converted into that repository's main by adding the operating parts; wrapping the unchanged subject in an operations-only main is not offered (<a href="#dl-graduate">dl-graduate</a>). The former parent becomes an ordinary importer whose dependency links cross the new boundary.</p>
+<ol id="graduation-steps">
+  <li><strong>Choose the destination.</strong> The user supplies the new repository's name, directory and remote, if any; the tool asks and never invents them. The recorded source is the remote URL when there is one, else the local path.</li>
+  <li><strong>Seed the new repository.</strong> Build the converted main from the supporting spec as committed in the old parent at a named commit; create fresh history with a <code>seed:</code> commit whose body names the source (<code>graduated from &lt;repo&gt; @ &lt;commit&gt;</code>). Subject-shaped status carries intact (<a href="#dl-gradproc">dl-gradproc</a>).</li>
+  <li><strong>Replace ownership in the old parent.</strong> In one commit, remove the old file and split row, import the new main into <code>imports/&lt;name&gt;/</code> with its split row and settings, and re-point parent-owned links.</li>
+  <li><strong>Complete review.</strong> Targets moved without substantive change take address-only confirmations; the ordinary gate covers the rest.</li>
+</ol>
+<p>The old parent keeps its supporting spec until the replacement commit, so there is no gap; its earlier history stays readable there. A source that moves (a local repository gaining a remote) is an address-only change at its importers. A repository holding only a body of rules is one maintained main declared live-system, its substance the rules, decisions, fence and slots &mdash; <a href="live-spec.html#top">live-spec.html</a> is the precedent; importers take it as a main-shaped unit (<a href="#dl-rulesset">dl-rulesset</a>).</p>
+
+<hr>
+<h2 id="export">One-off export</h2>
+<p id="export-rule">An export is subject-shaped material selected from a collection that neither reshapes itself nor maintains content for others. No relationship survives: the source records and owes nothing, the recipient cannot track or update from it, and there is no split row or setting. The artifact is an ordinary spec-shaped HTML file holding the relevant parameters, decision rows with their rejected alternatives and reasons, fence items and provenance &mdash; each item carrying its source and commit (<code>from &lt;source&gt; @ &lt;commit&gt;</code>) and keeping its status. The exporter selects only material true of the subject, the same judgment as pinching off. The recipient places it in its own structure, merging into existing files or splitting a supporting spec with an ordinary split row, through the normal gate; later fit changes are ordinary edits to owned content (<a href="#dl-export">dl-export</a>).</p>
+
+<hr>
+<h2 id="copy">Copying a main to start a new project</h2>
+<p id="copy-rule">Copying a whole main for a new project is project-shaped inheritance, not an import: the first commit is <code>seed:</code>, starting a new lineage, and the source is history rather than an upstream. A copied main mixes subject knowledge with project-specific facts, so inherited evidence cannot stay confirmed. The rule: <strong>demote evidence mechanically, answer judgments one item at a time, regenerate derived views</strong> (<a href="#dl-copymain">dl-copymain</a>). The tool demotes every evidence token at the seed, with source and revision provenance (<code>inherited from &lt;spec&gt; @ &lt;commit&gt;</code>), and each is reconfirmed as checked. Inherited rows take individual gate questions answered against their text:</p>
+<table id="copy-judgments">
+<thead><tr><th>Disposition</th><th>Meaning and guardrail</th></tr></thead>
+<tbody>
+<tr><td>Keep</td><td>True as written for the new project</td></tr>
+<tr><td>Modify</td><td>Substance transfers; the rewritten reason is already checked and true here, else reopen</td></tr>
+<tr><td>Reopen</td><td>Move an unsettled decision, fence item or directive into open items; only for items that settle a question</td></tr>
+<tr><td>Delete</td><td>Substance does not apply; wrong while any part still protects against a re-proposal, which takes modify or reopen</td></tr>
+</tbody>
+</table>
+<table id="copy-treatment">
+<thead><tr><th>Content</th><th>Seed treatment</th></tr></thead>
+<tbody>
+<tr><td>Evidence tokens</td><td>Mechanically demoted, with source and revision provenance</td></tr>
+<tr><td>Decision rows; scope fence and directive</td><td>Per item: keep, modify, reopen, delete</td></tr>
+<tr><td>Open items, watch entries, ruled-out and diagnostic rows</td><td>Per row: keep, modify, delete (a watch can carry a transferable failure; the ruled-out register against its stated conditions, <a href="live-spec.html#p17">P17</a>)</td></tr>
+<tr><td>Status line</td><td>Re-derived whole</td></tr>
+<tr><td>Seals</td><td>Reassessed under the seed procedure; none stands by inheritance alone</td></tr>
+</tbody>
+</table>
+<p>This procedure applies to copied mains only; imports, exports and graduation are subject-shaped transfers whose status travels intact.</p>
+
+<hr>
+<h2 id="version-record">The version of live-spec an instance carries</h2>
+<p id="footer-rule">Two records serve two purposes: the receiving split row records the adopted unit's revision and settings; one footer line in the instance main records the upstream revision of the rules and tool it carries, beside attribution and license &mdash; <code>github.com/claybford/live-spec @ 2b8c8e2. Clayton Ford, 2026. MIT.</code> The hash is the commit the instance's copy came from; the attribution year is copied as it stands there. Rules and tool &mdash; the seed-derived conventions, <code>lspec.py</code> and <code>hooks/</code> &mdash; share one version and upgrade together (<a href="#dl-versionrec">dl-versionrec</a>, <a href="live-spec.html#dl-rule-locality">dl-rule-locality</a>).</p>
+
+<hr>
+<h2 id="discovery">Where the rules live, and how a session finds them</h2>
+<p id="discovery-rule">These rules live here and nowhere an instance carries: the seed does not include them and no rules paragraph is added to an instance main at first import, since every session reads its main whole and the tool states and enforces them (<a href="#dl-rulehome">dl-rulehome</a>). For every instance, <code>lspec start</code> and <code>--help</code> point to <code>lspec import --help</code> and <code>lspec export --help</code>; while imports exist, <code>start</code> lists their settings and obligations, upstream watches and open items as FYI for mirrored content, unanswered slots and tracking notices, and the gate enforces importer-owned obligations at every commit. A tool-less session sees the settings without their definitions: accepted, since the seed already tells it to perform the tool's checks by hand and the tool ships with the instance.</p>
+
+<hr>
+<h2 id="decisions">Open items, decisions and scope (this file)</h2>
+
+<h4>Open items</h4>
+<table>
+<thead><tr><th>Item</th><th>Gates</th><th>Resolves when</th></tr></thead>
+<tbody>
+<tr id="open-reuse-tool"><td><code>open-reuse-tool</code> The verbs this file requires &mdash; <code>import</code> with its selection preview, settings, demotion, updates and tracking notices; <code>export</code>; <code>graduate</code>; the copied-main seed procedure; the slot gate &mdash; are not yet in <code>lspec.py</code>, nor the separate-repository route for a modified component that stays a main, nor how the tool asks and records the adoption judgment</td><td>Every claim here about what the tool does (<a href="#transport-rule">transport</a>, <a href="#tracking-rule">tracking</a>, <a href="#graduation-steps">graduation</a>, <a href="#copy-rule">copying</a>, <a href="#discovery-rule">discovery</a>)</td><td>Each verb lands under <code>tool:</code> commits with tests, in the order: discovery and import; participation and demotion; slots; updates; graduation, export, copy; <code>start</code> and <code>--help</code> reporting</td></tr>
+<tr id="open-slotmarkup"><td><code>open-slotmarkup</code> The answering link's markup is undecided: <code>rel="resolves"</code> is the candidate; how a slot is addressed, and how answers, open items, missing answers and duplicates are detected, follows from it</td><td>The <a href="#slots-mirrored">slot rule</a> and its gate</td><td>A decision row names the markup and the slot gate enforces it</td></tr>
+<tr id="open-sealsupport"><td><code>open-sealsupport</code> Whether <code>data-sealed</code> claims in a supporting spec take part in the sealed-claim gate is unverified; an earlier assertion that they do was withdrawn untested</td><td>The melded column of the <a href="#participation-table">participation table</a> (sealed-claim answers become the importer's)</td><td>A test in <code>tests/</code> shows a sealed change in a supporting spec asked at the gate, or the gap is fixed and tested</td></tr>
+<tr id="open-benchmove"><td><code>open-benchmove</code> <a href="bench/bench-spec.html" rel="external">bench/bench-spec.html</a> operates in this repository as a second main; it must move to its own repository, and how it then obtains the files and tool it tests is undecided (a mirrored, tracking import of this collection is the candidate)</td><td>The <a href="#onemain-rule">one-operating-main rule</a></td><td>The bench operates in its own repository with its own tool copy, and its decision log records how it obtains the artifact under test</td></tr>
+<tr id="open-yearform"><td><code>open-yearform</code> This repository's own attribution-year convention &mdash; a single year, an updated year, or a range &mdash; is unsettled; instances copy whatever stands at their revision</td><td>The <a href="#footer-rule">footer line</a></td><td>A decision row here fixes the convention</td></tr>
+</tbody>
+</table>
+
+<h4>Locked selections</h4>
+<table>
+<thead><tr><th>Selection</th><th>Rejected / Replaced</th><th>Key reason</th></tr></thead>
+<tbody>
+<tr id="dl-settings"><td><code>dl-settings</code> Two independent settings on every import, stated explicitly: edits (mirrored | melded) and version (pinned | tracking); the vocabulary is import, imported unit, upstream, importer</td><td>Frozen / adapted as one axis; forked, owned, editable; module, vendor, vendee, consumer, receiver</td><td>Frozen conflates unchanged bytes with a fixed revision; adapted collides with <code data-literal>[ADAPT]</code>; forked implies a diverging line; owned and editable are used loosely. Two axes name four legal relationships.</td></tr>
+<tr id="dl-participation"><td><code>dl-participation</code> Participation and obligation ownership follow the edits setting: mirrored content is read and depended on, its obligations upstream's; melded content is owned whole</td><td>A third, separately selectable participation switch; melded-but-not-owned; mirrored-but-owned</td><td>Melded-but-not-owned evades the responsibilities of local ownership; mirrored-but-owned imposes obligations the importer cannot discharge without editing bytes it may not touch.</td></tr>
+<tr id="dl-unit"><td><code>dl-unit</code> The unit matches the need &mdash; a supporting file, a subject-sized main, or a whole collection as a component &mdash; and the importer waits for upstream to pinch off a tangled subject</td><td>Overshooting: importing a broader collection to reach one part, as a stopgap</td><td>Overshooting imports content and obligations outside the need and removes upstream's reason to split; the tool cannot infer need, so adoption records the judgment.</td></tr>
+<tr id="dl-operate"><td><code>dl-operate</code> The importer governs its collection's operation; imported content governs what it claims, its rationale and authority ranking travelling with it</td><td>An imported main's declarations governing the importer; discarding imported rationale under operational subordination</td><td>Two live sets of operating declarations in one repository contradict <a href="#dl-onemain">dl-onemain</a>; rationale stripped from content is re-derived by the next session (<a href="live-spec.html#p11">P11</a>).</td></tr>
+<tr id="dl-linkdir"><td><code>dl-linkdir</code> Links from imported content toward the importer or another import are represented on the importer's side for mirrored content and as local edits for melded content</td><td>Rewriting mirrored bytes to establish local relationships</td><td>Mirrored bytes rewritten are no longer upstream's text, so the next upgrade cannot replace them cleanly; the importer's side is the one home it owns.</td></tr>
+<tr id="dl-nested"><td><code>dl-nested</code> A component's nested imports travel inside its tree at the revisions it reviewed against; a unit imported both nested and directly has two copies at two paths</td><td>Declaring nested imports without their files; shared-copy resolution; version ranges; a dependency resolver</td><td>Sharing one copy means remapping links inside mirrored content; a resolver is package-manager machinery the fence excludes (<a href="live-spec.html#dl-reuse">dl-reuse</a>). Only the component reviewed its nested revision.</td></tr>
+<tr id="dl-slots"><td><code>dl-slots</code> Mirrored slots are answered outside the imported file by an answering link, every slot disposed or the commit blocks, duplicates block; melded slots are filled in place; a concrete mirrored value is never overridden</td><td>Flagging missing answers without blocking; answering melded slots only from outside; overrides of concrete values from the importer's files</td><td>A silent blank is the fabrication <a href="live-spec.html#p6">P6</a> forbids; an outside answer to an owned slot is a second home; an override leaves the importer depending on claims it cannot repair.</td></tr>
+<tr id="dl-copymain"><td><code>dl-copymain</code> A copied main demotes every evidence token mechanically with provenance, asks keep / modify / reopen / delete of each inherited row, and regenerates derived views</td><td>Carrying every decision unchanged; reopening every decision; keeping status on a broad seed assessment</td><td>Inherited reasons can be false for the new project, and valid transferable choices should survive; a broad assessment lets an inherited confirmation slip through.</td></tr>
+<tr id="dl-graduate"><td><code>dl-graduate</code> Graduation converts the supporting spec itself into the main of a new repository; the former parent imports it</td><td>Wrapping the unchanged subject in an operations-only main; graduating in place; a per-graduation choice between the two</td><td>A wrapper separates a subject from its operation and exists only by boilerplate (<a href="live-spec.html#p19">P19</a>); conversion preserves the claim links importers address. In place contradicts <a href="#dl-onemain">dl-onemain</a>.</td></tr>
+<tr id="dl-export"><td><code>dl-export</code> An export is a one-off, spec-shaped artifact with per-item source and commit provenance; no relationship survives it</td><td>Ongoing or regenerated exports with selectors, generators and update streams</td><td>A regenerated export lets upstream avoid pinching off indefinitely while demanding update machinery; subject-sorted material needs no renegotiation at the recipient.</td></tr>
+<tr id="dl-versionrec"><td><code>dl-versionrec</code> Two version records: the split row for an adopted unit; one footer line in an instance main for the live-spec revision of its rules and tool, which upgrade together</td><td>Separate versions for rules and tool; the footer without the hash; upstream stamping every revision with its own hash</td><td>A tool enforcing rules from another revision is the mismatch the record exists to prevent; the hash at the instance is enough, so upstream need not self-stamp.</td></tr>
+<tr id="dl-rulehome"><td><code>dl-rulehome</code> The reuse rules live in this file, linked from <code>start</code> and <code>--help</code> through <code>import --help</code> and <code>export --help</code>; instances carry neither this file nor a rules paragraph</td><td>The rules in every seed; a rules paragraph added to an instance main at first import</td><td>Every session reads its main whole (<a href="live-spec.html#dl-wholeload">dl-wholeload</a>): either is a repeated reading cost and a second home for rules the tool states and enforces.</td></tr>
+<tr id="dl-transport"><td><code>dl-transport</code> Copy-based transport: the tool writes ordinary files and leaves staged changes for one gated commit; upstream history is not imported</td><td>git subtree; git submodule; transport that creates its own commits</td><td>Subtree's first import used <code>commit-tree</code>, bypassing the hooks with untyped messages; submodule files were invisible to committed-tree checks and review. A transport commit is an unreconciled commit.</td></tr>
+<tr id="dl-onemain"><td><code>dl-onemain</code> Exactly one operating main per repository; independent operation requires a repository of its own, remote or not</td><td>Independent collections sharing a repository; graduation without relocation</td><td>One repository is one history and one set of hands; two live gates in it answer for each other's commits, and discovery cannot tell which main a stray file serves.</td></tr>
+<tr id="dl-demote"><td><code>dl-demote</code> A melded imported main is demoted in place to a supporting spec; later upstream edits to its removed parts are dropped automatically at merge</td><td>Keeping a melded main main-shaped; forbidding melded imports of mains</td><td>A main-shaped melded copy is a second operational structure to maintain or let rot; forbidding the import loses the content, and demotion makes it coherent.</td></tr>
+<tr id="dl-importdir"><td><code>dl-importdir</code> Each import under <code>imports/&lt;name&gt;/</code>, the name importer-chosen and stable, upstream's layout preserved inside; discovery treats that folder as imported content</td><td>Flattening the unit into the importer's layout; rewriting relative links; discovery by declaration scanning alone</td><td>A preserved layout keeps mirrored links resolving without rewriting bytes; a stable name keeps the split row's link stable across updates; the folder tells discovery what is not an operating main.</td></tr>
+<tr id="dl-rulesset"><td><code>dl-rulesset</code> A free-standing rules set is an ordinary live-system main with a short status line, imported as a main-shaped unit</td><td>A separate kind of rules-only collection</td><td>The rules are applied somewhere and maintained over time, which is the live-system regime; <a href="live-spec.html#top">live-spec.html</a> itself is the precedent, so no new kind is needed.</td></tr>
+<tr id="dl-selection"><td><code>dl-selection</code> The unit is the entry file's closure: split-row reach, upstream's imports, and every repository file those specs link; the tool previews the list before writing</td><td>Copying the whole upstream repository; copying the entry file alone; copying upstream's tool</td><td>The whole repository imports obligations outside the need; the entry file alone breaks its links; upstream's tool is a second rules version in one instance (<a href="live-spec.html#dl-rule-locality">dl-rule-locality</a>).</td></tr>
+<tr id="dl-tracking"><td><code>dl-tracking</code> <code>start</code> reports a tracking import that is behind; <code>import --update</code> applies the update as staged changes</td><td>Automatic updates during <code>start</code>; tracking as silent file mutation</td><td>An update at <code>start</code> lands file changes, reviews and merge conflicts in the middle of another task; a notice leaves the move to the session.</td></tr>
+<tr id="dl-gradproc"><td><code>dl-gradproc</code> Graduation seeds the new repository with fresh history from the spec as committed at a named old-parent commit, and the old parent replaces ownership in one later commit</td><td>Extracting and rewriting the subject's history into the new repository; removing the old file before the import lands</td><td>Old messages, trailers and receipts refer to another main's gate and states absent from the new repository; a gap between removal and import leaves the parent without the subject.</td></tr>
+</tbody>
+</table>
+
+<h4>Out of scope (this file)</h4>
+<p>Package-manager machinery &mdash; version ranges, dependency resolvers, registries, shared-copy deduplication &mdash; is out of scope by the main's fence (<a href="live-spec.html#dl-reuse">dl-reuse</a>). So is making every subject its own project: reuse never requires upstream to operate the importer's project, nor the importer to operate upstream's. Critiques that an import should be a git subtree or submodule are answered at <a href="#dl-transport">dl-transport</a>.</p>
+
+<p class="meta"><a href="live-spec.html#top">&uarr; main spec</a></p>
+
+</main>
+</body>
+</html>
+
+<!-- Clayton Ford, 2026. MIT. https://github.com/claybford/live-spec -->

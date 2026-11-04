@@ -27,10 +27,13 @@ better.
   protocol says to ask, and git hooks that hold it to its answers. The spec reads
   and operates without it. `python3 lspec.py --help` and `python3 lspec.py VERB
   --help` are its reference.
-- **`bench/`** — the evaluation harness: scripted sessions that instantiate and
-  operate specs under the tool, scored against a pre-registered rubric. It is
-  governed by its own living specification, `bench/bench-spec.html`. Run reports
-  live outside the repo.
+- **`reuse.html`** — how content moves between repositories: import, export,
+  graduation, copying a main. Read it whole when a move does any of those.
+
+The evaluation harness (scripted sessions that instantiate and operate specs
+under the tool, scored against a pre-registered rubric) lives in its own
+repository, `live-spec-bench`, with its own living specification; it takes a
+checkout of this repository as the artifact under test.
 
 ## Using it
 

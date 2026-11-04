@@ -12,7 +12,3 @@ node_modules/
 *.swp
 *~
 .DS_Store
-
-# bench/: everything tracked except the key-bearing configs substituted from templates
-/bench/oc-inst.json
-/bench/oc-oper.json

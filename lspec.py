@@ -6381,9 +6381,11 @@ trailers, keeps other trailers you pass, and refuses --amend, -c and -C;
 commit-msg refuses a message whose subject or trailers differ from the receipt;
 post-commit lists files still uncommitted and prints nothing when there are
 none. Sources must keep executable modes. Upgrading an instance: copy lspec.py
-and hooks/, install, replace its tooling paragraph with "begin with python3
-lspec.py start MAIN and follow its output", commit under an ordinary type —
-never seed:, which discards the review history.""",
+and hooks/ from one live-spec commit, install, replace its tooling paragraph
+with "begin with python3 lspec.py start MAIN and follow its output", set that
+commit in the footer line (github.com/claybford/live-spec @ COMMIT: rules and
+tool share one revision), commit under an ordinary type — never seed:, which
+discards the review history.""",
 
 "mv": """\
 Renames a file or an anchor and repairs references, a renamed row's label

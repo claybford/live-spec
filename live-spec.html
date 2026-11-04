@@ -69,7 +69,7 @@
 <p>Add the scope fence (<a href="#p12">P12</a>) the first time a session derails into a non-goal, the sweep (<a href="#p8">P8</a>) the first time a conclusion blocks on one unknown, and the de-drift pass (<a href="#p2">P2</a>) once restatement creeps in. In the live-system regime, promote the <a href="#p17">ruled-out register</a> the first time a session re-proposes an eliminated cause, and the <a href="#v-diagnostic">diagnostic register</a> the second time a confirmed failure is diagnosed; the seed carries the <a href="#p18">directive</a> slot from day one &mdash; fill it with a real stance the first time a session routes around a problem instead of fixing it. Split into a second file only when a session can write the <a href="#v-splitrow">split row</a> (<a href="#p19">P19</a>); until then the spec is one file.</p>
 
 <h4 id="seed">The seed &mdash; kicking off a new spec</h4>
-<p>Copy the <a href="#dl-seed">seed</a> verbatim into a new file. Read <a href="background.html">background.html</a> whole first: its type mapping supplies the per-domain fills (<a href="#dl-split-background">dl-split-background</a>). Fill its slots using this methodology; resolve every <code data-literal>[ADAPT]</code> choice (validate the template with <code>lspec check --template</code>), then put it under version control &mdash; the first commit is typed <code>seed:</code> and starts the lineage. Preserve the operating rules for every structure or mechanism included in the instance, including when entries are added, retained, or removed. Before the seed commit, identify claims whose validity depends on another claim remaining true and wire those dependencies with <code>rel="depends-on"</code>; navigation alone earns no edge. Record the assessment in the seed commit body, including the reason if no dependencies qualify. Assess likewise which settled claims deserve <code>data-sealed</code> protection &mdash; those whose silent change would corrupt intended state, such as irreversible locks and do-not-revert hardenings &mdash; and mark them; there is no minimum count, and the reasoning belongs in the same seed-commit assessment. File a <a href="#v-watch">watch entry</a> for every failure the material already records: the gate asks each commit, the seed commit included, what it watched and what it decided (<a href="#dl-asked">dl-asked</a>). Do not copy this methodology's explanatory body or decision history. Add optional registers when their triggers arise (<a href="#regimes">regimes</a>).</p>
+<p>Copy the <a href="#dl-seed">seed</a> verbatim into a new file. Read <a href="background.html">background.html</a> whole first: its type mapping supplies the per-domain fills (<a href="#dl-split-background">dl-split-background</a>). Fill its slots using this methodology; resolve every <code data-literal>[ADAPT]</code> choice (validate the template with <code>lspec check --template</code>) &mdash; the footer's revision is the commit the seed and tool were copied from (<a href="reuse.html#footer-rule">the version record</a>) &mdash; then put it under version control &mdash; the first commit is typed <code>seed:</code> and starts the lineage. Preserve the operating rules for every structure or mechanism included in the instance, including when entries are added, retained, or removed. Before the seed commit, identify claims whose validity depends on another claim remaining true and wire those dependencies with <code>rel="depends-on"</code>; navigation alone earns no edge. Record the assessment in the seed commit body, including the reason if no dependencies qualify. Assess likewise which settled claims deserve <code>data-sealed</code> protection &mdash; those whose silent change would corrupt intended state, such as irreversible locks and do-not-revert hardenings &mdash; and mark them; there is no minimum count, and the reasoning belongs in the same seed-commit assessment. File a <a href="#v-watch">watch entry</a> for every failure the material already records: the gate asks each commit, the seed commit included, what it watched and what it decided (<a href="#dl-asked">dl-asked</a>). Do not copy this methodology's explanatory body or decision history. Add optional registers when their triggers arise (<a href="#regimes">regimes</a>).</p>
 <pre data-specimen="seed">&lt;!DOCTYPE html&gt;&lt;html lang="en"&gt;&lt;head&gt;&lt;meta charset="UTF-8"&gt;
 &lt;title&gt;[PROJECT] &mdash; Living Specification&lt;/title&gt;
 &lt;link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css"&gt;
@@ -134,7 +134,8 @@
 &lt;p&gt;Tooling [ADAPT: lspec]: begin with &lt;code&gt;python3 lspec.py start MAIN&lt;/code&gt;
   and follow its output. Without the tool, perform its checks by hand. This
   instance carries its own copy of the tool and hooks; never link a methodology
-  repository in their place.&lt;/p&gt;
+  repository in their place. Rules and tool share one revision, the one the
+  footer names, and upgrade together.&lt;/p&gt;
 
 &lt;h2 id="params"&gt;Key Parameters &mdash; single source of truth&lt;/h2&gt;
 &lt;table&gt;&lt;tr&gt;&lt;th&gt;Parameter&lt;/th&gt;&lt;th&gt;Value&lt;/th&gt;&lt;th&gt;Status &middot; provenance&lt;/th&gt;&lt;/tr&gt;&lt;/table&gt;
@@ -174,7 +175,8 @@
        are not a read. This gates every request in the repo &mdash; questions
        and read-only tasks included. --&gt;
 
-&lt;/main&gt;&lt;/body&gt;&lt;/html&gt;</pre>
+&lt;/main&gt;&lt;/body&gt;&lt;/html&gt;
+&lt;!-- github.com/claybford/live-spec @ [ADAPT: the commit this seed, lspec.py and hooks/ were copied from]. Clayton Ford, 2026. MIT. --&gt;</pre>
 
 <hr>
 

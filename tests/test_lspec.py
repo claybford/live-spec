@@ -3126,6 +3126,20 @@ class SealGate(unittest.TestCase):
         _, sealed, _ = self.sealed(d, main='sub/main.html')
         self.assertIn('sealed:main.html#req', sealed)          # old address named
 
+    def test_a_supporting_specs_sealed_claim_is_asked(self):
+        """reuse.html open-sealsupport: a seal in a supporting spec takes part
+        in the gate exactly as main's does (the participation table's melded
+        column rests on it)."""
+        d = lrepo()
+        edit(d, 'motor.html', '<p id="power">', '<p id="hard" data-sealed>Never exceed 130 kW.</p><p id="power">')
+        commit(d, 'docs: seal the limit')
+        edit(d, 'motor.html', 'Never exceed 130 kW.', 'Never exceed 150 kW.')
+        _, sealed, _ = self.sealed(d)
+        self.assertEqual(list(sealed), ['sealed:motor.html#hard'])
+        self.assertIn('content changed', sealed['sealed:motor.html#hard']['title'])
+        answer, trailer = self.answer(d, ['correction', 'the', 'datasheet', 'says', 'so'])
+        self.assertEqual(trailer, 'Reconciled: correction motor.html#hard (awaiting confirmation) \u2014 the datasheet says so')
+
     def test_data_sealed_without_id_is_structural_red(self):
         rc, out = run(main_extra='</table><p data-sealed>x</p><table>')
         self.assertEqual(rc, 1)
@@ -3366,6 +3380,10 @@ DOWN_MAIN = """<!DOCTYPE html><html><body><main>
 </main></body></html>"""
 
 
+ANSWER_ROW = ('<tr id="kp-reach"><td>Reach</td><td>60 cm, answering <a rel="resolves" '
+              'href="imports/electrical/electrical.html#kp-reach">the slot</a></td><td>confirmed(tape)</td></tr>')
+
+
 def upstream(bus="12 V"):
     u = tempfile.mkdtemp()
     Path(u, "electrical.html").write_text(UP_MAIN.format(bus=bus))
@@ -3387,11 +3405,19 @@ def importer(params=""):
     return d
 
 
-def do_import(d, u, edits="mirrored", version="pinned", name="electrical", *extra):
+def do_import(d, u, edits="mirrored", version="pinned", name="electrical", *extra, rows=None):
+    """Import, then add ROWS (default: the slot's answer for a mirrored unit)
+    to main's parameters in the same candidate, as an importer would."""
     ensure_request(d)
-    return cli(d, "import", u, "electrical.html", "--as", name, "--edits", edits, "--version", version,
-               "--adopting", "the electrical system as a component", "--reason", "it runs the camper",
-               "--rejected", "design our own", *extra)
+    rc, out = cli(d, "import", u, "electrical.html", "--as", name, "--edits", edits, "--version", version,
+                  "--adopting", "the electrical system as a component", "--reason", "it runs the camper",
+                  "--rejected", "design our own", *extra)
+    if rows is None:
+        rows = ANSWER_ROW if edits == "mirrored" else ""
+    if rc == 0 and rows and "--dry-run" not in extra:
+        edit(d, "main.html", "</table>\n<h2 id=\"log\">", rows + "</table>\n<h2 id=\"log\">")
+        sh("git", "add", "-A", cwd=d)
+    return rc, out
 
 
 class Imports(unittest.TestCase):
@@ -3517,9 +3543,9 @@ class Imports(unittest.TestCase):
         """A changed imported target owes the importer's dependent its review,
         asked at the update commit's gate; the import item takes updated."""
         u = upstream()
-        d = importer('<tr id="kp-fridge"><td>Fridge</td><td>4 A on <a rel="depends-on" '
-                     'href="imports/electrical/electrical.html#kp-bus">the bus</a></td><td>confirmed(sheet)</td></tr>')
-        do_import(d, u)
+        d = importer()
+        do_import(d, u, rows=ANSWER_ROW + '<tr id="kp-fridge"><td>Fridge</td><td>4 A on <a rel="depends-on" '
+                  'href="imports/electrical/electrical.html#kp-bus">the bus</a></td><td>confirmed(sheet)</td></tr>')
         rc, out = settle(d, "docs: import electrical")
         self.assertEqual(rc, 0, out); commit_reconciled(d)
         edit(u, "electrical.html", "12 V", "24 V"); commit(u, "docs: 24 V")
@@ -3581,6 +3607,71 @@ class Imports(unittest.TestCase):
         self.assertIn("import --update electrical", out)
         self.assertEqual(sh("git", "status", "--porcelain", cwd=d).strip(), "")
         self.assertIn("12 V", Path(d, "imports", "electrical", "electrical.html").read_text())
+
+
+class Slots(unittest.TestCase):
+    """The slot gate (reuse.html dl-slots): every mirrored [ADAPT] is answered
+    or opened in the importer's own files; one answer per slot; an answer
+    follows its slot's text like a dependency."""
+
+    def test_a_slot_without_a_disposition_blocks(self):
+        u, d = upstream(), importer()
+        do_import(d, u, rows="")
+        rc, out = cli(d, "check")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("[slot] imports/electrical/electrical.html#kp-reach has no disposition", out)
+        out = reconcile_out(d, "docs: import electrical")
+        self.assertIn("[structure] [slot]", out)
+        rc, out = cli(d, "start")
+        self.assertIn("SLOTS (1)", out); self.assertIn("no disposition", out)
+
+    def test_an_answer_or_an_open_item_counts_once(self):
+        u, d = upstream(), importer()
+        do_import(d, u)
+        rc, out = cli(d, "check")
+        self.assertEqual(rc, 0, out)
+        rc, out = cli(d, "start")
+        self.assertIn("imports/electrical/electrical.html#kp-reach: answered by main.html#kp-reach", out)
+        edit(d, "main.html", "</table>\n<h2 id=\"log\">", ANSWER_ROW.replace('id="kp-reach"', 'id="kp-reach2"') + "</table>\n<h2 id=\"log\">")
+        rc, out = cli(d, "check")
+        self.assertEqual(rc, 1, out); self.assertIn("is answered twice", out)
+        main = Path(d, "main.html").read_text()
+        main = main.replace(ANSWER_ROW.replace('id="kp-reach"', 'id="kp-reach2"'), "").replace(ANSWER_ROW, "")
+        Path(d, "main.html").write_text(main.replace("</main>", '<table><tr id="open-reach"><td><code>open-reach</code> reach unknown, '
+             '<a href="imports/electrical/electrical.html#kp-reach">the slot</a></td><td>the shelves</td><td>a tape measure</td></tr></table></main>'))
+        rc, out = cli(d, "check")
+        self.assertEqual(rc, 0, out)
+        rc, out = cli(d, "start")
+        self.assertIn("kp-reach: open at main.html#open-reach", out)
+
+    def test_an_answer_into_owned_content_or_a_gone_slot_is_refused(self):
+        u, d = upstream(), importer()
+        rc, out = do_import(d, u, "melded", "pinned", rows=ANSWER_ROW)
+        rc, out = cli(d, "check")
+        self.assertIn("resolves imports/electrical/electrical.html#kp-reach, which is not mirrored content", out)
+        u, d = upstream(), importer()
+        do_import(d, u)
+        rc, out = settle(d, "docs: import electrical"); self.assertEqual(rc, 0, out); commit_reconciled(d)
+        edit(u, "electrical.html", "[ADAPT: per install]", "45 cm"); commit(u, "docs: reach fixed")
+        rc, out = cli(d, "import", "--update", "electrical"); self.assertEqual(rc, 0, out)
+        rc, out = cli(d, "check", "--staged")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("which holds no slot — filled or removed upstream", out)
+
+    def test_a_reworded_slot_asks_the_answers_review(self):
+        u, d = upstream(), importer()
+        do_import(d, u)
+        rc, out = settle(d, "docs: import electrical"); self.assertEqual(rc, 0, out); commit_reconciled(d)
+        edit(u, "electrical.html", "[ADAPT: per install]", "[ADAPT: per install, at full extension]")
+        commit(u, "docs: reach reworded")
+        rc, out = cli(d, "import", "--update", "electrical"); self.assertEqual(rc, 0, out)
+        out = reconcile_out(d, "docs: update electrical")
+        self.assertIn("0 to fix", out)
+        log = answer_all(d, {"import": ["updated"]})
+        self.assertIn("answered [neighbor] neighbor main.html#kp-reach: holds", log)
+        rc, out = cli(d, "reconcile"); self.assertEqual(rc, 0, out)
+        receipt = json.loads(state_file(d, "receipt.json").read_text())
+        self.assertIn("Reconciled: reviewed main.html#kp-reach", receipt["trailers"])
 
 
 # ------------------------------------------------ derived view (bench #4 D stale)

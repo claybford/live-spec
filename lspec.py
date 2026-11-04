@@ -113,6 +113,14 @@ WORD2NUM.update({f"{t}-{NUM[u]}": 30 + 10 * i + u
 WORD2NUM.update({"hundred": 100})
 TENS_WORDS = {"twenty", *TENS}
 VOID = {"br", "hr", "meta", "link", "img", "input", "col", "wbr", "source"}
+# The typed relations: depends-on (the claim owes review when its target
+# changes) and resolves (an answer to an imported slot, reviewed the same way;
+# reuse.html dl-slots). Everything else a link carries is navigation.
+DEP_RELS = ("depends-on", "resolves")
+
+
+def is_dep(link):
+    return link["rel"] in DEP_RELS
 
 
 # =============================================================== parsing
@@ -156,7 +164,7 @@ class Spec(HTMLParser):
         if self._pre:
             return
         a = dict(attrs)
-        if a.get("rel") == "depends-on" and (tag != "a" or not a.get("href")):
+        if a.get("rel") in DEP_RELS and (tag != "a" or not a.get("href")):
             self.bad_deps.append((self._off(), tag))
         eid = a.get("id")
         if eid:
@@ -1025,7 +1033,7 @@ def recorded_review(root, name, floor, boundaries):
 def has_edge(spec, src, hrefs):
     """The edge itself: element SRC carrying a depends-on link to one of HREFS."""
     return spec is not None and any(
-        l["rel"] == "depends-on" and l["src"] == src and l["href"] in hrefs for l in spec.links)
+        is_dep(l) and l["src"] == src and l["href"] in hrefs for l in spec.links)
 
 
 def target_text_at(commit, a_path, link_href):
@@ -1061,12 +1069,12 @@ def edge_introduction(root, a_path, src, href, floor):
         parents = git("rev-list", "--parents", "-n", "1", sha, cwd=root).split()[1:]
         parent = file_at(parents[0], a_path) if parents else None
         pedges = [l for l in (parent.links if parent else [])
-                  if l["rel"] == "depends-on" and l["src"] == src]
+                  if is_dep(l) and l["src"] == src]
         if any(l["href"] == href for l in pedges):
             continue                         # the edge already existed
         new_text = target_text_at(sha, a_path, href)
         still = {l["href"] for l in file_at(sha, a_path).links
-                 if l["rel"] == "depends-on" and l["src"] == src}
+                 if is_dep(l) and l["src"] == src}
         for l in pedges:
             if l["href"] in still:
                 continue                     # that edge survives: this one is a birth
@@ -1404,11 +1412,11 @@ class Collection:
         return [(fp, l) for fp, l, tp, fr in self.edges() if tp == path and fr == frag]
 
     def dependents(self, path, frag):
-        return [(fp, l) for fp, l in self.inbound(path, frag) if l["rel"] == "depends-on"]
+        return [(fp, l) for fp, l in self.inbound(path, frag) if is_dep(l)]
 
     def depends_on_edges(self):
         for fp, l, tp, fr in self.edges():
-            if l["rel"] == "depends-on":
+            if is_dep(l):
                 yield fp, l, tp, fr
 
 
@@ -1614,6 +1622,115 @@ def marker_visible(raw):
     return re.sub(r'<code\b[^>]*\bdata-literal\b[^>]*>.*?</code>', " ", visible, flags=re.S)
 
 
+MARKER_RE = re.compile(r"\[(?:ADAPT|PROJECT)")
+
+
+def own_visible(spec, eid):
+    """The element's markup minus id'd descendants, declared specimens and
+    literal mentions: where a slot's marker counts."""
+    s, e = spec.elems[eid]
+    inner = sorted(v for i, v in spec.elems.items() if i != eid and s < v[0] and v[1] <= e)
+    pieces, pos = [], s
+    for a, b in inner:
+        if a < pos:
+            continue
+        pieces.append(spec.raw[pos:a])
+        pos = b
+    pieces.append(spec.raw[pos:e])
+    return marker_visible(" ".join(pieces))
+
+
+def slots(col):
+    """Slots of the collection's mirrored imports (reuse.html dl-slots): the
+    id'd elements whose own text carries an [ADAPT]/[PROJECT] marker, each one
+    address the importer answers. -> ({(path, id): markers}, [files with a
+    marker outside any id'd element: unaddressable, upstream's])."""
+    out, stray = {}, []
+    for p, s in col.specs.items():
+        if not col.mirrored(p):
+            continue
+        n = 0
+        for eid in s.elems:
+            k = len(MARKER_RE.findall(own_visible(s, eid)))
+            if k:
+                out[(p, eid)] = k
+                n += k
+        if len(MARKER_RE.findall(marker_visible(s.raw))) > n:
+            stray.append(p)
+    return out, stray
+
+
+def slot_dispositions(col):
+    """What the importer's own files say about each slot: answers (claims
+    carrying rel="resolves" to it, a does-not-apply answer included) and open
+    items (rows id'd open-… linking it). -> (answers, opens), each
+    {(path, id): [(path, claim id)]}."""
+    answers, opens = {}, {}
+    for p, s in col.specs.items():
+        if col.mirrored(p):
+            continue
+        for l in s.links:
+            tp, fr = resolve(p, l["href"])
+            tp = tp or p
+            if not fr:
+                continue
+            if l["rel"] == "resolves":
+                answers.setdefault((tp, fr), []).append((p, l["src"]))
+            elif l["src"] and s.tags.get(l["src"]) == "tr" and l["src"].startswith("open-"):
+                opens.setdefault((tp, fr), []).append((p, l["src"]))
+    return answers, opens
+
+
+def slot_failures(col):
+    """The slot gate: every mirrored slot has one disposition in the
+    importer's own content; an answer names a slot that exists and is
+    mirrored; a slot is answered once (one value, one home)."""
+    fails = []
+    found, stray = slots(col)
+    answers, opens = slot_dispositions(col)
+    for p in stray:
+        col.fyi.append(f"[slot] {rel(p)}: an [ADAPT] marker outside any id'd element cannot be "
+                       "answered — upstream's to address")
+    for (tp, fr), who in sorted(answers.items()):
+        named = [w for w in who if w[1]]   # an unnamed answer is the typed-edge check's failure
+        if tp not in col.specs or fr not in col.specs[tp].elems:
+            continue                       # the anchor check reports a missing target
+        if not col.mirrored(tp):
+            fails.append(f"[slot] {addr(*who[0])} resolves {addr(tp, fr)}, which is not mirrored "
+                         "content: a melded or own slot is filled in place")
+        elif (tp, fr) not in found:
+            fails.append(f"[slot] {addr(*who[0])} resolves {addr(tp, fr)}, which holds no slot — "
+                         "filled or removed upstream: delete the answer, re-home the value with "
+                         "its own provenance, or import melded and edit")
+        if len(named) > 1:
+            fails.append(f"[slot] {addr(tp, fr)} is answered twice ({', '.join(addr(*w) for w in named)}): "
+                         "one value, one home")
+    for (tp, fr) in sorted(found):
+        if (tp, fr) not in answers and (tp, fr) not in opens:
+            fails.append(f"[slot] {addr(tp, fr)} has no disposition: answer it (a parameter row "
+                         'carrying rel="resolves" to it, with the reason when it does not apply) '
+                         "or open an item (a row id'd open-… linking it, stating what resolves it)")
+    return fails
+
+
+def slots_report(col):
+    """start: every slot of the mirrored imports and its disposition."""
+    found, _ = slots(col)
+    if not found:
+        return
+    answers, opens = slot_dispositions(col)
+    print()
+    print(f"{title('SLOTS')} ({len(found)}) — [ADAPT] choices in mirrored imports, answered here:")
+    for (tp, fr) in sorted(found):
+        if (tp, fr) in answers:
+            how = "answered by " + ", ".join(addr(*w) for w in answers[(tp, fr)])
+        elif (tp, fr) in opens:
+            how = "open at " + ", ".join(addr(*w) for w in opens[(tp, fr)])
+        else:
+            how = status("OPEN") + " no disposition: the gate refuses the commit until one exists"
+        print(f"  {addr(tp, fr)}: {how}")
+
+
 def check_structure(col, specimens=True, markers=True):
     """Structural failures of the collection. A defect wholly inside a
     mirrored import is upstream's to fix: it goes to col.fyi, not the result
@@ -1622,6 +1739,8 @@ def check_structure(col, specimens=True, markers=True):
     mirrored = getattr(col, "mirrored", lambda p: False)
     imported = getattr(col, "imported", lambda p: False)
     commit_types(col, fails)
+    if hasattr(col, "imports") and col.imports:
+        fails += slot_failures(col)
     for p, s in col.specs.items():
         if commit_type_decls(s) and "status" not in s.elems and not imported(p):
             fails.append(f"[seed-shape] {rel(p)}: no element id=status — a main carries "
@@ -1652,9 +1771,9 @@ def check_structure(col, specimens=True, markers=True):
             elif frag and frag not in col.specs[tgt].elems:
                 fails.append(f"[anchor] {r}: href={l['href']} — no id {frag!r} in "
                              f"{rel(tgt)}")
-            if l["rel"] == "depends-on" and l["src"] is None:
-                fails.append(f"[depends-on] {r}: link to {l['href']} has no id'd ancestor "
-                             f"— the dependent claim cannot be named")
+            if is_dep(l) and l["src"] is None:
+                fails.append(f"[{l['rel']}] {r}: link to {l['href']} has no id'd ancestor "
+                             f"— the {'answer' if l['rel'] == 'resolves' else 'dependent claim'} cannot be named")
         for off, tag in getattr(s, "bad_deps", []):
             fails.append(f"[depends-on] {r}: rel=\"depends-on\" on <{tag}>: "
                          f"only <a href> carries an obligation")
@@ -1832,7 +1951,7 @@ def owed_reviews(col, dirty_paths=None, basis="HEAD", pending_seeds=()):
                 bfp = cache[source_key]
                 if bfp and pair not in seen:
                     prior = [x["src"] for x in bfp.links
-                             if x["href"] == l["href"] and x["rel"] == "depends-on" and x["src"]]
+                             if x["href"] == l["href"] and is_dep(x) and x["src"]]
                     if prior and l["src"] not in prior:
                         rec = {"dependent": (fp, l["src"]), "target": (tp, fr), "baseline": base,
                                "how": how, "kind": "source-moved",
@@ -1970,7 +2089,7 @@ def head_edges(col, root):
         if s is None or col.mirrored(p):
             continue
         for l in s.links:
-            if l["rel"] != "depends-on" or l["src"] is None:
+            if not is_dep(l) or l["src"] is None:
                 continue
             tgt, fr = resolve(p, l["href"])
             if tgt is None and fr is None:
@@ -2001,7 +2120,7 @@ def disappear_cause(r, col):
             return "claim deleted", False
         if r["kind"] == "unknown":
             return f"clearance cannot be established ({r['note']})", True
-        links = [l for l in s.links_in(src) if l["rel"] == "depends-on"]
+        links = [l for l in s.links_in(src) if is_dep(l)]
         if not any((resolve(fp, l["href"])[0] or fp, resolve(fp, l["href"])[1]) == (tp, fr)
                    for l in links):
             return "dependency removed; record a review of the surviving claim", True
@@ -3092,7 +3211,7 @@ def reseed_items(ctx):
         if floor is None:
             continue
         name = repo_rel(p)
-        edges = [l for l in col.specs[p].links if l["rel"] == "depends-on" and l["src"]]
+        edges = [l for l in col.specs[p].links if is_dep(l) and l["src"]]
         baselines = 0
         for l in edges:
             try:
@@ -3429,7 +3548,7 @@ def changed_dependencies(ctx, np_, nid):
     for l in col.specs[np_].links_in(nid):
         tp, fr = resolve(np_, l["href"])
         tp = tp or np_
-        if l["rel"] != "depends-on" or l["src"] != nid or not fr:
+        if not is_dep(l) or l["src"] != nid or not fr:
             continue
         was = ctx.head_specs[tp].sig(fr) if tp in ctx.head_specs else None
         if ctx.changed.get((tp, fr)) in ("added", "changed") and was != col.specs[tp].sig(fr):
@@ -4258,10 +4377,10 @@ def cmd_impact(args):
         if not b:
             continue
         for l in s.links:
-            if l["rel"] != "depends-on":
+            if not is_dep(l):
                 continue
             prior = [x["src"] for x in b.links
-                     if x["href"] == l["href"] and x["rel"] == "depends-on" and x["src"]]
+                     if x["href"] == l["href"] and is_dep(x) and x["src"]]
             if prior and l["src"] not in prior:
                 any_change = True
                 moved.add((p, l["src"]))
@@ -4787,6 +4906,7 @@ def cmd_start(args):
     rc, clean = obligations_report(col)
     print_shared_literals(col)
     imports_report(col)
+    slots_report(col)
     if in_git and (request := read_state("request.json")) and request.get("start") == head_sha() \
             and "clean" not in request:
         write_state("request.json", {**request, "clean": clean})
@@ -5018,7 +5138,7 @@ def review_claims(col, targets, retired):
         if not frag:
             raise ReviewRefused(f"{t} names a file; name the dependent claim")
         deps = [l for l in col.specs[p].links_in(frag)
-                if l["rel"] == "depends-on" and l["src"] == frag]
+                if is_dep(l) and l["src"] == frag]
         if not deps and (p, frag) not in retiring and f"{repo_rel(p)}#{frag}" not in awaiting:
             raise ReviewRefused(f"{addr(p, frag)} has no depends-on link and awaits no "
                                 "confirmation; nothing to review")
@@ -5039,7 +5159,7 @@ def already_reviewed(col, claims):
     out = []
     for p, f in claims:
         for l in col.specs[p].links_in(f):
-            if l["rel"] != "depends-on" or l["src"] != f:
+            if not is_dep(l) or l["src"] != f:
                 continue
             try:
                 sha, how = review_baseline(p, f, l["href"])
@@ -5721,6 +5841,16 @@ staged for one ordinary commit, whose gate asks the adoption question
 (adopted --reason): is the whole unit the subject adopted, not a broader
 collection taken to reach one part? Take a broader unit never: wait for
 upstream to pinch the subject off. --dry-run lists the unit and writes nothing.
+
+Slots: a mirrored unit's [ADAPT] choices are the id'd elements carrying the
+marker. Each takes one disposition in MAIN's own files or the commit is
+refused: an answer, a claim (normally a parameter row) carrying
+<a rel="resolves" href="imports/NAME/FILE#ID"> — also for "does not apply",
+with the reason — or an open item, a row id'd open-… linking the slot and
+saying what resolves it. A slot answered twice, an answer whose slot upstream
+filled or removed, or an answer into melded content (filled in place instead)
+are refused too. resolves is a typed edge like depends-on: an update that
+changes the slot's text asks the answer's review. start lists every slot.
 
 --update NAME [--at REV]: refetches a mirrored import at REV (default HEAD),
 replaces its files and the row's revision, and stages the change for the gate,

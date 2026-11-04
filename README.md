@@ -24,9 +24,10 @@ better.
   pattern to a new domain.
 - **`lspec.py`** and **`hooks/`** — optional maintenance automation (Python stdlib
   only): a validator, a commit gate that asks each commit the questions the
-  protocol says to ask, and git hooks that hold it to its answers. The spec reads
-  and operates without it. `python3 lspec.py --help` and `python3 lspec.py VERB
-  --help` are its reference.
+  protocol says to ask, git hooks that hold it to its answers, and the verbs that
+  move content between repositories (`import`, `export`, `graduate`, `copy`). The
+  spec reads and operates without it. `python3 lspec.py --help` and `python3
+  lspec.py VERB --help` are its reference.
 - **`reuse.html`** — how content moves between repositories: import, export,
   graduation, copying a main. Read it whole when a move does any of those.
 

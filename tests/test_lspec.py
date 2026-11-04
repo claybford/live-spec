@@ -1892,7 +1892,8 @@ class RevisionRegressions(unittest.TestCase):
                 ('[ADAPT — evidence confirmed(source) / provisional(source);\n  commitment locked / open; review WATCH]',
                  'evidence confirmed(source) / provisional(source); commitment locked / open; review WATCH'),
                 ('[ADAPT: 40]', '40'),
-                ('[ADAPT: lspec]', 'lspec')]:
+                ('[ADAPT: lspec]', 'lspec'),
+                ('[ADAPT: the commit this seed, lspec.py and hooks/ were copied from]', '0123456')]:
             seed = seed.replace(marker, fill)
         return seed
 
@@ -3661,6 +3662,68 @@ class Imports(unittest.TestCase):
         self.assertIn("<<<<<<< local", b); self.assertIn(">>>>>>> upstream", b)
         rc, out = cli(d, "check", "--staged")
         self.assertEqual(rc, 1, out); self.assertIn("[merge] imports/electrical/battery.html: unresolved conflict markers", out)
+
+    def test_importer_owned_link_into_the_import_blocks(self):
+        """Participation table: a broken link the importer owns into mirrored
+        content blocks, while the import's own defects stay FYI."""
+        u, d = upstream(), importer()
+        do_import(d, u, rows=ANSWER_ROW + '<p id="note">See <a href="imports/electrical/electrical.html#kp-gone">the thing</a>.</p>')
+        rc, out = cli(d, "check")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("[anchor] main.html: href=imports/electrical/electrical.html#kp-gone", out)
+        self.assertIn("FYI: [split] imports/electrical/sizing.html", out)
+
+    def test_switching_mirrored_to_melded_moves_the_answers_in_place(self):
+        """dl-slots, changing the edits setting: once melded, the slot is the
+        importer's own [ADAPT] and the outside answer is refused until the
+        value lives in the slot; the manifest no longer guards the bytes."""
+        u, d = upstream(), importer()
+        do_import(d, u)
+        rc, out = settle(d, "docs: import electrical"); self.assertEqual(rc, 0, out); commit_reconciled(d)
+        edit(d, "main.html", "mirrored pinned</code>", "melded pinned</code>")
+        sh("git", "add", "-A", cwd=d)
+        rc, out = cli(d, "check", "--staged")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("resolves imports/electrical/electrical.html#kp-reach, which is not mirrored content", out)
+        self.assertIn("[adapt] imports/electrical/electrical.html", out)
+        edit(d, "imports/electrical/electrical.html", "[ADAPT: per install]", "60 cm")
+        edit(d, "imports/electrical/electrical.html", 'data-watch-until="2020-01-01"', f'data-watch-until="{FUTURE}"')
+        edit(d, "imports/electrical/sizing.html", "sizing, no split row", "sizing")
+        edit(d, "imports/electrical/battery.html", 'see <a href="sizing.html">sizing</a>', "see nothing")
+        edit(d, "imports/electrical/electrical.html", '; the tool is <a href="lspec.py">here</a>', "")
+        main = Path(d, "main.html").read_text().replace(ANSWER_ROW, '<tr id="kp-reach"><td>Reach</td><td>60 cm, in the slot</td><td>confirmed(tape)</td></tr>')
+        Path(d, "main.html").write_text(main)
+        sh("git", "add", "-A", cwd=d)
+        out = reconcile_out(d, "docs: electrical melded")
+        self.assertIn("0 to fix", out); self.assertNotIn("[mirror]", out)
+        self.assertIn("import 1", out)                        # the settings change is acknowledged as an update
+
+    def test_nested_imports_travel_with_the_component(self):
+        """dl-nested: a component's own import arrives inside its tree at the
+        revision it recorded; it is listed as nested, never the outer
+        importer's relationship, and its bytes are mirrored with the rest."""
+        inner = upstream()                                     # the nested unit
+        u = upstream()                                         # the component importing it
+        cwd = os.getcwd(); os.chdir(u)
+        try:
+            lspec_cli("start", "electrical.html")
+            rc, out = lspec_cli("--main", "electrical.html", "import", inner, "battery.html", "--as", "cells",
+                                "--edits", "mirrored", "--version", "pinned", "--adopting", "cells", "--reason", "why")
+            self.assertEqual(rc, 0, out)
+        finally:
+            os.chdir(cwd)
+        commit(u, "docs: nested import")
+        d = importer()
+        rc, out = do_import(d, u)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(Path(d, "imports", "electrical", "imports", "cells", "battery.html").exists())
+        rc, out = cli(d, "start")
+        self.assertIn("nested imports: cells", out)
+        self.assertIn("IMPORTS (1):", out)
+        edit(d, "imports/electrical/imports/cells/battery.html", "100 Ah", "999 Ah")
+        sh("git", "add", "-A", cwd=d)
+        out = reconcile_out(d, "docs: import electrical")
+        self.assertIn("[mirror] imports/electrical/imports/cells/battery.html", out)
 
     def test_tracking_import_is_noticed_at_start(self):
         """dl-tracking: start reports a tracking import that is behind and

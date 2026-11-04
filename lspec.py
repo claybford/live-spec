@@ -2926,6 +2926,9 @@ def retirement_items(ctx, named, pending):
         return out, []
     for fp, link, tp, fr in retired:
         name = f"{repo_rel(fp)}#{link['src']}"
+        if link["rel"] == "resolves" and not col.mirrored(tp):
+            continue      # the slot became owned (mirrored -> melded): the answer moves in place,
+                          # the import item acknowledges the switch (reuse.html dl-slots)
         if fp not in pending and name not in named:
             out.append(item("review", name + " retired", f"{name}: dependency on "
                             f"{addr(tp, fr)} removed or redirected", True,

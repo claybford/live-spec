@@ -86,6 +86,7 @@ import io
 import json
 import marshal
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -1200,12 +1201,76 @@ def head_sha():
 
 # ============================================================ collection
 
+IMPORT_RE = re.compile(r"<code\b(?=[^>]*\bdata-import(?:[\s=>]))[^>]*>(.*?)</code>", re.S)
+IMPORT_DECL = re.compile(r"^(\S+) @ ([0-9a-f]{7,40}) (mirrored|melded) (pinned|tracking)$")
+
+
+def import_decl(row):
+    """The import declaration of a split row — {source, rev, edits, version}
+    from its one <code data-import> element — or None for a plain split row;
+    a string names a malformed declaration."""
+    found = [norm(m.group(1)) for m in IMPORT_RE.finditer(row)]
+    if not found:
+        return None
+    if len(found) > 1:
+        return "more than one data-import declaration"
+    m = IMPORT_DECL.match(found[0])
+    if not m:
+        return (f"malformed data-import {found[0]!r}: the form is "
+                "SOURCE @ REV mirrored|melded pinned|tracking")
+    return {"source": m.group(1), "rev": m.group(2), "edits": m.group(3), "version": m.group(4)}
+
+
 class Collection:
     def __init__(self, main, basis="worktree"):
         self.main = canon(main)
         self.basis = basis     # 'worktree', 'staged', or a commit ref
         self.specs, self.parents, self.fails, self.orphans, self.disconnected = {}, {}, [], set(), []
+        self.fyi = []          # defects wholly inside mirrored imports: upstream's to fix
+        self.imports = {}      # name -> {source, rev, edits, version, dir, entry, row: (path, rid)}
         self._build()
+
+    # ---- imports
+    def import_chain(self, path):
+        """Import records enclosing PATH, outermost first ([] for the
+        importer's own files). A nested import is its component's relationship:
+        every enclosing record is on the chain."""
+        p = canon(path)
+        chain = [rec for rec in self.imports.values() if p.startswith(rec["dir"] + os.sep)]
+        return sorted(chain, key=lambda rec: len(rec["dir"]))
+
+    def mirrored(self, path):
+        """PATH is mirrored content: bytes this repository never edits, whose
+        obligations are upstream's (reuse.html participation). Any mirrored
+        import on the chain makes it so; melded all the way down is owned."""
+        return any(rec["edits"] == "mirrored" for rec in self.import_chain(path))
+
+    def imported(self, path):
+        return bool(self.import_chain(path))
+
+    def _record_import(self, p, rid, row, child):
+        """Register the import a split row declares; None for a plain row."""
+        decl = import_decl(row)
+        if isinstance(decl, str):
+            self.fails.append(f"[import] {rid} in {rel(p)}: {decl}")
+            return
+        base = canon(os.path.join(os.path.dirname(p), IMPORTS_DIR))
+        inside = child.startswith(base + os.sep)
+        if decl is None:
+            if inside and not self.imported(p):
+                self.fails.append(f"[import] {rid} in {rel(p)} reaches {rel(child)} by a plain split "
+                                  f"row; an import declares <code data-import>SOURCE @ REV "
+                                  f"mirrored|melded pinned|tracking</code> in the row")
+            return
+        if not inside:
+            self.fails.append(f"[import] {rid} in {rel(p)}: an imported unit lives under "
+                              f"{IMPORTS_DIR}/<name>/ beside the importing file, not at {rel(child)}")
+            return
+        name = child[len(base) + 1:].split(os.sep)[0]
+        key = name if p == self.main or not self.imported(p) else \
+            "/".join(r["name"] for r in self.import_chain(p)) + "/" + name
+        self.imports[key] = {**decl, "name": name, "dir": os.path.join(base, name),
+                             "entry": child, "row": (p, rid), "nested": self.imported(p)}
 
     def _read(self, p):
         """-> (Spec|None, error|None). None spec = absent at this basis."""
@@ -1262,19 +1327,21 @@ class Collection:
             for rid, row in s.rows("dl-split-"):
                 tds = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S)
                 files = re.findall(r'href="([^"#]+\.html)(?:#[^"]*)?"', tds[0]) if tds else []
+                sink = self.fyi if self.mirrored(p) else self.fails
                 if len(files) != 1:
-                    self.fails.append(f"[split] {rid} in {rel(p)}: selection "
-                                      f"cell must link exactly one file (found {len(files)})")
+                    sink.append(f"[split] {rid} in {rel(p)}: selection "
+                                f"cell must link exactly one file (found {len(files)})")
                     continue
                 child = canon(os.path.join(os.path.dirname(p), files[0]))
                 if child in self.parents:
-                    self.fails.append(f"[split] {rel(child)} justified twice "
-                                      f"({self.parents[child][1]}, {rid}) — one parent per file")
+                    sink.append(f"[split] {rel(child)} justified twice "
+                                f"({self.parents[child][1]}, {rid}) — one parent per file")
                     continue
                 if not self._exists(child):
-                    self.fails.append(f"[split] {rid} in {rel(p)} links "
-                                      f"{files[0]}, which does not exist (ghost row)")
+                    (self.fyi if self.mirrored(p) else self.fails).append(
+                        f"[split] {rid} in {rel(p)} links {files[0]}, which does not exist (ghost row)")
                     continue
+                self._record_import(p, rid, row, child)
                 self.parents[child] = (p, rid)
                 queue.append(child)
         for p, s in self.specs.items():
@@ -1285,8 +1352,13 @@ class Collection:
                 if tgt and tgt not in self.specs and self._exists(tgt) and tgt.endswith(".html"):
                     self.orphans.add(tgt)
         for o in sorted(self.orphans):
-            self.fails.append(f"[split] {rel(o)} is linked from the collection "
-                              f"but has no split row (orphan)")
+            # An orphan inside a mirrored import is upstream's defect (FYI);
+            # one the importer's own files link is the importer's.
+            linked_by_owned = any(not self.mirrored(p) and any(
+                resolve(p, l["href"])[0] == o for l in s.links if l["rel"] != "external")
+                for p, s in self.specs.items())
+            (self.fails if linked_by_owned or not self.mirrored(o) else self.fyi).append(
+                f"[split] {rel(o)} is linked from the collection but has no split row (orphan)")
         root = os.path.dirname(self.main)
         stray = [fp for fp in html_files(root, self.basis)
                  if fp not in self.specs and fp not in self.orphans]
@@ -1509,8 +1581,11 @@ def commit_types(col, fails):
         if ds:
             decls[p] = ds[0]
     types = None
+    imported = getattr(col, "imported", lambda p: False)
     for p, text in decls.items():
         if p != main_path:
+            if imported(p):
+                continue              # an imported main's declaration is inert here (dl-operate)
             fails.append(f"[commit-types] {rel(p)}: the declaration belongs in main "
                          f"({rel(main_path)}), which governs the collection")
             continue
@@ -1540,14 +1615,22 @@ def marker_visible(raw):
 
 
 def check_structure(col, specimens=True, markers=True):
+    """Structural failures of the collection. A defect wholly inside a
+    mirrored import is upstream's to fix: it goes to col.fyi, not the result
+    (reuse.html participation); a melded import's defects are the importer's."""
     fails = list(col.fails)
+    mirrored = getattr(col, "mirrored", lambda p: False)
+    imported = getattr(col, "imported", lambda p: False)
     commit_types(col, fails)
     for p, s in col.specs.items():
-        if commit_type_decls(s) and "status" not in s.elems:
+        if commit_type_decls(s) and "status" not in s.elems and not imported(p):
             fails.append(f"[seed-shape] {rel(p)}: no element id=status — a main carries "
                          f"the bootloader (p id=\"status\"); the derived gate item reads it")
     for p, s in col.specs.items():
         r = rel(p)
+        own = fails
+        if mirrored(p):
+            fails = col.fyi          # this file's defects are FYI; restored below
         idset = set(s.ids)
         for i in sorted(idset):
             if s.ids.count(i) > 1:
@@ -1583,7 +1666,7 @@ def check_structure(col, specimens=True, markers=True):
         for off in s.bad_sealed:
             fails.append(f"[sealed] {r}: data-sealed on an element with no id — "
                          f"protection needs a stable anchor on the complete claim")
-        if markers:
+        if markers and not mirrored(p):      # a mirrored import's markers are slots
             found = re.findall(r"\[(?:ADAPT|PROJECT)", marker_visible(s.raw))
             if found:
                 fails.append(f"[adapt] {r}: {len(found)} unresolved [ADAPT]/[PROJECT] "
@@ -1623,9 +1706,10 @@ def check_structure(col, specimens=True, markers=True):
                                  "#fragment links for local claims, not file paths")
                 # Never resolve a forbidden local link against the enclosing tree.
                 specimen.links = [link for link in specimen.links if link not in local_links]
-                embedded = SimpleNamespace(fails=[], specs={p: specimen})
+                embedded = SimpleNamespace(fails=[], fyi=[], specs={p: specimen})
                 for failure in check_structure(embedded, specimens=False, markers=False):
                     fails.append(f"[specimen {match[1]}] {failure}")
+        fails = own
     return fails
 
 
@@ -1704,8 +1788,9 @@ def owed_reviews(col, dirty_paths=None, basis="HEAD", pending_seeds=()):
                  "baseline": None, "note": "no commits yet", "incomplete": "no commits yet"}
                 for fp, l, tp, fr in col.depends_on_edges() if l["src"] is not None]
     cache, seen, dirty_cache = {}, {}, {}
+    mirrored = getattr(col, "mirrored", lambda p: False)
     for fp, l, tp, fr in col.depends_on_edges():
-        if l["src"] is None:
+        if l["src"] is None or mirrored(fp):
             continue
         if fp in pending_seeds:
             continue
@@ -1882,7 +1967,7 @@ def head_edges(col, root):
     edges = []
     for p in sorted(files):
         s = file_at("HEAD", p)          # None: the file is new in this commit
-        if s is None:
+        if s is None or col.mirrored(p):
             continue
         for l in s.links:
             if l["rel"] != "depends-on" or l["src"] is None:
@@ -2018,6 +2103,7 @@ def retired_dependencies(col):
     return [(fp, l, tp, fr) for fp, l, tp, fr in head.depends_on_edges()
             if l["src"] is not None and fp in col.specs
             and l["src"] in col.specs[fp].elems
+            and not col.mirrored(fp)
             and (fp, l["src"], tp, fr) not in current]
 
 
@@ -2036,7 +2122,7 @@ _COLOR = False            # stdout's decision for this run
 _COLOR_MODE = "auto"      # the --color flag, so another stream can decide for itself
 _SGR = {"bold": "1", "red": "31", "green": "32", "yellow": "33", "blue": "34",
         "magenta": "35", "cyan": "36", "grey": "90"}
-_TONE = {"PASS": "green", "RECEIPT": "green", "HANDOFF": "green",
+_TONE = {"PASS": "green", "RECEIPT": "green", "HANDOFF": "green", "FYI": "grey",
          "FAIL": "red", "UNKNOWN": "red",
          "OPEN": "yellow", "REOPENED": "yellow", "OWED": "yellow", "UNCOMMITTED": "yellow",
          "WATCH": "magenta", "SEALED": "magenta", "ADVISORY": "grey", "note": "grey"}
@@ -2216,6 +2302,7 @@ ANSWERS = {
               "recurrence": (True, False)},
     "watched": {"watched": (True, False), "none": (False, False)},
     "decided": {"decided": (True, False), "none": (False, False)},
+    "import": {"adopted": (False, True), "updated": (False, False)},
     # Waivers: a check that infers a defect from a surface form can be wrong
     # about the claim, so it takes an answer with a reason, recorded in the
     # trailer. Where the form is the defect (an empty cell, an unlinked
@@ -2233,7 +2320,7 @@ REF_OPTIONAL = {"correction"}
 WAIVABLE = ("caveat", "placeholder", "empty")
 VIEW_SOURCE_CAP = 400   # chars of a linked source shown on the view item when no clause under test links it
 QUESTION_ORDER = ("read", "reseed", "caveat", "placeholder", "empty", "sealed", "confirm",
-                  "removed", "cause", "watched", "decided", "derived", "neighbor")
+                  "removed", "cause", "watched", "decided", "import", "derived", "neighbor")
 # Sealed records in commit trailers, newest first decides a claim's state.
 CORRECTION_RE = re.compile(r"^Reconciled: correction (\S+) (?:per (\S+)|\(awaiting confirmation\))"
                            r" \u2014 (.*)$", re.M)
@@ -2289,6 +2376,8 @@ def changed_rows(ctx):
     """Decision rows added or with changed cells in this commit: {rid: path}."""
     out = {}
     for p, s in ctx.staged.specs.items():
+        if ctx.staged.mirrored(p):
+            continue
         old = dict(ctx.head_specs[p].rows()) if p in ctx.head_specs else {}
         for rid, row in s.rows():
             if rid not in old or row_decision(old[rid]) != row_decision(row):
@@ -2442,7 +2531,7 @@ def shape_items(ctx, head):
     col = ctx.staged
     out = []
     for (p, eid), kind in sorted(ctx.changed.items()):
-        if kind == "removed" or p not in col.specs:
+        if kind == "removed" or p not in col.specs or col.mirrored(p):
             continue
         s = col.specs[p]
         name = addr(p, eid)
@@ -2517,6 +2606,7 @@ def mechanical_items(ctx, today):
                                  "fetch or repair history"))
     items += subject_items(ctx) + shape_items(ctx, head)
     items += watch_items(col, today)
+    items += mirror_items(ctx)
     items += obligation_items(ctx)
     for p, s in col.specs.items():
         if s.retired_changes:
@@ -2525,10 +2615,115 @@ def mechanical_items(ctx, today):
     return items
 
 
-def watch_entries(col):
-    """[(path, id, until or None)] for every watch entry in the collection."""
+def mirror_items(ctx):
+    """Mechanical: a staged change to mirrored content that `lspec import`
+    did not write. The manifest (lspec/imports.json, transaction state) holds
+    the blob ids the last import or update of each unit fetched at its
+    recorded revision; a staged blob under a mirrored import must match it,
+    and the row's revision must be the manifest's. No network: the manifest
+    is the evidence, so a hand edit, a deletion, or a rev typed into the row
+    is refused (reuse.html participation: local edits prohibited)."""
+    col = ctx.staged
     out = []
+    root = ctx.root
+    manifest = read_state("imports.json") or {}
+    paths = staged_paths(ctx) if ctx.head_state == "ok" else list(index_listing(root))
+    index = index_listing(root)
+    for n in sorted(paths):
+        p = canon(os.path.join(root, n))
+        chain = col.import_chain(p)
+        if not any(rec["edits"] == "mirrored" for rec in chain):
+            continue
+        outer = chain[0]
+        rec = manifest.get(outer["name"])
+        inside = posix(os.path.relpath(p, outer["dir"]))
+        expected = (rec or {}).get("files", {}).get(inside)
+        if rec is None:
+            why = f"no import manifest for {outer['name']} in this worktree"
+        elif rec.get("rev") != outer["rev"]:
+            why = f"the row records {outer['rev'][:12]}, the manifest {rec.get('rev', '')[:12]}"
+        elif index.get(n) != expected:
+            why = "the staged bytes are not the fetched ones" if expected else \
+                  "the file is not part of the fetched unit"
+        else:
+            continue
+        out.append(item("mirror", n, f"{n}: mirrored content changed outside lspec import ({why})",
+                        True, detail="mirrored bytes are never edited here: restore them, or "
+                        "fetch the change with " + command(col, "import", "--update", outer["name"])
+                        + "; to own the content, change the row to melded"))
+    # The row's declaration is part of the record: a revision typed into a
+    # mirrored import's row, with no update behind it, is refused the same way.
+    before = ctx.head.imports if ctx.head is not None else {}
+    for key, rec in sorted(col.imports.items()):
+        if rec["nested"] or rec["edits"] != "mirrored":
+            continue
+        was = before.get(key)
+        changed = was is None or (was["rev"], was["source"]) != (rec["rev"], rec["source"])
+        known = manifest.get(rec["name"])
+        if not changed:
+            continue                     # the committed record stands; the manifest is evidence for changes
+        if known is None or known.get("rev") != rec["rev"] or known.get("source") != rec["source"]:
+            why = ("no import manifest in this worktree" if known is None else
+                   f"the manifest holds {known.get('rev', '')[:12]} from {known.get('source')}")
+            p, rid = rec["row"]
+            out.append(item("mirror", addr(p, rid), f"{addr(p, rid)}: the import's recorded "
+                            f"revision or source was not fetched by lspec import ({why})", True,
+                            detail="record what was fetched: " + command(col, "import", "--update", rec["name"])))
+    return out
+
+
+def import_items(ctx):
+    """One judgment per import this commit adopts (its row added) or updates
+    (its recorded revision or settings changed): the adoption question the
+    tool cannot infer — is the whole unit the subject or component adopted —
+    or the acknowledgment that an update was taken through the gate."""
+    col = ctx.staged
+    out = []
+    before = ctx.head.imports if ctx.head is not None else {}
+    for key, rec in sorted(col.imports.items()):
+        if rec["nested"]:
+            continue                     # a component's own import: its relationship
+        was = before.get(key)
+        p, rid = rec["row"]
+        name = f"{IMPORTS_DIR}/{rec['name']}"
+        fields = (rec["source"], rec["rev"], rec["edits"], rec["version"])
+        if was is None:
+            expect = "adopted"
+            question = (f"{name} is imported {rec['edits']}, {rec['version']} from {rec['source']} "
+                        f"@ {rec['rev'][:12]}, entry {rel(rec['entry'])}. Is the whole imported unit "
+                        "the subject or component you are adopting — not a broader collection taken "
+                        "to reach one part (answer adopted, stating what it is)? If not, wait for "
+                        "upstream to pinch off the subject.")
+        elif (was["source"], was["rev"], was["edits"], was["version"]) != fields:
+            expect = "updated"
+            question = (f"{name} changes from {was['edits']}, {was['version']} @ {was['rev'][:12]} "
+                        f"to {rec['edits']}, {rec['version']} @ {rec['rev'][:12]}. Was this taken "
+                        "through lspec import --update, with every review it triggers asked below "
+                        "(answer updated)?")
+        else:
+            continue
+        unit = sorted(rel(q) for q in col.specs if q.startswith(rec["dir"] + os.sep))
+        it = item("import", name, f"{expect}: {name}", False,
+                  evidence=digest(head_sha() or "unborn", name, *fields, *unit),
+                  excerpt=f"row {addr(p, rid)}: {shorten(col.specs[p].text(rid) or '', 300)}\n"
+                          f"unit ({len(unit)} spec file(s)): " + ", ".join(unit),
+                  question=question)
+        it["expect"] = expect
+        it["unit"] = name
+        it["rev"] = rec["rev"]
+        out.append(it)
+    return out
+
+
+def watch_entries(col, owned=True):
+    """[(path, id, until or None)] for every watch entry in the collection's
+    own files; owned=False gives the ones inside mirrored imports instead
+    (upstream's, shown as FYI)."""
+    out = []
+    mirrored = getattr(col, "mirrored", lambda p: False)
     for p, s in col.specs.items():
+        if mirrored(p) == owned:
+            continue
         until = {eid: value for eid, value, _ in s.watches if eid}
         for eid in s.ids:
             if eid.startswith(WATCH_PREFIX) and s.tags.get(eid) == "tr":
@@ -2569,10 +2764,14 @@ def watch_items(col, today):
 
 def watch_line(col):
     entries = watch_entries(col)
-    if not entries:
-        return f"{title('WATCH ENTRIES')}: none"
-    return f"{title('WATCH ENTRIES')} ({len(entries)}):\n" + "\n".join(
-        "  " + addr(p, eid) + (f" (until {until})" if until else "") for p, eid, until in entries)
+    line = f"{title('WATCH ENTRIES')}: none" if not entries else \
+        f"{title('WATCH ENTRIES')} ({len(entries)}):\n" + "\n".join(
+            "  " + addr(p, eid) + (f" (until {until})" if until else "") for p, eid, until in entries)
+    theirs = watch_entries(col, owned=False)
+    if theirs:
+        line += f"\n{status('FYI')} upstream watch entries in mirrored imports ({len(theirs)}):\n" + "\n".join(
+            "  " + addr(p, eid) + (f" (until {until})" if until else "") for p, eid, until in theirs)
+    return line
 
 
 def edge_key(r):
@@ -2822,6 +3021,8 @@ def sealed_items(ctx):
     if ctx.head_state != "ok" or ctx.baseline_error:
         return out
     for p, s in ctx.head.specs.items():
+        if ctx.staged.mirrored(p) or ctx.head.mirrored(p):
+            continue                      # upstream's seals; an update is answered as an update
         for i in s.sealed:
             name = f"{repo_rel(p)}#{i}"
             try:
@@ -3009,7 +3210,8 @@ def derived_item(ctx, head):
     col = ctx.staged
     if subject_type(ctx.subject, "review") is not None:
         return None
-    status = [(p, s) for p, s in col.specs.items() if "status" in s.elems]
+    # An imported main's status line is inert here (dl-operate): never a bootloader.
+    status = [(p, s) for p, s in col.specs.items() if "status" in s.elems and not col.imported(p)]
     # What each status line links, resolved across files, in document order.
     linked, linked_by = [], {}
     for p, s in status:
@@ -3042,6 +3244,8 @@ def derived_item(ctx, head):
         if eid == "status":
             continue
         spec = col.specs.get(p) or ctx.head_specs.get(p)
+        if col.mirrored(p) and (p, eid) not in linked_by:
+            continue                     # upstream's rows: a source only if the line links it
         label = ("watch entry" if eid.startswith(WATCH_PREFIX) else
                  "decision row" if eid.startswith("dl-") else
                  "sealed claim" if spec is not None and eid in spec.sealed else
@@ -3211,7 +3415,8 @@ def neighbor_relations(ctx):
             tp = tp or q
             if ctx.changed.get((tp, fr)) in ("added", "changed"):
                 neighbors.setdefault((q, l["src"]), set()).add(claim_rel(ctx, tp, fr, "cites"))
-    return {k: v for k, v in neighbors.items() if k not in ctx.changed}
+    return {k: v for k, v in neighbors.items()
+            if k not in ctx.changed and not col.mirrored(k[0])}
 
 
 def changed_dependencies(ctx, np_, nid):
@@ -3268,6 +3473,7 @@ def judgment_items(ctx):
     if subject_type(ctx.subject, "fix") is not None:
         items.append(cause_item(ctx, head, records))
     items += asked_items(ctx, head, records)
+    items += import_items(ctx)
     derived = derived_item(ctx, head)
     if derived:
         items.append(derived)
@@ -3285,7 +3491,7 @@ def cause_records(ctx):
         if kind == "removed" or p not in ctx.staged.specs:
             continue
         s = ctx.staged.specs[p]
-        if s.tags.get(eid) != "tr":
+        if s.tags.get(eid) != "tr" or ctx.staged.mirrored(p):
             continue
         if eid.startswith(WATCH_PREFIX):
             out.append(("watch entry", p, eid, kind, s.text(eid) or ""))
@@ -3609,6 +3815,13 @@ def validate(it, given, ctx, other_reasons):
         return [answer, text], f"Reconciled: waived {kind} {name} ({answer}) — {text}"
     if kind in ("watched", "decided"):
         return answer_asked(ctx, kind, answer, ref)
+    if kind == "import":
+        if answer != it["expect"]:
+            raise ValueError(f"this item takes {it['expect']}: " + ("the row is new" if it["expect"]
+                             == "adopted" else "the import's recorded revision or settings changed"))
+        if answer == "adopted":
+            return [answer, text], f"Reconciled: adopted {it['unit']} \u2014 {text}"
+        return [answer], f"Reconciled: updated {it['unit']} to {it['rev'][:12]}"
     if kind == "confirm":
         return [answer, text], f"Reconciled: confirmed {it['claim']} \u2014 {text}"
     if kind == "reseed":
@@ -3809,6 +4022,8 @@ def report_structure(col, markers=True):
               f"all structural checks green")
     for d in col.disconnected:
         print(f"  {status('note')}: {rel(d)} is not linked from the collection (disconnected)")
+    for f in getattr(col, "fyi", []):
+        print(f"  {status('FYI')}: {f} — inside a mirrored import: upstream's to fix")
     # A supporting spec without counts is the normal case (detail split off);
     # main holds the enumerations a dropped item would silently shrink.
     if col.main in col.specs and not col.specs[col.main].count_decls:
@@ -4571,6 +4786,7 @@ def cmd_start(args):
     print(title("OBLIGATIONS"))
     rc, clean = obligations_report(col)
     print_shared_literals(col)
+    imports_report(col)
     if in_git and (request := read_state("request.json")) and request.get("start") == head_sha() \
             and "clean" not in request:
         write_state("request.json", {**request, "clean": clean})
@@ -4925,6 +5141,376 @@ def cmd_review(args):
     return 0
 
 
+# =============================================================== imports
+# lspec import: copy-based transport between repositories (reuse.html
+# dl-transport). The unit — one entry file, what its split rows reach, and
+# every upstream file those specs link — is fetched at a revision and written
+# under imports/<name>/ with upstream's layout intact (dl-importdir); the
+# importer's split row records source, revision and settings in one visible
+# declaration (<code data-import>); the fetched blob ids go to the manifest
+# (lspec/imports.json) the gate's mirror item checks. Nothing here commits.
+
+TOOL_FILES = ("lspec.py", "hooks")   # upstream's tool copy stays behind (dl-selection)
+
+
+class ImportRefused(Exception):
+    """A refusal of lspec import, printed to stderr, exit 2."""
+
+
+def tree_join(base, href):
+    """HREF's path part resolved against BASE, a path inside a git tree."""
+    path = href.partition("#")[0]
+    if not path:
+        return None
+    return posixpath.normpath(posixpath.join(posixpath.dirname(base), path))
+
+
+def fetch_upstream(source, rev=None):
+    """-> (scratch repository holding SOURCE at REV, full sha). REV defaults to
+    upstream's HEAD; a sha, tag or branch is fetched directly, or the whole
+    of upstream when the server refuses a bare object."""
+    tmp = tempfile.mkdtemp(prefix="lspec-import-")
+    git("init", "-q", cwd=tmp)
+    src = canon(source) if os.path.isdir(source) else source
+    try:
+        if rev is None:
+            head = git("ls-remote", src, "HEAD", cwd=tmp).split()
+            if not head:
+                raise ImportRefused(f"{source}: no HEAD to import (an empty repository?)")
+            rev = head[0]
+        try:
+            git("fetch", "-q", src, rev, cwd=tmp)
+            sha = git("rev-parse", "--verify", "FETCH_HEAD^{commit}", cwd=tmp).strip()
+        except RuntimeError:
+            git("fetch", "-q", src, cwd=tmp)
+            sha = git("rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}", cwd=tmp).strip()
+            if not sha:
+                raise ImportRefused(f"{source} has no commit {rev!r}")
+    except RuntimeError as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise ImportRefused(f"cannot fetch {source}: {e}") from e
+    return tmp, sha
+
+
+def upstream_files(tmp, sha):
+    """{path: blob oid} of SHA's tree."""
+    return {n: oid for n, (kind, oid) in tree_listing(tmp, sha).items() if kind == "blob"}
+
+
+def blob_text(tmp, oid):
+    return git("cat-file", "blob", oid, cwd=tmp)
+
+
+def blob_bytes(tmp, oid):
+    r = subprocess.run(["git", "cat-file", "blob", oid], cwd=tmp, capture_output=True, check=False)
+    if r.returncode:
+        raise RuntimeError(r.stderr.decode(errors="replace").strip() or f"cannot read {oid}")
+    return r.stdout
+
+
+def select_unit(tmp, sha, entry):
+    """The imported unit (dl-selection): ENTRY, every file its split rows reach
+    (upstream's own imports included), and every other upstream file those
+    spec files link. -> (spec paths in walk order, other linked paths, notes,
+    {path: oid}). Upstream's tool copy is never selected."""
+    files = upstream_files(tmp, sha)
+    if entry not in files:
+        raise ImportRefused(f"{entry} is not a file of {sha[:12]}")
+    specs, linked, notes, queue = [], set(), [], [entry]
+    while queue:
+        path = queue.pop(0)
+        if path in specs:
+            continue
+        specs.append(path)
+        s = Spec(path, blob_text(tmp, files[path]))
+        for rid, row in s.rows("dl-split-"):
+            tds = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S)
+            hrefs = re.findall(r'href="([^"#]+\.html)(?:#[^"]*)?"', tds[0]) if tds else []
+            for href in hrefs[:1]:
+                child = tree_join(path, href)
+                if child in files:
+                    queue.append(child)
+                else:
+                    notes.append(f"{path}: split row {rid} links {href}, absent upstream")
+        for l in s.links:
+            if is_external(l["href"]):
+                continue                 # a URL; a rel=external repository file still travels
+            tgt = tree_join(path, l["href"])
+            if tgt and tgt in files and tgt not in specs:
+                linked.add(tgt)
+    linked -= set(specs)
+    tool = {q for q in specs + sorted(linked) if q in TOOL_FILES or q.startswith("hooks/")}
+    if tool:
+        notes.append("left behind, upstream's tool copy: " + ", ".join(sorted(tool)))
+    specs = [q for q in specs if q not in tool]
+    linked = sorted(q for q in linked if q not in tool)
+    return specs, linked, notes, files
+
+
+OPERATING_PARTS = ("status", "conventions")
+
+
+def demote_main(text):
+    """A melded imported main becomes a supporting spec in place (reuse.html
+    dl-demote): its status line, conventions, the paragraph declaring commit
+    types and the tooling instruction are removed; everything else — rows,
+    split rows, open items, the directive — stays. -> (text, removed labels)."""
+    removed = []
+    for eid in OPERATING_PARTS:
+        new, n = re.subn(rf'[ \t]*<p\b[^>]*\bid="{eid}"[^>]*>.*?</p>[ \t]*\n?', "", text, count=1, flags=re.S)
+        if n:
+            removed.append(f"#{eid}"); text = new
+    for label, pat in (("the commit-type declaration",
+                        r'[ \t]*<p\b[^>]*>(?:(?!</p>).)*?data-commit-types.*?</p>[ \t]*\n?'),
+                       ("the tooling instruction",
+                        r'[ \t]*<p\b[^>]*>\s*(?:<strong>)?Tooling\b.*?</p>[ \t]*\n?')):
+        new, n = re.subn(pat, "", text, count=1, flags=re.S)
+        if n:
+            removed.append(label); text = new
+    return text, removed
+
+
+def import_row(name, entry_rel, adopting, rejected, reason, source, sha, edits, version):
+    return (f'<tr id="dl-split-{name}"><td><code>dl-split-{name}</code> '
+            f'<a href="{entry_rel}">{entry_rel}</a> {html.escape(adopting)}</td>'
+            f'<td>{html.escape(rejected)}</td>'
+            f'<td>{html.escape(reason)} <code data-import>{html.escape(source)} @ {sha} '
+            f'{edits} {version}</code></td></tr>')
+
+
+def insert_row(main_path, row_html):
+    """Place ROW_HTML after main's last decision row, else as the first row of
+    the table after the element id=log; refuse when neither exists."""
+    with open(main_path, encoding="utf-8") as fh:
+        text = fh.read()
+    s = Spec(main_path, text)
+    rows = s.rows()
+    if rows:
+        last = rows[-1][0]
+        _, end = s.elems[last]
+        return text[:end] + "\n" + row_html + text[end:]
+    if "log" in s.elems:
+        start = s.elems["log"][1]
+        m = re.compile(r"<table\b[^>]*>(\s*<tr\b[^>]*>.*?</tr>)?", re.S).search(text, start)
+        if m:
+            return text[:m.end()] + "\n" + row_html + text[m.end():]
+    raise ImportRefused(f"{rel(main_path)} has no decision log to hold the import row; add "
+                        f"one (a table after an element id=\"log\") and rerun")
+
+
+def write_unit(tmp, files, paths, dest, demote=None):
+    """Write PATHS from the fetched tree under DEST, upstream's layout kept;
+    DEMOTE names the entry to demote. -> ({path: oid} written, removed labels)."""
+    written, removed = {}, []
+    for path in paths:
+        target = os.path.join(dest, *path.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        data = blob_bytes(tmp, files[path])
+        if path == demote:
+            text, removed = demote_main(data.decode("utf-8"))
+            data = text.encode("utf-8")
+        with open(target, "wb") as fh:
+            fh.write(data)
+        written[path] = files[path]
+    return written, removed
+
+
+def import_name_ok(name):
+    return bool(re.fullmatch(r"[A-Za-z][\w.-]*", name or ""))
+
+
+def cmd_import(args):
+    col = load(args)
+    root = repo_root()
+    if root is None:
+        print("lspec import: not a git checkout", file=sys.stderr); return 2
+    try:
+        if args.update:
+            return import_update(col, args)
+        return import_new(col, args)
+    except ImportRefused as e:
+        print(f"lspec import: {e}", file=sys.stderr)
+        return 2
+
+
+def print_selection(sha, specs, linked, notes):
+    print(f"unit at {sha[:12]}: {len(specs)} spec file(s), {len(linked)} linked file(s)")
+    for q in specs:
+        print(f"  spec   {q}")
+    for q in linked:
+        print(f"  linked {q}")
+    for n in notes:
+        print(f"  {status('note')}: {n}")
+
+
+def import_new(col, args):
+    name, source, entry = args.name, args.source, args.entry
+    if not (name and source and entry):
+        raise ImportRefused("import takes SOURCE ENTRY --as NAME --edits mirrored|melded "
+                            "--version pinned|tracking (--update NAME to update one)")
+    if not import_name_ok(name):
+        raise ImportRefused(f"{name!r}: a name is a word (letters, digits, . _ -)")
+    if not args.edits or not args.version:
+        raise ImportRefused("the edits setting (--edits mirrored|melded) and the version "
+                            "setting (--version pinned|tracking) are explicit on every import")
+    if not args.adopting or not args.reason:
+        raise ImportRefused("--adopting TEXT (the subject or component this unit is) and "
+                            "--reason TEXT (why it is adopted) fill the split row; the gate "
+                            "asks the adoption question of the commit")
+    if name in col.imports or any(r["name"] == name for r in col.imports.values()) \
+            or f"dl-split-{name}" in col.specs[col.main].elems:
+        raise ImportRefused(f"{name} is already imported (row dl-split-{name}); "
+                            f"lspec import --update {name}, or another name")
+    dest = os.path.join(os.path.dirname(col.main), IMPORTS_DIR, name)
+    if os.path.exists(dest):
+        raise ImportRefused(f"{rel(dest)} exists; choose another name or remove it")
+    tmp, sha = fetch_upstream(source, args.at)
+    try:
+        specs, linked, notes, files = select_unit(tmp, sha, entry)
+        print_selection(sha, specs, linked, notes)
+        if args.dry_run:
+            print("dry run: nothing written")
+            return 0
+        demote = None
+        entry_spec = Spec(entry, blob_text(tmp, files[entry]))
+        if commit_type_decls(entry_spec):
+            if args.edits == "melded":
+                demote = entry
+            else:
+                notes.append(f"{entry} is a main: its operating declarations are inert here")
+        written, removed = write_unit(tmp, files, specs + linked, dest, demote)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    entry_rel = posix(os.path.relpath(os.path.join(dest, *entry.split("/")), os.path.dirname(col.main)))
+    row = import_row(name, entry_rel, args.adopting, args.rejected or "TBD", args.reason,
+                     source, sha, args.edits, args.version)
+    text = insert_row(col.main, row)
+    with open(col.main, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    manifest = read_state("imports.json") or {}
+    manifest[name] = {"source": source, "rev": sha, "edits": args.edits, "version": args.version,
+                      "entry": entry, "files": written, "at": now_iso()}
+    write_state("imports.json", manifest)
+    git("add", "--", repo_rel(dest), repo_rel(col.main), cwd=repo_root())
+    print(f"written {rel(dest)}/ ({len(written)} file(s)); row dl-split-{name} added to {rel(col.main)}")
+    for r in removed:
+        print(f"  demoted {entry}: removed {r}")
+    if not args.rejected:
+        print(f"  fill the row's rejected cell (TBD) in {rel(col.main)} before reconcile")
+    print("staged, nothing committed; next: " + cmd(command(col, "reconcile", "--subject",
+          f"docs: import {name} ({args.edits}, {args.version})")))
+    return 0
+
+
+def rewrite_import_decl(main_path, rid, sha):
+    """Replace the revision in row RID's data-import declaration."""
+    with open(main_path, encoding="utf-8") as fh:
+        text = fh.read()
+    s = Spec(main_path, text)
+    a, b = s.elems[rid]
+    row = text[a:b]
+    new_row, n = IMPORT_RE.subn(
+        lambda m: m.group(0).replace(m.group(1), re.sub(r"@ [0-9a-f]{7,40}", f"@ {sha}", m.group(1), count=1)),
+        row, count=1)
+    if n != 1:
+        raise ImportRefused(f"{rid}: no data-import declaration to update")
+    with open(main_path, "w", encoding="utf-8") as fh:
+        fh.write(text[:a] + new_row + text[b:])
+
+
+def import_update(col, args):
+    name = args.update
+    rec = next((r for k, r in col.imports.items() if r["name"] == name and not r["nested"]), None)
+    if rec is None:
+        raise ImportRefused(f"{name} is not an import of {rel(col.main)}; imports: "
+                            + (", ".join(sorted(r["name"] for r in col.imports.values()
+                                                if not r["nested"])) or "none"))
+    if rec["edits"] == "melded":
+        raise ImportRefused(f"{name} is melded: a three-way merge of the recorded base, the new "
+                            "revision and the local copy — not yet implemented (reuse.html "
+                            "open-reuse-tool); merge by hand and record the new revision in the row")
+    tmp, sha = fetch_upstream(rec["source"], args.at)
+    try:
+        entry = posix(os.path.relpath(rec["entry"], rec["dir"]))
+        specs, linked, notes, files = select_unit(tmp, sha, entry)
+        print_selection(sha, specs, linked, notes)
+        if sha == rec["rev"]:
+            print(f"{name} is at {sha[:12]} already; nothing to update")
+            return 0
+        if args.dry_run:
+            print("dry run: nothing written")
+            return 0
+        root = repo_root()
+        tracked = git("ls-files", "-z", "--", repo_rel(rec["dir"]), cwd=root).split("\0")
+        if any(tracked):
+            git("rm", "-r", "-q", "--cached", "--", repo_rel(rec["dir"]), cwd=root)
+        shutil.rmtree(rec["dir"], ignore_errors=True)
+        written, _ = write_unit(tmp, files, specs + linked, rec["dir"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    p, rid = rec["row"]
+    rewrite_import_decl(p, rid, sha)
+    manifest = read_state("imports.json") or {}
+    manifest[name] = {"source": rec["source"], "rev": sha, "edits": rec["edits"],
+                      "version": rec["version"], "entry": entry, "files": written, "at": now_iso()}
+    write_state("imports.json", manifest)
+    git("add", "-A", "--", repo_rel(rec["dir"]), repo_rel(p), cwd=root)
+    print(f"{name}: {rec['rev'][:12]} -> {sha[:12]}, {len(written)} file(s) replaced; row {rid} updated")
+    print("staged, nothing committed; the gate asks every review the update triggers. Next: "
+          + cmd(command(col, "reconcile", "--subject", f"docs: update {name} to {sha[:7]}")))
+    return 0
+
+
+def tracking_notices(col):
+    """One line per tracking import: behind by N commits, up to date, or
+    unreachable; never a block, never a write (reuse.html dl-tracking)."""
+    out = []
+    for key, rec in sorted(col.imports.items()):
+        if rec["nested"] or rec["version"] != "tracking":
+            continue
+        try:
+            tmp, sha = fetch_upstream(rec["source"])
+        except ImportRefused as e:
+            out.append(f"{rec['name']}: upstream unreachable ({e})")
+            continue
+        try:
+            if sha == rec["rev"]:
+                out.append(f"{rec['name']}: up to date at {sha[:12]}")
+                continue
+            try:
+                git("fetch", "-q", canon(rec["source"]) if os.path.isdir(rec["source"]) else rec["source"],
+                    rec["rev"], cwd=tmp)
+                n = git("rev-list", "--count", f"{rec['rev']}..{sha}", cwd=tmp).strip()
+                out.append(f"{rec['name']}: upstream has {n} new commit(s) since {rec['rev'][:12]}; "
+                           + command(col, "import", "--update", rec["name"]))
+            except RuntimeError:
+                out.append(f"{rec['name']}: upstream is at {sha[:12]}, the import at {rec['rev'][:12]}; "
+                           + command(col, "import", "--update", rec["name"]))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return out
+
+
+def imports_report(col):
+    """The imports of MAIN with their settings, for start."""
+    tops = [r for r in col.imports.values() if not r["nested"]]
+    if not tops:
+        return
+    print()
+    print(f"{title('IMPORTS')} ({len(tops)}):")
+    for rec in sorted(tops, key=lambda r: r["name"]):
+        nested = [r["name"] for r in col.imports.values() if r["nested"] and r["dir"].startswith(rec["dir"] + os.sep)]
+        print(f"  {rec['name']}: {rec['edits']}, {rec['version']} — {rec['source']} @ {rec['rev'][:12]}; "
+              f"entry {rel(rec['entry'])}" + (f"; nested imports: {', '.join(nested)}" if nested else ""))
+        if rec["edits"] == "mirrored":
+            print("    mirrored: never edited here; its watches, open items and defects are upstream's (FYI)")
+        else:
+            print("    melded: owned here; its obligations are this collection's")
+    for line in tracking_notices(col):
+        print(f"  {status('note')}: {line}")
+    print("  rules: reuse.html in the methodology; " + cmd("python3 lspec.py import --help"))
+
+
 # ================================================================== main
 # The tool's surface is its own output and these help texts (dl-cli): there
 # is no reference document to go stale beside them.
@@ -4934,7 +5520,8 @@ HELP = {
 A session: start MAIN, read what it lists whole, edit and stage, reconcile
 --subject "type: one transition", answer the checklist (--next / --tick), commit
 with `git commit --no-edit` (the hooks write subject and Reconciled: trailers),
-finish on a clean tree. Every verb takes --main MAIN before or after the verb;
+finish on a clean tree. Content from another repository: `lspec import --help`
+(the methodology's reuse.html). Every verb takes --main MAIN before or after the verb;
 with a request open, MAIN defaults to the request's. --color auto|always|never
 goes before the verb: auto (the default) colors only a terminal, never a pipe,
 and respects NO_COLOR and TERM=dumb; the words carry every status, color or
@@ -5001,6 +5588,8 @@ Mechanical items clear only when the files (or the subject) change:
   provisional  a provisional value or bare status word with no link to what closes it
   caveat       a [WATCH] marker not linking a watch- row; a watch- name no row carries
   watch        a data-watch-until date has passed, or is malformed
+  mirror       a staged change to mirrored imported content that lspec import
+               did not write (the manifest in lspec/imports.json is the evidence)
   baseline     HEAD or the baseline collection cannot be read
 
 Judgment items are answered one at a time: --next shows the first open item,
@@ -5031,6 +5620,9 @@ checklist once none is left. Each answer is recorded as a Reconciled: trailer.
                unverified --ref WATCH | recurrence --ref ROW (diagnostic register)
   watched      every commit but review: and fix:: watched --ref WATCH | none
   decided      every commit but review:: decided --ref ROW | none
+  import       an import row added: adopted --reason (the whole unit is the
+               subject or component adopted); its revision or settings changed:
+               updated
   derived      a source the status line links (any file), or a watch entry,
                decision row or sealed claim, changed: was the bootloader
                re-derived whole? rederived | unaffected --reason; unaffected
@@ -5103,6 +5695,41 @@ Renames a file or an anchor and repairs references, a renamed row's label
 included; the rename and its repairs are staged, nothing committed. A renamed
 dependency target owes a review: its edge's baseline is unknown until a
 review: commit names the dependent claim.""",
+
+"import": """\
+Adopts another repository's subject-shaped content (the methodology's
+reuse.html). SOURCE is a git URL or local path, ENTRY the unit's entry file in
+it; --at REV picks a commit, tag or branch (default: upstream HEAD). The unit
+is ENTRY, everything its split rows reach (upstream's own imports included) and
+every other upstream file those specs link; upstream's lspec.py and hooks/ stay
+behind. It is listed, then written under imports/NAME/ with upstream's layout,
+and a split row dl-split-NAME is added to MAIN's decision log carrying the
+settings in one declaration: <code data-import>SOURCE @ SHA EDITS VERSION</code>.
+Both settings are explicit:
+  --edits mirrored   the copy is never edited here; its watches, open items,
+                     seals and internal defects are upstream's (shown as FYI);
+                     its [ADAPT] slots are answered in MAIN's own parameters
+  --edits melded     the copy is owned here, every obligation included; an
+                     imported main is demoted in place (status line,
+                     conventions, commit types and tooling instruction removed)
+  --version pinned   stays at SHA until a deliberate --update
+  --version tracking start reports when upstream has moved; --update applies it
+--adopting TEXT says what subject or component the unit is (the selection
+cell); --reason TEXT why it is adopted (the reason cell); --rejected TEXT the
+alternatives (else TBD, which the gate refuses until filled). The result is
+staged for one ordinary commit, whose gate asks the adoption question
+(adopted --reason): is the whole unit the subject adopted, not a broader
+collection taken to reach one part? Take a broader unit never: wait for
+upstream to pinch the subject off. --dry-run lists the unit and writes nothing.
+
+--update NAME [--at REV]: refetches a mirrored import at REV (default HEAD),
+replaces its files and the row's revision, and stages the change for the gate,
+which asks every review the changed claims trigger (the dependents' neighbor
+items) and acknowledges the update (updated). A melded update is a three-way
+merge, not yet implemented. The gate's mirror item refuses any staged change
+to mirrored content that an import or update did not write: the manifest in
+lspec/imports.json (transaction state, deletable: an update rewrites it) holds
+the fetched blob ids.""",
 }
 
 
@@ -5166,6 +5793,20 @@ def main(argv):
     i.add_argument("base", nargs="?", default="HEAD"); add_main(i)
     m = sub.add_parser("mv", help="rename a file or anchor, repairing references", formatter_class=raw,
                        epilog=HELP["mv"]); m.add_argument("old"); m.add_argument("new"); add_main(m)
+    im = sub.add_parser("import", help="adopt another repository's unit under imports/NAME/",
+                        formatter_class=raw, epilog=HELP["import"])
+    im.add_argument("source", nargs="?", metavar="SOURCE", help="upstream git URL or local path")
+    im.add_argument("entry", nargs="?", metavar="ENTRY", help="the unit's entry file in upstream")
+    im.add_argument("--as", dest="name", metavar="NAME", help="the import's stable folder name")
+    im.add_argument("--edits", choices=("mirrored", "melded"))
+    im.add_argument("--version", choices=("pinned", "tracking"))
+    im.add_argument("--at", metavar="REV", help="upstream commit, tag or branch (default HEAD)")
+    im.add_argument("--adopting", metavar="TEXT", help="the subject or component this unit is")
+    im.add_argument("--reason", metavar="TEXT", help="why it is adopted")
+    im.add_argument("--rejected", metavar="TEXT", help="the alternatives rejected")
+    im.add_argument("--update", metavar="NAME", help="refetch an existing import")
+    im.add_argument("--dry-run", action="store_true", help="list the unit; write nothing")
+    add_main(im)
     r = sub.add_parser("review", help="record a dependency review as a review: commit",
                        formatter_class=raw, epilog=HELP["review"]); r.add_argument("claims", nargs="+", metavar="CLAIM",
                                                  help="the dependent claim(s) reviewed, path#id"); add_main(r)
@@ -5184,7 +5825,7 @@ def main(argv):
         rc = {"start": cmd_start, "reconcile": cmd_reconcile, "finish": cmd_finish,
               "check": cmd_check, "show": cmd_show, "neighbors": cmd_neighbors,
               "impact": cmd_impact, "mv": cmd_mv, "review": cmd_review,
-              "hook": cmd_hook}[args.verb](args)
+              "hook": cmd_hook, "import": cmd_import}[args.verb](args)
         if args.verb in ("check", "show", "neighbors", "impact") and not (
                 getattr(args, "clean", False) or getattr(args, "staged", False)):
             unfinished_notice()

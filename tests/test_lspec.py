@@ -517,6 +517,7 @@ DEFAULT_ANSWERS = {
     "derived": lambda n: ["rederived"],
     "reseed": lambda n: ["reseed", "fixture", "re-instantiates", "it", f"n{n}"],
     "confirm": lambda n: ["confirmed", "fixture", "checked", "it", f"n{n}"],
+    "import": lambda n: ["adopted", "the", "whole", "unit", "is", "it", f"n{n}"],
 }
 
 
@@ -3326,6 +3327,260 @@ class ReadProbe(unittest.TestCase):
         self.assertIn('[read] read main.html whole', out)
         self.assertNotIn('probe:', out)
         self.assertIn('--answer read-whole\n', out)
+
+
+# ------------------------------------------------------- imports (reuse.html)
+
+UP_MAIN = """<!DOCTYPE html><html><body><main>
+<h1 id="top">Electrical</h1>
+<p id="status">Status: live-system. Locked: the bus (<a href="#dl-bus">dl-bus</a>). Open: none. Top risk: none.</p>
+<p id="conventions">Conventions: read main whole.</p>
+<p>Session: commit types <code data-commit-types>docs fix seed audit review</code>.</p>
+<p>Tooling: begin with <code>python3 lspec.py start electrical.html</code>; the tool is <a href="lspec.py">here</a>.</p>
+<h2 id="params">Key Parameters</h2>
+<table><tr><th>P</th><th>V</th><th>S</th></tr>
+<tr id="kp-bus"><td>Bus voltage</td><td>{bus}</td><td>confirmed(<a href="notes.md" rel="external">notes</a>)</td></tr>
+<tr id="kp-reach"><td>Max reach depth</td><td>[ADAPT: per install]</td><td>open</td></tr>
+</table>
+<h2 id="log">Decision Log</h2>
+<table><tr><th>S</th><th>R</th><th>W</th></tr>
+<tr id="dl-bus" data-sealed><td><code>dl-bus</code> {bus} bus</td><td>the other</td><td>parts availability.</td></tr>
+<tr id="dl-split-battery"><td><code>dl-split-battery</code> <a href="battery.html">battery.html</a> holds the battery</td><td>keep</td><td>own clock.</td></tr>
+</table>
+<h2 id="open">Open</h2>
+<table><tr><th>I</th><th>G</th><th>R</th></tr>
+<tr id="watch-fuse" data-watch-until="2020-01-01"><td><code>watch-fuse</code> 2019-10-01 a fuse blew</td><td>the bus</td><td>no recurrence by the date</td></tr>
+</table>
+</main></body></html>"""
+UP_BATTERY = """<!DOCTYPE html><html><body><main><h1 id="top">Battery</h1>
+<p id="capacity">Capacity 100 Ah, sized for <a href="electrical.html#kp-bus">the bus</a>; see <a href="sizing.html">sizing</a>.</p>
+</main></body></html>"""
+DOWN_MAIN = """<!DOCTYPE html><html><body><main>
+<h1 id="top">Camper</h1>
+<p id="status">Status: forward design. Locked: nothing. Open: nothing. Top risk: none.</p>
+<p>Session: commit types <code data-commit-types>docs fix seed audit review</code>.</p>
+<h2 id="params">Key Parameters</h2>
+<table><tr><th>P</th><th>V</th><th>S</th></tr>{params}</table>
+<h2 id="log">Decision Log</h2>
+<table><tr><th>S</th><th>R</th><th>W</th></tr></table>
+</main></body></html>"""
+
+
+def upstream(bus="12 V"):
+    u = tempfile.mkdtemp()
+    Path(u, "electrical.html").write_text(UP_MAIN.format(bus=bus))
+    Path(u, "battery.html").write_text(UP_BATTERY)
+    Path(u, "sizing.html").write_text('<p id="x">sizing, no split row</p>')
+    Path(u, "notes.md").write_text("measured\n")
+    Path(u, "lspec.py").write_text("# upstream's tool copy\n")
+    Path(u, "hooks").mkdir(); Path(u, "hooks", "pre-commit").write_text("#!/bin/sh\n")
+    sh("git", "init", "-q", cwd=u)
+    commit(u, "seed: electrical")
+    return u
+
+
+def importer(params=""):
+    d = tempfile.mkdtemp()
+    Path(d, "main.html").write_text(DOWN_MAIN.format(params=params))
+    sh("git", "init", "-q", cwd=d)
+    commit(d, "seed: camper")
+    return d
+
+
+def do_import(d, u, edits="mirrored", version="pinned", name="electrical", *extra):
+    ensure_request(d)
+    return cli(d, "import", u, "electrical.html", "--as", name, "--edits", edits, "--version", version,
+               "--adopting", "the electrical system as a component", "--reason", "it runs the camper",
+               "--rejected", "design our own", *extra)
+
+
+class Imports(unittest.TestCase):
+    """lspec import: copy-based transport, the split row's declaration, the
+    manifest, participation by setting, and the gate's mirror and import
+    items (reuse.html dl-transport, dl-importdir, dl-participation)."""
+
+    def test_unit_is_the_entry_closure_without_the_tool(self):
+        """dl-selection: entry, split-row reach, other linked repository files
+        (a rel=external one too); lspec.py stays behind though linked."""
+        u, d = upstream(), importer()
+        rc, out = do_import(d, u, "mirrored", "pinned", "electrical", "--dry-run")
+        self.assertEqual(rc, 0, out)
+        for line in ("spec   electrical.html", "spec   battery.html", "linked sizing.html", "linked notes.md"):
+            self.assertIn(line, out)
+        self.assertIn("left behind, upstream's tool copy: lspec.py", out)
+        self.assertFalse(Path(d, "imports").exists())
+        rc, out = do_import(d, u)
+        self.assertEqual(rc, 0, out)
+        for f in ("electrical.html", "battery.html", "sizing.html", "notes.md"):
+            self.assertTrue(Path(d, "imports", "electrical", f).exists(), f)
+        self.assertFalse(Path(d, "imports", "electrical", "lspec.py").exists())
+        main = Path(d, "main.html").read_text()
+        sha = sh("git", "rev-parse", "HEAD", cwd=u).strip()
+        self.assertIn(f'<code data-import>{u} @ {sha} mirrored pinned</code>', main)
+        self.assertIn('<tr id="dl-split-electrical"><td><code>dl-split-electrical</code> '
+                      '<a href="imports/electrical/electrical.html">', main)
+        manifest = json.loads(state_file(d, "imports.json").read_text())
+        self.assertEqual(manifest["electrical"]["rev"], sha)
+        self.assertEqual(set(manifest["electrical"]["files"]), {"electrical.html", "battery.html", "sizing.html", "notes.md"})
+        rc, out = cli(d, "check")
+        self.assertEqual(rc, 0, out)                      # upstream's orphan and slot are FYI
+        self.assertIn("FYI: [split] imports/electrical/sizing.html", out)
+        self.assertNotIn("[adapt]", out)
+        rc, out = do_import(d, u)
+        self.assertEqual(rc, 2); self.assertIn("already imported", out)
+
+    def test_import_needs_both_settings_and_the_row_text(self):
+        u, d = upstream(), importer()
+        ensure_request(d)
+        rc, out = cli(d, "import", u, "electrical.html", "--as", "e", "--edits", "mirrored")
+        self.assertEqual(rc, 2); self.assertIn("explicit on every import", out)
+        rc, out = cli(d, "import", u, "electrical.html", "--as", "e", "--edits", "mirrored", "--version", "pinned")
+        self.assertEqual(rc, 2); self.assertIn("--adopting", out)
+        rc, out = cli(d, "import", u, "nope.html", "--as", "e", "--edits", "mirrored", "--version", "pinned",
+                      "--adopting", "x", "--reason", "y")
+        self.assertEqual(rc, 2); self.assertIn("nope.html is not a file", out)
+
+    def test_gate_asks_adoption_and_refuses_local_edits(self):
+        """The import commit's gate asks adopted (not updated) and records the
+        trailer; afterwards a hand edit, a deletion or a typed revision in
+        mirrored content is a mechanical mirror item."""
+        u, d = upstream(), importer()
+        do_import(d, u)
+        out = reconcile_out(d, "docs: import electrical")
+        self.assertIn("import 1", out)
+        self.assertIn("0 to fix", out)
+        rc, out = cli(d, "reconcile", "--next")
+        for _ in range(8):                               # walk to the import item
+            if "[import]" in out:
+                break
+            tok = re.search(r"token: (\w+)", out).group(1)
+            kind = re.search(r"ITEM \d+ of \d+ \[(\w+)\]", out).group(1)
+            cli(d, "reconcile", "--tick", tok, *reply_argv(d, out, DEFAULT_ANSWERS[kind](0)))
+            rc, out = cli(d, "reconcile", "--next")
+        self.assertIn("adopted: imports/electrical", out)
+        self.assertIn("mirrored, pinned", out)
+        tok = re.search(r"token: (\w+)", out).group(1)
+        rc, out = cli(d, "reconcile", "--tick", tok, "--answer", "updated")
+        self.assertEqual(rc, 1); self.assertIn("takes adopted", out)
+        rc, out = cli(d, "reconcile", "--tick", tok, "--answer", "adopted", "--reason", "the whole unit is the component")
+        self.assertIn("[derived]", out)                  # watch-importstatus: no imported bootloader
+        self.assertNotIn("imports/electrical/electrical.html#status", out)
+        self.assertIn("bootloader main.html#status", out)
+        rc, out = settle(d, "docs: import electrical")
+        self.assertEqual(rc, 0, out)
+        receipt = json.loads(state_file(d, "receipt.json").read_text())
+        self.assertTrue(any(t.startswith("Reconciled: adopted imports/electrical — ") for t in receipt["trailers"]), receipt["trailers"])
+        commit_reconciled(d)
+        edit(d, "imports/electrical/battery.html", "100 Ah", "200 Ah")
+        sh("git", "add", "-A", cwd=d)
+        out = reconcile_out(d, "docs: tweak")
+        self.assertIn("[mirror] imports/electrical/battery.html: mirrored content changed outside lspec import", out)
+        self.assertIn("import --update electrical", out)
+        sh("git", "checkout", "--", "imports", cwd=d)
+        sh("git", "rm", "-q", "imports/electrical/sizing.html", cwd=d)
+        out = reconcile_out(d, "docs: drop")
+        self.assertIn("[mirror] imports/electrical/sizing.html", out)
+        sh("git", "reset", "-q", "--hard", cwd=d)
+        edit(d, "main.html", "mirrored pinned</code>", "mirrored pinned</code>")
+        main = Path(d, "main.html").read_text()
+        Path(d, "main.html").write_text(re.sub(r"@ [0-9a-f]{40}", "@ " + "0" * 40, main))
+        sh("git", "add", "-A", cwd=d)
+        out = reconcile_out(d, "docs: fake rev")
+        self.assertIn("[mirror] main.html#dl-split-electrical", out); self.assertIn("the manifest holds", out)
+
+    def test_mirrored_obligations_are_upstreams(self):
+        """Participation table, mirrored column: an expired upstream watch,
+        upstream's sealed claim and its own depends-on debt never block the
+        importer; start lists the watch as FYI and the import's settings."""
+        u, d = upstream(), importer()
+        do_import(d, u)
+        out = reconcile_out(d, "docs: import electrical")
+        self.assertNotIn("expired", out)
+        rc, out = settle(d, "docs: import electrical")
+        self.assertEqual(rc, 0, out); commit_reconciled(d)
+        rc, out = cli(d, "start")
+        self.assertIn("FYI upstream watch entries in mirrored imports (1)", out)
+        self.assertIn("imports/electrical/electrical.html#watch-fuse", out)
+        self.assertIn("IMPORTS (1):", out)
+        self.assertIn(f"electrical: mirrored, pinned — {u} @", out)
+        self.assertNotIn("WATCH —", out)
+        self.assertIn("REVIEW OWED: none", out)
+        # an upstream change to its sealed claim arrives by update with no sealed item
+        edit(u, "electrical.html", "12 V bus", "12 V bus, fused"); commit(u, "docs: fuse")
+        rc, out = cli(d, "import", "--update", "electrical")
+        self.assertEqual(rc, 0, out)
+        out = reconcile_out(d, "docs: update electrical")
+        self.assertNotIn("[sealed]", out); self.assertNotIn("sealed 1", out)
+        self.assertIn("import 1", out)
+
+    def test_update_owes_review_to_the_importers_dependent(self):
+        """A changed imported target owes the importer's dependent its review,
+        asked at the update commit's gate; the import item takes updated."""
+        u = upstream()
+        d = importer('<tr id="kp-fridge"><td>Fridge</td><td>4 A on <a rel="depends-on" '
+                     'href="imports/electrical/electrical.html#kp-bus">the bus</a></td><td>confirmed(sheet)</td></tr>')
+        do_import(d, u)
+        rc, out = settle(d, "docs: import electrical")
+        self.assertEqual(rc, 0, out); commit_reconciled(d)
+        edit(u, "electrical.html", "12 V", "24 V"); commit(u, "docs: 24 V")
+        rc, out = cli(d, "import", "--update", "electrical")
+        self.assertEqual(rc, 0, out); self.assertIn("4 file(s) replaced", out)
+        sha = sh("git", "rev-parse", "HEAD", cwd=u).strip()
+        self.assertIn(f"@ {sha} mirrored pinned", Path(d, "main.html").read_text())
+        out = reconcile_out(d, "docs: update electrical")
+        self.assertIn("import 1", out); self.assertIn("neighbor", out)
+        self.assertIn("0 to fix", out)
+        log = answer_all(d, {"import": ["updated"]})
+        self.assertIn("answered [import] updated: imports/electrical: updated", log)
+        self.assertIn("answered [neighbor] neighbor main.html#kp-fridge: holds", log)
+        rc, out = cli(d, "reconcile")
+        self.assertEqual(rc, 0, out)
+        receipt = json.loads(state_file(d, "receipt.json").read_text())
+        self.assertIn(f"Reconciled: updated imports/electrical to {sha[:12]}", receipt["trailers"])
+        self.assertIn("Reconciled: reviewed main.html#kp-fridge", receipt["trailers"])
+        commit_reconciled(d)
+        rc, out = cli(d, "start")
+        self.assertIn("REVIEW OWED: none", out)
+        rc, out = cli(d, "import", "--update", "electrical")
+        self.assertIn("nothing to update", out)
+
+    def test_melded_import_demotes_the_main_and_owns_its_defects(self):
+        """dl-demote: the operating parts go; the orphan and the slot become
+        the importer's own structural failures; the status line is not a
+        bootloader of this collection."""
+        u, d = upstream(), importer()
+        rc, out = do_import(d, u, "melded", "pinned")
+        self.assertEqual(rc, 0, out)
+        for part in ("#status", "#conventions", "the commit-type declaration", "the tooling instruction"):
+            self.assertIn(f"removed {part}", out)
+        text = Path(d, "imports", "electrical", "electrical.html").read_text()
+        for gone in ('id="status"', 'id="conventions"', "data-commit-types", "Tooling"):
+            self.assertNotIn(gone, text)
+        self.assertIn('id="dl-bus"', text); self.assertIn('id="dl-split-battery"', text)
+        rc, out = cli(d, "check")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("[split] imports/electrical/sizing.html is linked", out)
+        self.assertIn("[adapt] imports/electrical/electrical.html", out)
+        self.assertNotIn("FYI", out)
+        rc, out = cli(d, "import", "--update", "electrical")
+        self.assertEqual(rc, 2); self.assertIn("melded", out)
+
+    def test_tracking_import_is_noticed_at_start(self):
+        """dl-tracking: start reports a tracking import that is behind and
+        writes nothing; a pinned one is not checked."""
+        u, d = upstream(), importer()
+        do_import(d, u, "mirrored", "tracking")
+        rc, out = settle(d, "docs: import electrical")
+        self.assertEqual(rc, 0, out); commit_reconciled(d)
+        rc, out = cli(d, "start")
+        self.assertIn("electrical: up to date at", out)
+        edit(u, "electrical.html", "12 V", "24 V"); commit(u, "docs: 24 V")
+        commit(u, "docs: again")
+        rc, out = cli(d, "start")
+        self.assertIn("electrical: upstream has 2 new commit(s) since", out)
+        self.assertIn("import --update electrical", out)
+        self.assertEqual(sh("git", "status", "--porcelain", cwd=d).strip(), "")
+        self.assertIn("12 V", Path(d, "imports", "electrical", "electrical.html").read_text())
 
 
 # ------------------------------------------------ derived view (bench #4 D stale)

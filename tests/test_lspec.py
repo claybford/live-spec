@@ -3588,8 +3588,61 @@ class Imports(unittest.TestCase):
         self.assertIn("[split] imports/electrical/sizing.html is linked", out)
         self.assertIn("[adapt] imports/electrical/electrical.html", out)
         self.assertNotIn("FYI", out)
+
+    def melded_committed(self):
+        """A melded import committed, with one local edit to battery.html on top."""
+        u, d = upstream(), importer()
+        do_import(d, u, "melded", "pinned")
+        edit(d, "imports/electrical/sizing.html", "sizing, no split row", "sizing")   # fix the orphan: our file now
+        edit(d, "imports/electrical/battery.html", 'see <a href="sizing.html">sizing</a>', "see nothing")
+        edit(d, "imports/electrical/electrical.html", "[ADAPT: per install]", "40 cm")   # fill the slot in place
+        edit(d, "imports/electrical/electrical.html", 'data-watch-until="2020-01-01"', f'data-watch-until="{FUTURE}"')   # ours now
+        sh("git", "add", "-A", cwd=d)
+        rc, out = settle(d, "docs: import electrical melded")
+        self.assertEqual(rc, 0, out); commit_reconciled(d)
+        edit(d, "imports/electrical/battery.html", "100 Ah", "120 Ah")
+        sh("git", "add", "-A", cwd=d)
+        rc, out = settle(d, "docs: bigger battery")
+        self.assertEqual(rc, 0, out); commit_reconciled(d)
+        return u, d
+
+    def test_melded_update_merges_and_drops_removed_parts(self):
+        """A melded update keeps local edits, takes upstream's non-conflicting
+        changes, and an upstream edit to a demoted part never surfaces."""
+        u, d = self.melded_committed()
+        edit(u, "electrical.html", "Status: live-system.", "Status: live-system, revised.")   # a removed part
+        Path(u, "extra.md").write_text("new upstream file\n")
+        edit(u, "electrical.html", "parts availability.",                                      # a kept row
+             'parts availability and cost (<a href="extra.md" rel="external">extra</a>).')
+        commit(u, "docs: upstream moves")
         rc, out = cli(d, "import", "--update", "electrical")
-        self.assertEqual(rc, 2); self.assertIn("melded", out)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("merged into the local copy", out)
+        e = Path(d, "imports/electrical/electrical.html").read_text()
+        self.assertNotIn('id="status"', e); self.assertIn("availability and cost", e); self.assertIn("40 cm", e)
+        b = Path(d, "imports/electrical/battery.html").read_text()
+        self.assertIn("120 Ah", b); self.assertIn("see nothing", b)
+        self.assertTrue(Path(d, "imports/electrical/extra.md").exists())
+        sha = sh("git", "rev-parse", "HEAD", cwd=u).strip()
+        self.assertIn(f"@ {sha} melded pinned", Path(d, "main.html").read_text())
+        rc, out = cli(d, "check", "--staged")
+        self.assertEqual(rc, 0, out)
+        log = answer_all(d, {"import": ["updated"]})
+        rc, out = cli(d, "reconcile", "--subject", "docs: update electrical")
+        answer_all(d, {"import": ["updated"]})
+        rc, out = cli(d, "reconcile"); self.assertEqual(rc, 0, out)
+
+    def test_melded_update_leaves_conflicts_for_the_hand(self):
+        u, d = self.melded_committed()
+        edit(u, "battery.html", "Capacity 100 Ah", "Capacity 90 Ah")
+        commit(u, "docs: smaller")
+        rc, out = cli(d, "import", "--update", "electrical")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("1 file(s) with conflicts", out); self.assertIn("battery.html", out)
+        b = Path(d, "imports/electrical/battery.html").read_text()
+        self.assertIn("<<<<<<< local", b); self.assertIn(">>>>>>> upstream", b)
+        rc, out = cli(d, "check", "--staged")
+        self.assertEqual(rc, 1, out); self.assertIn("[merge] imports/electrical/battery.html: unresolved conflict markers", out)
 
     def test_tracking_import_is_noticed_at_start(self):
         """dl-tracking: start reports a tracking import that is behind and

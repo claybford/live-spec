@@ -1785,6 +1785,8 @@ def check_structure(col, specimens=True, markers=True):
         for off in s.bad_sealed:
             fails.append(f"[sealed] {r}: data-sealed on an element with no id — "
                          f"protection needs a stable anchor on the complete claim")
+        if re.search(r"^(?:<<<<<<< |=======$|>>>>>>> )", s.raw, re.M):
+            fails.append(f"[merge] {r}: unresolved conflict markers")
         if markers and not mirrored(p):      # a mirrored import's markers are slots
             found = re.findall(r"\[(?:ADAPT|PROJECT)", marker_visible(s.raw))
             if found:
@@ -5546,9 +5548,7 @@ def import_update(col, args):
                             + (", ".join(sorted(r["name"] for r in col.imports.values()
                                                 if not r["nested"])) or "none"))
     if rec["edits"] == "melded":
-        raise ImportRefused(f"{name} is melded: a three-way merge of the recorded base, the new "
-                            "revision and the local copy — not yet implemented (reuse.html "
-                            "open-reuse-tool); merge by hand and record the new revision in the row")
+        return import_merge(col, rec, args)
     tmp, sha = fetch_upstream(rec["source"], args.at)
     try:
         entry = posix(os.path.relpath(rec["entry"], rec["dir"]))
@@ -5579,6 +5579,113 @@ def import_update(col, args):
     print("staged, nothing committed; the gate asks every review the update triggers. Next: "
           + cmd(command(col, "reconcile", "--subject", f"docs: update {name} to {sha[:7]}")))
     return 0
+
+
+def merge_file(local, base, theirs):
+    """git merge-file on three byte strings -> (merged bytes, conflicts)."""
+    tmp = tempfile.mkdtemp(prefix="lspec-merge-")
+    try:
+        paths = []
+        for n, data in (("local", local), ("base", base), ("theirs", theirs)):
+            q = os.path.join(tmp, n)
+            with open(q, "wb") as fh:
+                fh.write(data)
+            paths.append(q)
+        r = subprocess.run(["git", "merge-file", "-p", "-L", "local", "-L", "base", "-L", "upstream", *paths],
+                           capture_output=True, check=False)
+        if r.returncode < 0:
+            raise RuntimeError(r.stderr.decode(errors="replace").strip() or "git merge-file failed")
+        return r.stdout, r.returncode
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def import_merge(col, rec, args):
+    """A melded update (reuse.html dl-demote, transport): the recorded base,
+    the new revision and the local copy, three-way merged file by file; the
+    demotion is applied to base and new first, so an upstream edit to a
+    removed operating part never reaches the merge. Conflicts stay in the
+    file for hand resolution; the gate refuses their markers."""
+    name = rec["name"]
+    tmp, sha = fetch_upstream(rec["source"], args.at)
+    try:
+        src = canon(rec["source"]) if os.path.isdir(rec["source"]) else rec["source"]
+        try:
+            git("fetch", "-q", src, rec["rev"], cwd=tmp)
+        except RuntimeError as e:
+            raise ImportRefused(f"the recorded base {rec['rev'][:12]} is not fetchable from "
+                                f"{rec['source']}: {e}") from e
+        entry = posix(os.path.relpath(rec["entry"], rec["dir"]))
+        specs, linked, notes, files = select_unit(tmp, sha, entry)
+        print_selection(sha, specs, linked, notes)
+        if sha == rec["rev"]:
+            print(f"{name} is at {sha[:12]} already; nothing to update")
+            return 0
+        if args.dry_run:
+            print("dry run: nothing written")
+            return 0
+        base_files = upstream_files(tmp, rec["rev"])
+        demote = entry if commit_type_decls(Spec(entry, blob_text(tmp, files[entry]))) else None
+        def side(table, path):
+            if path not in table:
+                return None
+            data = blob_bytes(tmp, table[path])
+            if path == demote:
+                data = demote_main(data.decode("utf-8"))[0].encode("utf-8")
+            return data
+        root = repo_root()
+        local_paths = {posix(os.path.relpath(os.path.join(dp, f), rec["dir"]))
+                       for dp, _, fs in os.walk(rec["dir"]) for f in fs}
+        written, conflicts, kept, dropped = {}, [], [], []
+        for path in sorted(set(specs + linked) | local_paths):
+            target = os.path.join(rec["dir"], *path.split("/"))
+            theirs = side(files, path) if path in specs or path in linked else None
+            base = side(base_files, path)
+            local = None
+            if os.path.exists(target):
+                with open(target, "rb") as fh:
+                    local = fh.read()
+            if theirs is None:
+                if base is not None and local == base:
+                    os.remove(target); dropped.append(path)        # removed upstream, untouched here
+                elif local is not None:
+                    kept.append(path)                               # local work survives
+                continue
+            if local is None or local == base or base is None and local == theirs:
+                out = theirs                                        # take upstream's
+            elif base is None:
+                out, n = merge_file(local, b"", theirs); conflicts += [path] * bool(n)
+            else:
+                out, n = merge_file(local, base, theirs)
+                if n:
+                    conflicts.append(path)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as fh:
+                fh.write(out)
+            written[path] = files[path]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    p, rid = rec["row"]
+    rewrite_import_decl(p, rid, sha)
+    manifest = read_state("imports.json") or {}
+    manifest[name] = {"source": rec["source"], "rev": sha, "edits": rec["edits"],
+                      "version": rec["version"], "entry": entry, "files": written, "at": now_iso()}
+    write_state("imports.json", manifest)
+    git("add", "-A", "--", repo_rel(rec["dir"]), repo_rel(p), cwd=root)
+    print(f"{name}: {rec['rev'][:12]} -> {sha[:12]} merged into the local copy; row {rid} updated")
+    for q in dropped:
+        print(f"  removed upstream, untouched here, dropped: {q}")
+    for q in kept:
+        print(f"  removed upstream, edited here, kept: {q}")
+    if conflicts:
+        print(f"  {status('OPEN')} {len(conflicts)} file(s) with conflicts, marked <<<<<<< local / >>>>>>> upstream "
+              "— resolve by hand, restage, then reconcile:")
+        for q in conflicts:
+            print(f"    {q}")
+    else:
+        print("staged, nothing committed; next: " + cmd(command(col, "reconcile", "--subject",
+              f"docs: update {name} to {sha[:7]}")))
+    return 1 if conflicts else 0
 
 
 def tracking_notices(col):
@@ -5855,8 +5962,12 @@ changes the slot's text asks the answer's review. start lists every slot.
 --update NAME [--at REV]: refetches a mirrored import at REV (default HEAD),
 replaces its files and the row's revision, and stages the change for the gate,
 which asks every review the changed claims trigger (the dependents' neighbor
-items) and acknowledges the update (updated). A melded update is a three-way
-merge, not yet implemented. The gate's mirror item refuses any staged change
+items) and acknowledges the update (updated). A melded update three-way merges
+the recorded base, the new revision and the local copy file by file (git
+merge-file), the demotion applied to both upstream sides first so an upstream
+edit to a removed operating part is dropped, not merged; conflicts stay in the
+files between <<<<<<< local and >>>>>>> upstream, and the gate refuses the
+markers until they are resolved. The gate's mirror item refuses any staged change
 to mirrored content that an import or update did not write: the manifest in
 lspec/imports.json (transaction state, deletable: an update rewrites it) holds
 the fetched blob ids.""",

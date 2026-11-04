@@ -2424,6 +2424,8 @@ ANSWERS = {
     "watched": {"watched": (True, False), "none": (False, False)},
     "decided": {"decided": (True, False), "none": (False, False)},
     "import": {"adopted": (False, True), "updated": (False, False)},
+    "inherit": {"keep": (False, False), "modify": (False, True), "reopen": (True, False),
+                "delete": (False, True)},
     # Waivers: a check that infers a defect from a surface form can be wrong
     # about the claim, so it takes an answer with a reason, recorded in the
     # trailer. Where the form is the defect (an empty cell, an unlinked
@@ -2432,7 +2434,7 @@ ANSWERS = {
     "placeholder": {"literal": (False, True)},
     "empty": {"structural": (False, True)},
 }
-REF_NAMES = {"read-whole": "ID", "decision": "ROW", "replaced": "ROW", "established": "WATCH",
+REF_NAMES = {"read-whole": "ID", "decision": "ROW", "replaced": "ROW", "established": "WATCH", "reopen": "ROW",
              "unverified": "WATCH", "recurrence": "ROW", "watched": "WATCH",
              "decided": "ROW", "correction": "ROW"}
 # A correction names the decision row it restores, or is held for a later
@@ -2441,7 +2443,7 @@ REF_OPTIONAL = {"correction"}
 WAIVABLE = ("caveat", "placeholder", "empty")
 VIEW_SOURCE_CAP = 400   # chars of a linked source shown on the view item when no clause under test links it
 QUESTION_ORDER = ("read", "reseed", "caveat", "placeholder", "empty", "sealed", "confirm",
-                  "removed", "cause", "watched", "decided", "import", "derived", "neighbor")
+                  "removed", "cause", "watched", "decided", "import", "inherit", "derived", "neighbor")
 # Sealed records in commit trailers, newest first decides a claim's state.
 CORRECTION_RE = re.compile(r"^Reconciled: correction (\S+) (?:per (\S+)|\(awaiting confirmation\))"
                            r" \u2014 (.*)$", re.M)
@@ -3594,7 +3596,7 @@ def judgment_items(ctx):
     if subject_type(ctx.subject, "fix") is not None:
         items.append(cause_item(ctx, head, records))
     items += asked_items(ctx, head, records)
-    items += import_items(ctx)
+    items += import_items(ctx) + inherit_items(ctx)
     derived = derived_item(ctx, head)
     if derived:
         items.append(derived)
@@ -3936,6 +3938,22 @@ def validate(it, given, ctx, other_reasons):
         return [answer, text], f"Reconciled: waived {kind} {name} ({answer}) — {text}"
     if kind in ("watched", "decided"):
         return answer_asked(ctx, kind, answer, ref)
+    if kind == "inherit":
+        state = it["state"]
+        if answer == "keep" and state != "unchanged":
+            raise ValueError("keep is for a row left as copied; this one is " + state)
+        if answer == "modify" and state != "changed":
+            raise ValueError("modify is for a row whose text changed; this one is " + state)
+        if answer in ("reopen", "delete") and state != "absent":
+            raise ValueError(f"{answer} is for a row removed from the file; this one is {state}")
+        if answer == "reopen":
+            p, rid = changed_row(ctx, ref, "open item")
+            if not rid.startswith("open-"):
+                raise ValueError(f"{ref} is not an open item (a row id'd open-…)")
+            return [answer, addr(p, rid)], f"Reconciled: inherited {name} reopened at {addr(p, rid)}"
+        if answer == "keep":
+            return [answer], f"Reconciled: inherited {name} kept"
+        return [answer, text], f"Reconciled: inherited {name} {'modified' if answer == 'modify' else 'deleted'} \u2014 {text}"
     if kind == "import":
         if answer != it["expect"]:
             raise ValueError(f"this item takes {it['expect']}: " + ("the row is new" if it["expect"]
@@ -4920,7 +4938,8 @@ def cmd_start(args):
         print()
     print(f"{title('SESSION')} — per commit: edit, stage, " + cmd(command(col, "reconcile", "--subject",
           "type: one transition")) + ", work the checklist, `git commit --no-edit`. "
-          "Hand off with " + cmd(command(col, "finish")) + " on a clean tree.")
+          "Hand off with " + cmd(command(col, "finish")) + " on a clean tree. Content across "
+          "repositories: " + cmd("python3 lspec.py import|export|graduate|copy --help") + ".")
     return rc
 
 
@@ -5688,6 +5707,452 @@ def import_merge(col, rec, args):
     return 1 if conflicts else 0
 
 
+# ---- graduation (reuse.html dl-graduate, dl-gradproc)
+
+def operating_parts(spec):
+    """The operating paragraphs of a main, as markup: status, conventions,
+    the one declaring commit types, and the tooling instruction. What
+    demotion removes, graduation adds — copied from the parent, whose rules
+    the graduate inherits (dl-rule-locality)."""
+    out = []
+    for eid in OPERATING_PARTS:
+        if eid in spec.elems:
+            out.append(spec.element(eid))
+    for pat in (r'<p\b[^>]*>(?:(?!</p>).)*?data-commit-types.*?</p>',
+                r'<p\b[^>]*>\s*(?:<strong>)?Tooling\b.*?</p>'):
+        m = re.search(pat, spec.body, re.S)
+        if m:
+            out.append(m.group(0))
+    return out
+
+
+def footer_comment(raw):
+    """The trailing HTML comment an instance carries (attribution, license,
+    the live-spec revision: reuse.html version-record), or None."""
+    m = re.search(r"<!--[^>]*-->\s*$", raw)
+    return m.group(0).strip() if m else None
+
+
+def convert_to_main(text, parent, tool_hint):
+    """TEXT, a supporting spec, converted into a main: the parent's operating
+    parts inserted after its first heading, the status line reset to slots
+    the seeding session fills, and the tooling instruction naming the new
+    main. -> (text, notes)."""
+    parts = operating_parts(parent)
+    notes = []
+    status = ('<p id="status">Status: [ADAPT: forward design | live-system]. Locked: [ADAPT].\n'
+              '  Open: [ADAPT]. Top risk: [ADAPT]. This status line is a derived view: re-derive\n'
+              '  it whole from the locked list, open table and top-risk source.</p>')
+    rest = []
+    for part in parts:
+        if 'id="status"' in part:
+            continue
+        if re.search(r"^\s*<p\b[^>]*>\s*(?:<strong>)?Tooling\b", part):
+            part = re.sub(r"lspec\.py start [^\s<]+", f"lspec.py start {tool_hint}", part)
+        rest.append(part)
+    if len(rest) < 3:
+        notes.append("the parent carries fewer operating paragraphs than the seed's conventions, "
+                     "session and tooling: write the missing ones by hand")
+    block = "\n".join([status, *rest])
+    m = re.search(r"</h1>\s*\n?", text)
+    if m:
+        text = text[:m.end()] + block + "\n" + text[m.end():]
+    else:
+        m = re.search(r"<main\b[^>]*>\s*\n?", text) or re.search(r"<body\b[^>]*>\s*\n?", text)
+        if not m:
+            raise ImportRefused("the file has no <h1>, <main> or <body> to place the operating parts after")
+        text = text[:m.end()] + block + "\n" + text[m.end():]
+    if footer_comment(text) is None:
+        foot = footer_comment(parent.raw)
+        if foot:
+            text = text.rstrip("\n") + "\n\n" + foot + "\n"
+    return text, notes
+
+
+def graduate_prepare(col, args):
+    """Half one: the new repository, seeded from FILE as committed in this
+    parent at --at (default HEAD), its file converted into a main, the
+    parent's tool and hooks copied, nothing committed."""
+    path = canon(args.file)
+    if path == col.main or path not in col.specs:
+        raise ImportRefused(f"{args.file} is not a supporting spec of {rel(col.main)}")
+    if col.imported(path):
+        raise ImportRefused(f"{args.file} is imported content; graduation is for a supporting spec this repository owns")
+    if not args.to:
+        raise ImportRefused("--to DIR names the new repository's directory (the tool never invents it)")
+    dest = canon(args.to)
+    if os.path.exists(dest) and os.listdir(dest):
+        raise ImportRefused(f"{args.to} exists and is not empty")
+    root = repo_root()
+    at = args.at or "HEAD"
+    spec = file_at(at, path)
+    if spec is None:
+        raise ImportRefused(f"{rel(path)} is not committed at {at}; graduation starts from committed text")
+    name = args.name or os.path.splitext(os.path.basename(path))[0]
+    if not import_name_ok(name):
+        raise ImportRefused(f"{name!r}: a name is a word (letters, digits, . _ -)")
+    text, notes = convert_to_main(spec.raw, col.specs[col.main], os.path.basename(path))
+    os.makedirs(dest, exist_ok=True)
+    git("init", "-q", cwd=dest)
+    if args.remote:
+        git("remote", "add", "origin", args.remote, cwd=dest)
+    target = os.path.join(dest, os.path.basename(path))
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    shutil.copy(__file__, os.path.join(dest, "lspec.py"))
+    hooks = os.path.join(root, "hooks")
+    if os.path.isdir(hooks):
+        shutil.copytree(hooks, os.path.join(dest, "hooks"))
+    with open(os.path.join(dest, "AGENTS.md"), "w", encoding="utf-8") as fh:
+        fh.write("READ THIS FIRST, BEFORE ANYTHING ELSE, DO NOT SKIP:\n"
+                 f"run `python3 lspec.py start {os.path.basename(path)}` and follow its output. Read every spec "
+                 "that governs the work whole: every line, in sequential pages; skipped ranges and search "
+                 "instead of reading are not a read.\nThis gates every request in this repo — questions and "
+                 "read-only tasks included. If the request looks answerable without the read, read anyway.\n")
+    git("add", "-A", cwd=dest)
+    sha = commit_sha(at, root)
+    source = args.remote or posix(dest)
+    print(f"graduated {rel(path)} as committed at {sha[:12]} into {args.to}/{os.path.basename(path)}, "
+          f"converted to a main; lspec.py, hooks/ and AGENTS.md copied; staged, nothing committed")
+    for n in notes:
+        print(f"  {status('note')}: {n}")
+    print("next, in the new repository: install the hooks (lspec hook --help), fill the status line's "
+          "[ADAPT] slots, then")
+    print("  " + cmd(f"python3 lspec.py start {os.path.basename(path)}"))
+    print("  " + cmd(shlex.join(["python3", "lspec.py", "--main", os.path.basename(path), "reconcile", "--subject",
+                                 f"seed: {name} graduated from {rel(col.main)}", "--body",
+                                 f"graduated from {posix(root)} @ {sha}"])) + "  (plus the dependency and seal assessment)")
+    print("then, back here, replace ownership in one commit:")
+    print("  " + cmd(command(col, "graduate", "--replace", name, "--from", source, "--edits", "mirrored|melded",
+                             "--version", "pinned|tracking", "--adopting", "TEXT", "--reason", "TEXT")))
+    return 0
+
+
+def graduate_replace(col, args):
+    """Half two, in the old parent: the former supporting file and its split
+    row go, the new main comes in as an import, and every parent-owned link
+    into the file is re-pointed at its imported address. One candidate, one
+    commit; the gate asks the adoption and every review the moved targets owe."""
+    name = args.replace
+    if not args.source:
+        raise ImportRefused("--from SOURCE names the graduate's repository (URL or path)")
+    if not (args.edits and args.version):
+        raise ImportRefused("the import's settings are explicit: --edits mirrored|melded --version pinned|tracking")
+    if not (args.adopting and args.reason):
+        raise ImportRefused("--adopting TEXT and --reason TEXT fill the import row")
+    old = next((p for p in col.specs if os.path.splitext(os.path.basename(p))[0] == name and p != col.main), None)
+    if old is None or old not in col.parents or col.parents[old][0] is None:
+        raise ImportRefused(f"no supporting spec named {name} in the collection")
+    parent, rid = col.parents[old]
+    base = os.path.basename(old)
+    tmp, sha = fetch_upstream(args.source, args.at)
+    try:
+        if base not in upstream_files(tmp, sha):
+            raise ImportRefused(f"{args.source} @ {sha[:12]} holds no {base}: graduate the file first")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    root = repo_root()
+    # 1. the old split row goes
+    with open(parent, encoding="utf-8") as fh:
+        ptext = fh.read()
+    pspec = Spec(parent, ptext)
+    a, b = pspec.elems[rid]
+    ptext = ptext[:a] + ptext[b:].lstrip("\n")
+    with open(parent, "w", encoding="utf-8") as fh:
+        fh.write(ptext)
+    # 2. the file goes
+    git("rm", "-q", "--", repo_rel(old), cwd=root)
+    # 3. every parent-owned link into it is re-pointed at the import
+    touched = {}
+    for q in col.specs:
+        if q == old or col.imported(q):
+            continue
+        orel = posix(os.path.relpath(old, os.path.dirname(q)))
+        nrel = posix(os.path.relpath(os.path.join(os.path.dirname(col.main), IMPORTS_DIR, name, base),
+                                     os.path.dirname(q)))
+        n = rewrite(q, [(rf'href="(?:\./)?{re.escape(orel)}(#[^"]*)?"', rf'href="{nrel}\1"')])
+        if n:
+            touched[q] = n
+    # 4. the import
+    ns = argparse.Namespace(name=name, source=args.source, entry=base, edits=args.edits,
+                            version=args.version, at=args.at, adopting=args.adopting,
+                            reason=args.reason, rejected=args.rejected or "Keep it as a supporting spec here (replaced by graduation)",
+                            dry_run=False, update=None)
+    col2 = Collection(col.main)
+    rc = import_new(col2, ns)
+    git("add", "--", *[repo_rel(q) for q in touched], repo_rel(parent), cwd=root)
+    print(f"ownership replaced: {rel(old)} and {rid} removed; {len(touched)} file(s) re-pointed at "
+          f"{IMPORTS_DIR}/{name}/{base}")
+    for q, n in touched.items():
+        print(f"  {rel(q)}: {n} reference(s)")
+    print("the gate asks the adoption and the reviews moved targets owe; a dependency whose target moved "
+          "under identical text is confirmed by " + cmd(command(col, "review", "CLAIM")) + " after the commit")
+    return rc
+
+
+def cmd_graduate(args):
+    col = load(args)
+    if repo_root() is None:
+        print("lspec graduate: not a git checkout", file=sys.stderr); return 2
+    try:
+        if args.replace:
+            return graduate_replace(col, args)
+        if not args.file:
+            raise ImportRefused("graduate FILE --to DIR prepares the new repository; "
+                                "--replace NAME --from SOURCE replaces ownership here")
+        return graduate_prepare(col, args)
+    except ImportRefused as e:
+        print(f"lspec graduate: {e}", file=sys.stderr)
+        return 2
+
+
+# ---- one-off export (reuse.html dl-export)
+
+def repo_source(root):
+    """How this repository is named in provenance: its origin URL, else its path."""
+    try:
+        url = git("remote", "get-url", "origin", cwd=root).strip()
+        if url:
+            return url
+    except RuntimeError:
+        pass
+    return posix(root)
+
+
+def table_header(spec, rid):
+    """The header row of the table holding row RID, as markup, or ''."""
+    start = spec.elems[rid][0]
+    tstart = spec.raw.rfind("<table", 0, start)
+    if tstart < 0:
+        return ""
+    m = re.compile(r"<tr\b[^>]*>.*?</tr>", re.S).search(spec.raw, tstart)
+    return m.group(0) if m and m.start() < start else ""
+
+
+def provenance(markup, tag, note):
+    """MARKUP with a provenance note inside it: a row's last cell, else before
+    the closing tag."""
+    stamp = f' <span class="meta">{html.escape(note)}</span>'
+    if tag == "tr":
+        i = markup.rfind("</td>")
+        return markup[:i] + stamp + markup[i:] if i >= 0 else markup + stamp
+    i = markup.rfind("</")
+    return markup[:i] + stamp + markup[i:] if i > 0 else markup + stamp
+
+
+def cmd_export(args):
+    col = load(args)
+    root = repo_root()
+    if root is None:
+        print("lspec export: not a git checkout", file=sys.stderr); return 2
+    if not args.ids:
+        print("lspec export OUT.html ID [ID ...]: the claims and rows to export (path#id or id)",
+              file=sys.stderr); return 2
+    sha = head_sha()
+    if sha is None:
+        print("lspec export: no commits; an export carries committed provenance", file=sys.stderr); return 2
+    source = repo_source(root)
+    head = {}
+    chosen = []
+    for ident in args.ids:
+        found = None
+        for p in col.specs:
+            path, _, frag = ident.partition("#")
+            if not _:
+                path, frag = "", ident
+            if path and canon(path) != p and repo_rel(p) != path:
+                continue
+            if p not in head:
+                try:
+                    head[p] = file_at("HEAD", p)
+                except HistoryUnavailable:
+                    head[p] = None
+            if head[p] is not None and frag in head[p].elems:
+                found = (p, frag)
+                break
+        if found is None:
+            print(f"lspec export: {ident} is not a committed element of the collection", file=sys.stderr)
+            return 2
+        chosen.append(found)
+    title_ = html.escape(f"Export from {rel(col.main)} @ {sha[:12]}")
+    out = ['<!DOCTYPE html>', '<html lang="en"><head><meta charset="UTF-8">', f'<title>{title_}</title>',
+           '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css">',
+           '</head><body><main>', f'<h1 id="top">{title_}</h1>',
+           f'<p id="about">A one-off export (the methodology\'s reuse.html): subject-shaped material selected from '
+           f'<code>{html.escape(source)}</code> at <code>{sha}</code>, each item carrying its provenance and '
+           'keeping its status. No relationship survives it: the recipient places this material in its own '
+           'structure through its own gate; links inside it refer to the source collection.</p>']
+    last_header = None
+    for p, frag in chosen:
+        spec = head[p]
+        tag = spec.tags.get(frag)
+        note = f"from {source} @ {sha[:12]} ({repo_rel(p)}#{frag})"
+        markup = provenance(spec.element(frag), tag, note)
+        if tag == "tr":
+            header = table_header(spec, frag)
+            if last_header is None:
+                out.append("<table>")
+            elif header != last_header:
+                out.append("</table>\n<table>")
+            if header and header != last_header:
+                out.append(header)
+            out.append(markup)
+            last_header = header
+        else:
+            if last_header is not None:
+                out.append("</table>")
+                last_header = None
+            out.append(markup)
+    if last_header is not None:
+        out.append("</table>")
+    out += ["</main></body></html>", ""]
+    with open(args.out, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out))
+    print(f"exported {len(chosen)} item(s) to {args.out} from {rel(col.main)} @ {sha[:12]}; "
+          "this repository records nothing")
+    return 0
+
+
+# ---- copying a main for a new project (reuse.html dl-copymain)
+
+EVIDENCE_CONFIRMED_RE = re.compile(r"\bconfirmed\(")
+
+
+def copy_main(col, args):
+    """A new repository seeded from this collection's owned files: evidence
+    demoted mechanically with provenance, seals lifted, the status line
+    reset to slots, and every inherited row recorded for the seed gate's
+    per-item judgment (inherit items). Nothing committed."""
+    root = repo_root()
+    if not args.to:
+        raise ImportRefused("--to DIR names the new repository's directory")
+    dest = canon(args.to)
+    if os.path.exists(dest) and os.listdir(dest):
+        raise ImportRefused(f"{args.to} exists and is not empty")
+    if any(not r["nested"] for r in col.imports.values()):
+        raise ImportRefused("this collection has imports; copy the owned files and re-import each unit "
+                            "in the new project (an import is a relationship, not inherited material)")
+    sha = head_sha()
+    if sha is None:
+        raise ImportRefused("no commits; a copy inherits committed text")
+    source = repo_source(root)
+    os.makedirs(dest, exist_ok=True)
+    git("init", "-q", cwd=dest)
+    rows, demoted = {}, 0
+    for p in col.specs:
+        spec = file_at("HEAD", p)
+        if spec is None:
+            raise ImportRefused(f"{rel(p)} is not committed")
+        text = spec.raw
+        text, n = EVIDENCE_CONFIRMED_RE.subn(f"provisional(inherited from {os.path.basename(col.main)} @ {sha[:12]}; ", text)
+        demoted += n
+        text = re.sub(r"\s+data-sealed\b(?:=\"[^\"]*\")?", "", text)
+        if p == col.main and "status" in spec.elems:
+            a, b = spec.elems["status"]
+            text = text.replace(spec.element("status"),
+                                '<p id="status">Status: [ADAPT: forward design | live-system]. Locked: [ADAPT].\n'
+                                '  Open: [ADAPT]. Top risk: [ADAPT]. This status line is a derived view: re-derive\n'
+                                '  it whole from the locked list, open table and top-risk source.</p>', 1)
+        relp = posix(os.path.relpath(p, os.path.dirname(col.main)))
+        target = os.path.join(dest, *relp.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        for eid in spec.elems:
+            if spec.tags.get(eid) == "tr" and eid.startswith(("dl-", WATCH_PREFIX, "open-")) \
+                    or eid in ("directive", "fence") \
+                    or any(a <= spec.elems[eid][0] < b for a, b in diagnostic_spans(spec)) and spec.tags.get(eid) == "tr":
+                rows[f"{relp}#{eid}"] = spec.text(eid) or ""
+    # every other repository file the specs link travels too, as with an import
+    linked = set()
+    for p, spec in col.specs.items():
+        for l in spec.links:
+            if is_external(l["href"]):
+                continue
+            tgt, _ = resolve(p, l["href"])
+            if tgt and tgt not in col.specs and os.path.isfile(tgt) and tgt.startswith(root + os.sep) \
+                    and os.path.basename(tgt) not in TOOL_FILES and not tgt.startswith(os.path.join(root, "hooks") + os.sep):
+                linked.add(tgt)
+    for q in sorted(linked):
+        relq = posix(os.path.relpath(q, os.path.dirname(col.main)))
+        target = os.path.join(dest, *relq.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy(q, target)
+    shutil.copy(__file__, os.path.join(dest, "lspec.py"))
+    hooks = os.path.join(root, "hooks")
+    if os.path.isdir(hooks):
+        shutil.copytree(hooks, os.path.join(dest, "hooks"))
+    main_name = os.path.basename(col.main)
+    with open(os.path.join(dest, "AGENTS.md"), "w", encoding="utf-8") as fh:
+        fh.write("READ THIS FIRST, BEFORE ANYTHING ELSE, DO NOT SKIP:\n"
+                 f"run `python3 lspec.py start {main_name}` and follow its output. Read every spec that governs "
+                 "the work whole: every line, in sequential pages; skipped ranges and search instead of reading "
+                 "are not a read.\nThis gates every request in this repo — questions and read-only tasks "
+                 "included. If the request looks answerable without the read, read anyway.\n")
+    git("add", "-A", cwd=dest)
+    cwd = os.getcwd()
+    os.chdir(dest)
+    try:
+        _GITDIRS.pop(dest, None)
+        write_state("copy.json", {"source": source, "rev": sha, "main": main_name, "rows": rows, "at": now_iso()})
+    finally:
+        os.chdir(cwd)
+    print(f"copied {len(col.specs)} spec file(s) and {len(linked)} linked file(s) of {rel(col.main)} @ {sha[:12]} "
+          f"into {args.to}: {demoted} evidence "
+          f"token(s) demoted to provisional with provenance, seals lifted, status line reset; "
+          f"{len(rows)} inherited row(s) recorded for the seed gate; staged, nothing committed")
+    print("next, in the new repository: install the hooks, fill the status line, then")
+    print("  " + cmd(f"python3 lspec.py start {main_name}"))
+    print("  " + cmd(shlex.join(["python3", "lspec.py", "--main", main_name, "reconcile", "--subject",
+                                 "seed: [PROJECT] from " + main_name, "--body", f"copied from {source} @ {sha}"]))
+          + "  — the gate asks keep / modify / reopen / delete of every inherited row")
+    return 0
+
+
+def cmd_copy(args):
+    col = load(args)
+    if repo_root() is None:
+        print("lspec copy: not a git checkout", file=sys.stderr); return 2
+    try:
+        return copy_main(col, args)
+    except ImportRefused as e:
+        print(f"lspec copy: {e}", file=sys.stderr)
+        return 2
+
+
+def inherit_items(ctx):
+    """The copied-main seed gate (reuse.html dl-copymain): one judgment per
+    inherited row while the first commit is pending — keep (unchanged),
+    modify (changed, its reason checked), reopen (moved to an open item) or
+    delete (gone, with the reason); the staged file is the evidence."""
+    col = ctx.staged
+    out = []
+    if ctx.head_state != "unborn":
+        return out
+    copy = read_state("copy.json")
+    if not copy:
+        return out
+    base = os.path.dirname(col.main)
+    for name, was in sorted(copy.get("rows", {}).items()):
+        relp, _, eid = name.partition("#")
+        p = canon(os.path.join(base, *relp.split("/")))
+        spec = col.specs.get(p)
+        now = spec.text(eid) if spec is not None and eid in spec.elems else None
+        state = "absent" if now is None else ("unchanged" if now == was else "changed")
+        it = item("inherit", name, f"inherited {name} ({state})", False,
+                  evidence=digest("inherit", name, was, now or ""),
+                  excerpt=f"{name} as copied: {shorten(was, 300)}\nnow: {shorten(now, 300) if now is not None else '(absent)'}",
+                  question=f"{name} came from {copy.get('main')} @ {copy.get('rev', '')[:12]}. Is it true as "
+                           "written for this project (keep, the row unchanged), true in substance with its "
+                           "wording or details changed and the rewritten reason already checked (modify, "
+                           "with what you checked), an unsettled question (reopen --ref the open- row it "
+                           "moved to, the row itself gone), or inapplicable (delete, the row gone, with "
+                           "why no part of it still guards against a re-proposal)?")
+        it["state"] = state
+        out.append(it)
+    return out
+
+
 def tracking_notices(col):
     """One line per tracking import: behind by N commits, up to date, or
     unreachable; never a block, never a write (reuse.html dl-tracking)."""
@@ -5747,8 +6212,9 @@ HELP = {
 A session: start MAIN, read what it lists whole, edit and stage, reconcile
 --subject "type: one transition", answer the checklist (--next / --tick), commit
 with `git commit --no-edit` (the hooks write subject and Reconciled: trailers),
-finish on a clean tree. Content from another repository: `lspec import --help`
-(the methodology's reuse.html). Every verb takes --main MAIN before or after the verb;
+finish on a clean tree. Content across repositories (the methodology's
+reuse.html): import, export, graduate and copy, each with its own --help.
+Every verb takes --main MAIN before or after the verb;
 with a request open, MAIN defaults to the request's. --color auto|always|never
 goes before the verb: auto (the default) colors only a terminal, never a pipe,
 and respects NO_COLOR and TERM=dumb; the words carry every status, color or
@@ -5850,6 +6316,8 @@ checklist once none is left. Each answer is recorded as a Reconciled: trailer.
   import       an import row added: adopted --reason (the whole unit is the
                subject or component adopted); its revision or settings changed:
                updated
+  inherit      the seed commit of a copied main, one per inherited row: keep |
+               modify --reason | reopen --ref ROW | delete --reason
   derived      a source the status line links (any file), or a watch entry,
                decision row or sealed claim, changed: was the bootloader
                re-derived whole? rederived | unaffected --reason; unaffected
@@ -5922,6 +6390,61 @@ Renames a file or an anchor and repairs references, a renamed row's label
 included; the rename and its repairs are staged, nothing committed. A renamed
 dependency target owes a review: its edge's baseline is unknown until a
 review: commit names the dependent claim.""",
+
+"export": """\
+A one-off export (the methodology's reuse.html): subject-shaped material —
+parameter rows, decision rows with their rejected alternatives and reasons,
+fence items, any claim — selected by id (path#id, or id) from the committed
+collection and written to OUT.html as an ordinary spec-shaped file, each item
+carrying `from SOURCE @ COMMIT (path#id)` and keeping its status; rows are
+grouped under their tables' headers. No relationship survives: this repository
+records and owes nothing, the recipient cannot track or update from it. Select
+only material true of the subject, the judgment of pinching off. The recipient
+places it in its own structure through its own gate; links inside the export
+refer to the source collection and are re-pointed or dropped there.""",
+
+"copy": """\
+Copying a main to start a new project is project-shaped inheritance, not an
+import (the methodology's reuse.html). copy --to DIR seeds a new repository
+from this collection's owned files as committed at HEAD: every confirmed(...)
+token becomes provisional(inherited from MAIN @ COMMIT; ...), every data-sealed
+is lifted (seals are reassessed at the seed), the status line is reset to
+[ADAPT] slots to re-derive whole, lspec.py, hooks/ and AGENTS.md ride along;
+all staged, nothing committed. The first commit is seed: and its gate asks one
+judgment per inherited decision row, watch entry, open item, diagnostic row,
+fence and directive, against the staged file:
+  keep              true as written: the row unchanged
+  modify --reason   substance transfers, wording changed, the reason checked
+  reopen --ref ROW  unsettled: the row gone, moved to an open- row added here
+  delete --reason   does not apply: the row gone; wrong while any part still
+                    guards against a re-proposal
+A collection with imports is not copied whole: re-import each unit in the new
+project. Imports, exports and graduation carry status intact; only a copied
+project is demoted.""",
+
+"graduate": """\
+Graduation gives a supporting spec its own operational life (the methodology's
+reuse.html): it moves into a repository of its own and becomes that
+repository's main; the old parent imports it. Two halves, two commits.
+
+graduate FILE --to DIR [--name NAME] [--remote URL] [--at COMMIT]: half one.
+DIR is a new repository (the tool asks for it and never invents one; --remote
+is recorded as the source when given, else DIR's path). FILE as committed in
+this parent at COMMIT (default HEAD) is converted to a main — the parent's
+conventions, session and tooling paragraphs inserted after its heading, a
+status line of [ADAPT] slots for the seeding session to fill, the parent's
+footer carried — with lspec.py, hooks/ and AGENTS.md beside it, all staged.
+Its first commit is a seed: (fresh history: the parent's commits name another
+main's gate), whose body names the source: graduated from <repo> @ <commit>.
+
+graduate --replace NAME --from SOURCE --edits E --version V --adopting TEXT
+--reason TEXT [--rejected TEXT] [--at REV]: half two, here, once the new
+repository has that seed commit. In one candidate the old file and its split
+row go, every parent-owned link into it is re-pointed at imports/NAME/, and
+the new main is imported (import --help for the settings). The old parent keeps
+its file until this commit, so there is no gap. The gate asks the adoption and
+the reviews the moved targets owe: a dependency whose target moved under
+identical text is confirmed by `lspec review CLAIM` after the commit.""",
 
 "import": """\
 Adopts another repository's subject-shaped content (the methodology's
@@ -6048,6 +6571,24 @@ def main(argv):
     im.add_argument("--update", metavar="NAME", help="refetch an existing import")
     im.add_argument("--dry-run", action="store_true", help="list the unit; write nothing")
     add_main(im)
+    gr = sub.add_parser("graduate", help="give a supporting spec its own repository; then replace ownership here",
+                        formatter_class=raw, epilog=HELP["graduate"])
+    gr.add_argument("file", nargs="?", metavar="FILE", help="the supporting spec to graduate")
+    gr.add_argument("--to", metavar="DIR", help="the new repository's directory (empty or absent)")
+    gr.add_argument("--name", metavar="NAME", help="the import's name in the parent (default: FILE's stem)")
+    gr.add_argument("--remote", metavar="URL", help="the new repository's remote, recorded as its source")
+    gr.add_argument("--at", metavar="COMMIT", help="the parent commit to graduate from (default HEAD)")
+    gr.add_argument("--replace", metavar="NAME", help="replace ownership of NAME here with an import")
+    gr.add_argument("--from", dest="source", metavar="SOURCE", help="with --replace: the graduate's repository")
+    gr.add_argument("--edits", choices=("mirrored", "melded")); gr.add_argument("--version", choices=("pinned", "tracking"))
+    gr.add_argument("--adopting", metavar="TEXT"); gr.add_argument("--reason", metavar="TEXT"); gr.add_argument("--rejected", metavar="TEXT")
+    add_main(gr)
+    ex = sub.add_parser("export", help="a one-off, spec-shaped export of named claims and rows",
+                        formatter_class=raw, epilog=HELP["export"])
+    ex.add_argument("out", metavar="OUT.html"); ex.add_argument("ids", nargs="*", metavar="ID"); add_main(ex)
+    cp = sub.add_parser("copy", help="start a new project from a copy of this main",
+                        formatter_class=raw, epilog=HELP["copy"])
+    cp.add_argument("--to", metavar="DIR", help="the new repository's directory"); add_main(cp)
     r = sub.add_parser("review", help="record a dependency review as a review: commit",
                        formatter_class=raw, epilog=HELP["review"]); r.add_argument("claims", nargs="+", metavar="CLAIM",
                                                  help="the dependent claim(s) reviewed, path#id"); add_main(r)
@@ -6066,7 +6607,8 @@ def main(argv):
         rc = {"start": cmd_start, "reconcile": cmd_reconcile, "finish": cmd_finish,
               "check": cmd_check, "show": cmd_show, "neighbors": cmd_neighbors,
               "impact": cmd_impact, "mv": cmd_mv, "review": cmd_review,
-              "hook": cmd_hook, "import": cmd_import}[args.verb](args)
+              "hook": cmd_hook, "import": cmd_import, "graduate": cmd_graduate,
+              "export": cmd_export, "copy": cmd_copy}[args.verb](args)
         if args.verb in ("check", "show", "neighbors", "impact") and not (
                 getattr(args, "clean", False) or getattr(args, "staged", False)):
             unfinished_notice()

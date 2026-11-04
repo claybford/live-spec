@@ -84,6 +84,23 @@ class Guards(unittest.TestCase):
                     and n.func.id == "open" and id(n) not in managed]
             self.assertEqual(bare, [], f"{src.name}: open() outside `with` at lines {bare}")
 
+    def test_no_top_level_name_is_bound_twice(self):
+        """watch-dupname: a module-level constant or function rebound later in
+        the file silently replaces the first (CONFIRMED_RE, 2026-11-04)."""
+        tree = ast.parse(Path(lspec.__file__).read_text(encoding="utf-8"))
+        seen, twice = {}, []
+        for node in tree.body:
+            names = []
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                names = [node.name]
+            elif isinstance(node, ast.Assign):
+                names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            for n in names:
+                if n in seen:
+                    twice.append(f"{n} (lines {seen[n]} and {node.lineno})")
+                seen[n] = node.lineno
+        self.assertEqual(twice, [], f"lspec.py binds a top-level name twice: {twice}")
+
 MAIN = """<html><body><main>
 <h1 id="top">Main</h1>
 <p id="status">Status: forward design. Locked: nothing. Open: nothing. Top risk: none.</p>
@@ -518,6 +535,7 @@ DEFAULT_ANSWERS = {
     "reseed": lambda n: ["reseed", "fixture", "re-instantiates", "it", f"n{n}"],
     "confirm": lambda n: ["confirmed", "fixture", "checked", "it", f"n{n}"],
     "import": lambda n: ["adopted", "the", "whole", "unit", "is", "it", f"n{n}"],
+    "inherit": lambda n: ["keep"],
 }
 
 
@@ -3725,6 +3743,208 @@ class Slots(unittest.TestCase):
         rc, out = cli(d, "reconcile"); self.assertEqual(rc, 0, out)
         receipt = json.loads(state_file(d, "receipt.json").read_text())
         self.assertIn("Reconciled: reviewed main.html#kp-reach", receipt["trailers"])
+
+
+class Graduation(unittest.TestCase):
+    """lspec graduate (reuse.html dl-graduate, dl-gradproc): the supporting
+    spec becomes a main in a new repository with the parent's rules; the
+    parent replaces ownership with an import in one commit."""
+
+    def test_graduate_then_replace(self):
+        u = upstream()                                   # electrical.html with battery.html split off
+        ensure_request_at = lambda d: ensure_request(d)
+        cwd = os.getcwd(); os.chdir(u)
+        try:
+            rc, out = lspec_cli("--main", "electrical.html", "graduate", "battery.html", "--to", "../bat-" + os.path.basename(u))
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("converted to a main", out)
+        b = os.path.join(os.path.dirname(u), "bat-" + os.path.basename(u))
+        text = Path(b, "battery.html").read_text()
+        self.assertIn('id="status"', text); self.assertIn("data-commit-types", text)
+        self.assertIn("python3 lspec.py start battery.html", text)
+        self.assertIn('id="capacity"', text)
+        self.assertTrue(Path(b, "lspec.py").exists() and Path(b, "hooks", "pre-commit").exists())
+        self.assertIn("battery.html", Path(b, "AGENTS.md").read_text())
+        # the seeding session: fill the slots, drop the links back to the parent, seed
+        text = re.sub(r"Status: \[ADAPT: forward design \| live-system\]\. Locked: \[ADAPT\]\.", "Status: live-system. Locked: nothing.", text)
+        text = text.replace("Open: [ADAPT]. Top risk: [ADAPT].", "Open: nothing. Top risk: none.")
+        text = text.replace('<a href="electrical.html#kp-bus">the bus</a>', "the bus").replace('; see <a href="sizing.html">sizing</a>', "")
+        Path(b, "battery.html").write_text(text)
+        sh("git", "add", "-A", cwd=b)
+        os.chdir(b)
+        try:
+            rc, out = lspec_cli("start", "battery.html"); self.assertIn("PASS", out)
+            rc, out = lspec_cli("--main", "battery.html", "reconcile", "--subject", "seed: battery graduated",
+                                "--body", "graduated from the parent; no dependencies qualify; nothing sealed")
+            answer_all_main(b, "battery.html")
+            rc, out = lspec_cli("--main", "battery.html", "reconcile"); self.assertEqual(rc, 0, out)
+        finally:
+            os.chdir(cwd)
+        commit_reconciled_main(b, "battery.html")
+        # half two, in the parent
+        os.chdir(u)
+        try:
+            lspec_cli("start", "electrical.html")
+            rc, out = lspec_cli("--main", "electrical.html", "graduate", "--replace", "battery", "--from", b,
+                                "--edits", "mirrored", "--version", "pinned", "--adopting", "the battery project",
+                                "--reason", "it has its own maintainer now")
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ownership replaced: battery.html and dl-split-battery removed", out)
+        self.assertFalse(Path(u, "battery.html").exists())
+        self.assertTrue(Path(u, "imports", "battery", "battery.html").exists())
+        main = Path(u, "electrical.html").read_text()
+        self.assertNotIn('<tr id="dl-split-battery"><td><code>dl-split-battery</code> <a href="battery.html">', main)
+        self.assertIn('<a href="imports/battery/battery.html">imports/battery/battery.html</a> the battery project', main)
+        self.assertIn("mirrored pinned</code>", main)
+        staged = sh("git", "diff", "--cached", "--name-status", cwd=u)
+        self.assertIn("D\tbattery.html", staged); self.assertIn("A\timports/battery/battery.html", staged)
+
+    def test_graduate_refuses_main_imports_and_occupied_dirs(self):
+        u = upstream()
+        cwd = os.getcwd(); os.chdir(u)
+        try:
+            rc, out = lspec_cli("--main", "electrical.html", "graduate", "electrical.html", "--to", "../x")
+            self.assertEqual(rc, 2); self.assertIn("not a supporting spec", out)
+            rc, out = lspec_cli("--main", "electrical.html", "graduate", "battery.html")
+            self.assertEqual(rc, 2); self.assertIn("--to DIR", out)
+            rc, out = lspec_cli("--main", "electrical.html", "graduate", "battery.html", "--to", ".")
+            self.assertEqual(rc, 2); self.assertIn("not empty", out)
+        finally:
+            os.chdir(cwd)
+
+
+def lspec_cli(*argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = lspec.main(["lspec", *argv])
+    return rc, out.getvalue() + err.getvalue()
+
+
+def answer_all_main(d, main, answers=None, limit=200):
+    """answer_all for a repository whose main is not main.html."""
+    answers = answers or {}
+    cwd = os.getcwd(); os.chdir(d)
+    try:
+        for n in range(limit):
+            rc, out = lspec_cli("--main", main, "reconcile", "--next")
+            tok = re.search(r"token: (\w+)", out)
+            if not tok:
+                return
+            kind = re.search(r"ITEM \d+ of \d+ \[(\w+)\]", out).group(1)
+            reply = answers.get(kind) or DEFAULT_ANSWERS[kind](n)
+            rc, out = lspec_cli("--main", main, "reconcile", "--tick", tok.group(1), *reply_argv(d, out, reply))
+            assert "answered [" in out, out
+    finally:
+        os.chdir(cwd)
+    raise AssertionError("checklist did not converge")
+
+
+def commit_reconciled_main(d, main):
+    cwd = os.getcwd(); os.chdir(d)
+    try:
+        receipt = lspec.json.loads(state_file(d, "receipt.json").read_text())
+    finally:
+        os.chdir(cwd)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-F", "-"],
+                   cwd=d, input=lspec.compose_message(receipt), text=True, check=True)
+
+
+class Export(unittest.TestCase):
+    def test_export_carries_provenance_and_records_nothing(self):
+        u = upstream()
+        cwd = os.getcwd(); os.chdir(u)
+        try:
+            rc, out = lspec_cli("--main", "electrical.html", "export", "out.html", "kp-bus", "dl-bus", "battery.html#capacity")
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 0, out)
+        sha = sh("git", "rev-parse", "HEAD", cwd=u).strip()
+        text = Path(u, "out.html").read_text()
+        self.assertIn(f"Export from electrical.html @ {sha[:12]}", text)
+        self.assertIn('<tr id="kp-bus">', text); self.assertIn('<tr id="dl-bus" data-sealed>', text)
+        self.assertIn(f"from {u} @ {sha[:12]} (electrical.html#kp-bus)", text)
+        self.assertIn(f"(battery.html#capacity)", text)
+        self.assertIn("<th>P</th><th>V</th><th>S</th>", text); self.assertIn("<th>S</th><th>R</th><th>W</th>", text)
+        self.assertIn("confirmed(", text)                       # status kept
+        self.assertEqual(sh("git", "status", "--porcelain", cwd=u).strip(), "?? out.html")
+        os.chdir(u)
+        try:
+            rc, out = lspec_cli("--main", "electrical.html", "export", "out2.html", "nope")
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 2); self.assertIn("not a committed element", out)
+
+
+class CopyMain(unittest.TestCase):
+    """lspec copy (reuse.html dl-copymain): evidence demoted with provenance,
+    seals lifted, status reset, and the seed gate asking keep / modify /
+    reopen / delete of every inherited row."""
+
+    def test_copy_demotes_and_the_seed_gate_judges_rows(self):
+        u = upstream()
+        n = os.path.join(os.path.dirname(u), "copy-" + os.path.basename(u))
+        cwd = os.getcwd(); os.chdir(u)
+        try:
+            rc, out = lspec_cli("--main", "electrical.html", "copy", "--to", n)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("1 evidence token(s) demoted", out); self.assertIn("inherited row(s) recorded", out)
+        sha = sh("git", "rev-parse", "HEAD", cwd=u).strip()
+        text = Path(n, "electrical.html").read_text()
+        self.assertIn(f"provisional(inherited from electrical.html @ {sha[:12]}; ", text)
+        self.assertNotIn("data-sealed", text); self.assertIn("[ADAPT: forward design | live-system]", text)
+        self.assertTrue(Path(n, "battery.html").exists())
+        # the seeding session: status, slot, the watch; keep dl-bus, delete dl-split-battery? no — keep it,
+        # modify the watch's wording, reopen nothing, delete nothing
+        text = re.sub(r"Status: \[ADAPT: forward design \| live-system\]\. Locked: \[ADAPT\]\.", "Status: forward design. Locked: nothing.", text)
+        text = text.replace("Open: [ADAPT]. Top risk: [ADAPT].", "Open: the reach. Top risk: none.")
+        text = text.replace("[ADAPT: per install]", "50 cm").replace('data-watch-until="2020-01-01"', f'data-watch-until="{FUTURE}"')
+        text = text.replace("a fuse blew", "a fuse blew on the donor build")
+        # the provisional token must link what closes it: point it at the watch row
+        text = text.replace("confirmed(<a href=\"notes.md\" rel=\"external\">notes</a>)", "x")  # not present after demotion
+        text = text.replace(f"provisional(inherited from electrical.html @ {sha[:12]}; <a href=\"notes.md\" rel=\"external\">notes</a>)",
+                            f"provisional(inherited from electrical.html @ {sha[:12]}; <a href=\"#watch-fuse\">notes</a>)")
+        Path(n, "electrical.html").write_text(text)
+        edit(n, "battery.html", '; see <a href="sizing.html">sizing</a>', "")   # the source's orphan, fixed here
+        sh("git", "add", "-A", cwd=n)
+        os.chdir(n)
+        try:
+            rc, out = lspec_cli("start", "electrical.html"); self.assertIn("PASS", out)
+            rc, out = lspec_cli("--main", "electrical.html", "reconcile", "--subject", "seed: the 4runner electrics",
+                                "--body", f"copied from {u} @ {sha}; dependencies none; seals none stand")
+            self.assertIn("inherit 3", out)
+            for _ in range(40):                                   # the seeding session answers each item
+                rc, out = lspec_cli("--main", "electrical.html", "reconcile", "--next")
+                tok = re.search(r"token: (\w+)", out)
+                if not tok:
+                    break
+                kind = re.search(r"ITEM \d+ of \d+ \[(\w+)\]", out).group(1)
+                if kind == "inherit" and "watch-fuse (changed)" in out:
+                    rc, out2 = lspec_cli("--main", "electrical.html", "reconcile", "--tick", tok.group(1), "--answer", "keep")
+                    self.assertIn("keep is for a row left as copied; this one is changed", out2)
+                    reply = ["modify", "the", "donor", "build", "is", "this", "project's", "own", "history"]
+                else:
+                    reply = DEFAULT_ANSWERS[kind](0)
+                rc, out2 = lspec_cli("--main", "electrical.html", "reconcile", "--tick", tok.group(1), *reply_argv(n, out, reply))
+                self.assertIn("answered [", out2, out2)
+            rc, out = lspec_cli("--main", "electrical.html", "reconcile"); self.assertEqual(rc, 0, out)
+            receipt = json.loads(state_file(n, "receipt.json").read_text())
+        finally:
+            os.chdir(cwd)
+        self.assertIn("Reconciled: inherited electrical.html#dl-bus kept", receipt["trailers"])
+        self.assertTrue(any(t.startswith("Reconciled: inherited electrical.html#watch-fuse modified") for t in receipt["trailers"]))
+        commit_reconciled_main(n, "electrical.html")
+        os.chdir(n)
+        try:
+            rc, out = lspec_cli("start", "electrical.html")
+        finally:
+            os.chdir(cwd)
+        self.assertNotIn("inherit", out)
 
 
 # ------------------------------------------------ derived view (bench #4 D stale)

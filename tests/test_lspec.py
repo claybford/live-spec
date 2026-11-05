@@ -3511,6 +3511,18 @@ class Imports(unittest.TestCase):
         rc, out = do_import(d, u)
         self.assertEqual(rc, 2); self.assertIn("already imported", out)
 
+    def test_the_adoption_answer_binds_the_row_text(self):
+        """diag-gatedigest: the import item shows the split row's text and asks
+        whether the unit is what it adopts; rewriting that text reopens it."""
+        u, d = upstream(), importer()
+        do_import(d, u)
+        before = next(i for i in evaluate_in(d, "docs: import electrical")[1] if i["kind"] == "import")
+        edit(d, "main.html", "it runs the camper", "it is decoration only, we never use it")
+        sh("git", "add", "-A", cwd=d)
+        after = next(i for i in evaluate_in(d, "docs: import electrical")[1] if i["kind"] == "import")
+        self.assertIn("decoration only", after["excerpt"])
+        self.assertNotEqual(before["evidence"], after["evidence"])
+
     def test_import_needs_both_settings_and_the_row_text(self):
         u, d = upstream(), importer()
         ensure_request(d)
@@ -4941,6 +4953,18 @@ class Reseed(unittest.TestCase):
         rc, out = settle(d, 'seed: main v2', body='Dependencies: none qualify. Seals: none.',
                          answers={'reseed': ['reseed', 'the', 'frame', 'is', 'redesigned']})
         self.assertEqual(rc, 0, out)
+
+    def test_the_answer_binds_the_counts_it_shows(self):
+        """diag-gatedigest: the excerpt shows how many baselines and edges the
+        re-seed discards; an edge added after answering reopens it."""
+        d = self.fixture()
+        edit(d, 'main.html', 'This design needs', 'The redesign needs'); sh('git', 'add', '-A', cwd=d)
+        before = next(i for i in evaluate_in(d, 'seed: main v2')[1] if i['kind'] == 'reseed')
+        edit(d, 'main.html', '<table>', '<p id="more">See <a rel="depends-on" href="motor.html#power">power</a>.</p>\n<table>')
+        sh('git', 'add', '-A', cwd=d)
+        after = next(i for i in evaluate_in(d, 'seed: main v2')[1] if i['kind'] == 'reseed')
+        self.assertIn('2 depends-on edge', after['excerpt'])
+        self.assertNotEqual(before['evidence'], after['evidence'])
 
     def test_ordinary_commits_and_first_seeds_are_not_asked(self):
         d = self.fixture()

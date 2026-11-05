@@ -2929,8 +2929,11 @@ def import_items(ctx):
         else:
             continue
         unit = sorted(rel(q) for q in col.specs if q.startswith(rec["dir"] + os.sep))
+        # Bound to everything the excerpt shows the answerer: the row's whole
+        # text (what is adopted, rejected and why), not only its fields.
         it = item("import", name, f"{expect}: {name}", False,
-                  evidence=digest(head_sha() or "unborn", name, *fields, *unit),
+                  evidence=digest(head_sha() or "unborn", name, *fields, *unit,
+                                  col.specs[p].text(rid) or ""),
                   excerpt=f"row {addr(p, rid)}: {shorten(col.specs[p].text(rid) or '', 300)}\n"
                           f"unit ({len(unit)} spec file(s)): " + ", ".join(unit),
                   question=question)
@@ -3352,7 +3355,7 @@ def reseed_items(ctx):
             except HistoryUnavailable:
                 pass
         it = item("reseed", name, f"re-seed of {name}", False,
-                  evidence=digest(floor, name),
+                  evidence=digest(floor, name, str(baselines), str(len(edges))),
                   excerpt=f"{name} already has a seed: boundary at {floor[:7]}; this commit "
                           f"starts a new lineage, discarding {baselines} review baseline(s) "
                           f"on {len(edges)} depends-on edge(s)",

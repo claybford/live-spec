@@ -3752,8 +3752,8 @@ class Imports(unittest.TestCase):
 
 
 class ReviewFixes(unittest.TestCase):
-    """Regressions for the 2026-11-04 review of the reuse series, since renamed
-    portability (portability.html watch-reusereview): each test names its finding."""
+    """Regressions for the 2026-11-04 review of the portability series
+    (portability.html watch-reusereview): each test names its finding."""
 
     melded_committed = Imports.melded_committed
 

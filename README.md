@@ -33,7 +33,7 @@ better.
 
 The evaluation harness (scripted sessions that instantiate and operate specs
 under the tool, scored against a pre-registered rubric) lives in its own
-repository, `live-spec-bench`, with its own living specification; it takes a
+repository, [`live-spec-bench`](https://github.com/claybford/live-spec-bench), with its own living specification; it takes a
 checkout of this repository as the artifact under test.
 
 ## Using it

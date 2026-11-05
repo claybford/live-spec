@@ -47,7 +47,9 @@ Implementation details beyond the seed's operating rules:
 
 * State lives in Git metadata (per worktree) under lspec/: request.json
   (MAIN and the request's start commit), reconcile.json (subject, body and
-  answers keyed by item and evidence), receipt.json, a random secret, and
+  answers keyed by item and evidence), receipt.json, a random secret drawn
+  per request (rotated whenever a request opens or closes, so no token or
+  read probe is the same in two requests: diag-requeststate), and
   history.json (review baselines memoized under the HEAD and tool they were
   derived from; stale under any other, deletable at any time) and specs.marshal
   (parsed files by blob, under the parser that wrote them; deletable).
@@ -4982,7 +4984,7 @@ def cmd_start(args):
             # a read. There is nothing to hand off, so no finish was owed (B4).
             print(f"REQUEST — the request opened at {short(request.get('start'))} was an "
                   "observation (opened clean; no commit, answer or edit): closed")
-            for name in ("request.json", "reconcile.json", "receipt.json"):
+            for name in ("request.json", "reconcile.json", "receipt.json", "secret"):
                 remove_state(name)
             request = None
         if request and request.get("main") != repo_rel(col.main):
@@ -5028,6 +5030,7 @@ def cmd_start(args):
             kept = {k: prior[k] for k in ("subject", "body") if prior.get(k)}
             remove_state("reconcile.json")
             remove_state("receipt.json")
+            remove_state("secret")          # this request's tokens and probes are its own
             if kept:
                 write_state("reconcile.json", kept)
             print(f"{title('REQUEST')} — opened at {short(head_sha())}")
@@ -5171,9 +5174,8 @@ def cmd_finish(args):
     for n, q in enumerate(questions, 1):
         print(f"  {n}. {q}")
     if request is not None:
-        remove_state("request.json")
-        remove_state("reconcile.json")
-        remove_state("receipt.json")
+        for name in ("request.json", "reconcile.json", "receipt.json", "secret"):
+            remove_state(name)
     sha = (head or "")[:12] or "none"
     print()
     print(f"{status('HANDOFF')} {sha} — request closed. A follow-up in this conversation, with the full "

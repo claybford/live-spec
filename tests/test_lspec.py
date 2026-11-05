@@ -6179,6 +6179,40 @@ class Checklist(unittest.TestCase):
 
 
 @acceptance
+class RequestSecret(unittest.TestCase):
+    """diag-requeststate: tokens and the read probe come from a secret drawn
+    per request, so two requests on the same commit share neither."""
+
+    def tokens(self, d):
+        out = cli(d, "reconcile", "--subject", "docs: derate", "--next")[1]
+        return re.search(r"token: (\w+)", out).group(1), state_file(d, "secret").read_text()
+
+    def test_a_new_request_on_the_same_commit_gets_new_tokens(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        ensure_request(d)
+        edit(d, "motor.html", "120 kW", "105 kW"); sh("git", "add", "-A", cwd=d)
+        tok_a, sec_a = self.tokens(d)
+        sh("git", "reset", "-q", cwd=d); sh("git", "checkout", "-q", "--", ".", cwd=d)
+        self.assertEqual(cli(d, "finish")[0], 0)
+        self.assertFalse(state_file(d, "secret").exists())          # closed with its request
+        cli(d, "start")
+        edit(d, "motor.html", "120 kW", "105 kW"); sh("git", "add", "-A", cwd=d)
+        tok_b, sec_b = self.tokens(d)
+        self.assertNotEqual(sec_a, sec_b)
+        self.assertNotEqual(tok_a, tok_b)
+
+    def test_an_observation_close_drops_the_secret(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        cli(d, "start")
+        cli(d, "reconcile", "--subject", "docs: x")          # draws the secret, answers nothing
+        self.assertTrue(state_file(d, "secret").exists())
+        out = cli(d, "start")[1]
+        self.assertIn("was an observation", out)
+        self.assertFalse(state_file(d, "secret").exists())
+
+
 class Receipts(unittest.TestCase):
     """The hooks only confirm that the commit matches the reconcile receipt."""
     HOOKS = HookIntegration.HOOKS

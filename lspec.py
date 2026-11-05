@@ -50,6 +50,9 @@ Implementation details beyond the seed's operating rules:
   answers keyed by item and evidence), receipt.json, a random secret drawn
   per request (rotated whenever a request opens or closes, so no token or
   read probe is the same in two requests: diag-requeststate), and
+  handoff.json (the head and session floor `finish` closed at, read only by
+  `start --resume`, which carries the floor forward so a follow-up cannot
+  confirm its own sealed correction), and
   history.json (review baselines memoized under the HEAD and tool they were
   derived from; stale under any other, deletable at any time) and specs.marshal
   (parsed files by blob, under the parser that wrote them; deletable).
@@ -2678,10 +2681,20 @@ def candidate_is_empty(root):
         return False
 
 
+def session_floor(request):
+    """The commit a session's work began at: the request's start, or, for a
+    request opened with start --resume, the start of the request it resumes
+    (carried forward through every resume). A correction committed after it
+    is this session's own and is not confirmable here (dl-seal,
+    watch-resumeconfirm)."""
+    request = request or {}
+    return request.get("floor") or request.get("start")
+
+
 def awaiting_confirmation(root, request):
     """Names of sealed corrections a previous request left awaiting a later
     session's review: confirmation (dl-seal)."""
-    start = (request or {}).get("start")
+    start = session_floor(request)
     if not start or head_status() != "ok":
         return set()
     return {name for name, _, _ in pending_corrections(root, start)}
@@ -3311,7 +3324,7 @@ def confirm_items(ctx):
             or not (ctx.request or {}).get("start"):
         return out
     named, _ = subject_claims(ctx.subject)
-    for name, sha, reason in pending_corrections(ctx.root, ctx.request["start"]):
+    for name, sha, reason in pending_corrections(ctx.root, session_floor(ctx.request)):
         if name not in named:
             continue
         found = find_id(ctx, name)
@@ -5021,10 +5034,15 @@ def cmd_start(args):
         elif request:
             pass                                  # adopted just now: reported by adopt_request
         else:
+            opened = {"format": 1, "main": repo_rel(col.main),
+                      "start": head_sha(), "opened_at": now_iso()}
             if args.resume:
                 resume_lines, refusal = resume_diff(col, args.resume)
-            write_state("request.json", {"format": 1, "main": repo_rel(col.main),
-                                         "start": head_sha(), "opened_at": now_iso()})
+                handoff = read_state("handoff.json") or {}
+                if not refusal and handoff.get("head") and handoff.get("head") == commit_sha(args.resume, repo_root()):
+                    opened["floor"] = handoff.get("floor") or handoff["head"]
+            remove_state("handoff.json")
+            write_state("request.json", opened)
             # A subject set before start survives it; recorded answers do not.
             prior = read_state("reconcile.json") or {}
             kept = {k: prior[k] for k in ("subject", "body") if prior.get(k)}
@@ -5174,6 +5192,9 @@ def cmd_finish(args):
     for n, q in enumerate(questions, 1):
         print(f"  {n}. {q}")
     if request is not None:
+        # Kept only for start --resume, which carries the session's floor
+        # forward so a follow-up cannot confirm its own sealed correction.
+        write_state("handoff.json", {"head": head, "floor": session_floor(request)})
         for name in ("request.json", "reconcile.json", "receipt.json", "secret"):
             remove_state(name)
     sha = (head or "")[:12] or "none"

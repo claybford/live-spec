@@ -3259,6 +3259,26 @@ class SealCorrection(unittest.TestCase):
         finally:
             os.chdir(cwd)
 
+    def test_a_resumed_request_cannot_confirm_its_own_correction(self):
+        """watch-resumeconfirm: start --resume opens a follow-up in the same
+        conversation; it keeps the session's floor, so the correction made
+        before the handoff is still its own and is not offered to confirm.
+        A fresh start (a later session) is offered it."""
+        d = self.fixture()
+        self.correct(d, ['correction', 'fixing', 'a', 'typo', 'here'])
+        handed = head(d)
+        self.assertEqual(cli(d, 'finish')[0], 0)
+        rc, out = cli(d, 'start', '--resume', handed[:12])
+        self.assertEqual(rc, 0, out)
+        kinds = [it['kind'] for it in evaluate_in(d, 'review: main.html#req')[1]]
+        self.assertNotIn('confirm', kinds)
+        rc, out = cli(d, 'review', 'main.html#req')
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(cli(d, 'finish')[0], 0)
+        cli(d, 'start')                                           # a later session
+        kinds = [it['kind'] for it in evaluate_in(d, 'review: main.html#req')[1]]
+        self.assertIn('confirm', kinds)
+
     def test_correction_confirmed_by_a_later_session_clears(self):
         """The confirmation is a review: commit naming the claim, empty when the
         claim needed no edit (dl-seal); other commits are not asked."""

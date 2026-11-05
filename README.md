@@ -38,7 +38,7 @@ checkout of this repository as the artifact under test.
 
 ## Using it
 
-Hand this repository to an AI coding agent — a clone, or at least the two HTML
+Hand this repository to an AI coding agent — a clone, or at least its HTML
 files, `lspec.py` and `hooks/` — along with the work you want captured, and say
 "capture this into this format." The agent instantiates a living specification:
 a persistent, cross-session, human- and machine-readable definition that any

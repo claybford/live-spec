@@ -1210,14 +1210,14 @@ def head_sha():
 # ============================================================ collection
 
 IMPORT_RE = re.compile(r"<code\b(?=[^>]*\bdata-import(?:[\s=>]))[^>]*>(.*?)</code>", re.S)
-IMPORT_DECL = re.compile(r"^(\S+) @ ([0-9a-f]{7,40}) (mirrored|melded) (pinned|tracking)$")
+IMPORT_DECL = re.compile(r"^(.+?) @ ([0-9a-f]{7,40}) (mirrored|melded) (pinned|tracking)$", re.S)
 
 
 def import_decl(row):
     """The import declaration of a split row — {source, rev, edits, version}
     from its one <code data-import> element — or None for a plain split row;
     a string names a malformed declaration."""
-    found = [norm(m.group(1)) for m in IMPORT_RE.finditer(row)]
+    found = [html.unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip() for m in IMPORT_RE.finditer(row)]
     if not found:
         return None
     if len(found) > 1:
@@ -1640,14 +1640,24 @@ def own_visible(spec, eid):
     return marker_visible(" ".join(pieces))
 
 
-def slots(col):
+def slot_is_ours(col, p):
+    """Mirrored file P's slots are this collection's to answer when the
+    innermost import holding P is declared in a file we own. A component's
+    own nested import is answered in the component's files (D6): charging it
+    to the outer importer would force a second answer or an override."""
+    chain = col.import_chain(p)
+    return bool(chain) and not col.mirrored(chain[-1]["row"][0])
+
+
+def slots(col, ours=True):
     """Slots of the collection's mirrored imports (reuse.html dl-slots): the
     id'd elements whose own text carries an [ADAPT]/[PROJECT] marker, each one
-    address the importer answers. -> ({(path, id): markers}, [files with a
-    marker outside any id'd element: unaddressable, upstream's])."""
+    address the importer answers. OURS=False gives the slots of components'
+    nested imports instead. -> ({(path, id): markers}, [files with a marker
+    outside any id'd element: unaddressable, upstream's])."""
     out, stray = {}, []
     for p, s in col.specs.items():
-        if not col.mirrored(p):
+        if not col.mirrored(p) or slot_is_ours(col, p) != ours:
             continue
         n = 0
         for eid in s.elems:
@@ -1675,10 +1685,21 @@ def slot_dispositions(col):
             if not fr:
                 continue
             if l["rel"] == "resolves":
-                answers.setdefault((tp, fr), []).append((p, l["src"]))
+                who = answers.setdefault((tp, fr), [])
+                if (p, l["src"]) not in who or l["src"] is None:
+                    who.append((p, l["src"]))    # one claim linking twice is one answer
             elif l["src"] and s.tags.get(l["src"]) == "tr" and l["src"].startswith("open-"):
-                opens.setdefault((tp, fr), []).append((p, l["src"]))
+                who = opens.setdefault((tp, fr), [])
+                if (p, l["src"]) not in who:
+                    who.append((p, l["src"]))
     return answers, opens
+
+
+def resolves_when(spec, rid):
+    """The open row's last cell, what resolves it ('' when empty or TBD)."""
+    tds = re.findall(r"<td\b[^>]*>(.*?)</td>", spec.element(rid), re.S)
+    text = norm(tds[-1]) if len(tds) >= 2 else ""
+    return "" if text.upper() in ("", "TBD", "TODO", "?") else text
 
 
 def slot_failures(col):
@@ -1687,7 +1708,18 @@ def slot_failures(col):
     mirrored; a slot is answered once (one value, one home)."""
     fails = []
     found, stray = slots(col)
+    theirs, _ = slots(col, ours=False)
     answers, opens = slot_dispositions(col)
+    for key, who in list(opens.items()):
+        good = [w for w in who if resolves_when(col.specs[w[0]], w[1])]
+        for w in who:
+            if w not in good and key in found:
+                fails.append(f"[slot] {addr(*w)} opens {addr(*key)} but states nothing in its last "
+                             "cell: an open item says what resolves it (P6)")
+        if good:
+            opens[key] = good
+        else:
+            del opens[key]
     for p in stray:
         col.fyi.append(f"[slot] {rel(p)}: an [ADAPT] marker outside any id'd element cannot be "
                        "answered — upstream's to address")
@@ -1698,6 +1730,10 @@ def slot_failures(col):
         if not col.mirrored(tp):
             fails.append(f"[slot] {addr(*who[0])} resolves {addr(tp, fr)}, which is not mirrored "
                          "content: a melded or own slot is filled in place")
+        elif (tp, fr) in theirs:
+            fails.append(f"[slot] {addr(*who[0])} resolves {addr(tp, fr)}, a slot of a component's own "
+                         "import: the component answers it, and an answer here is a second home or an "
+                         "override — depend on the component's answer instead")
         elif (tp, fr) not in found:
             fails.append(f"[slot] {addr(*who[0])} resolves {addr(tp, fr)}, which holds no slot — "
                          "filled or removed upstream: delete the answer, re-home the value with "
@@ -1741,6 +1777,15 @@ def check_structure(col, specimens=True, markers=True):
     commit_types(col, fails)
     if hasattr(col, "imports") and col.imports:
         fails += slot_failures(col)
+    for p, s in col.specs.items():
+        if imported(p) and not mirrored(p):
+            parts = [label for label, _, _ in operating_spans(s.raw)]
+            if parts:
+                rec = col.import_chain(p)[-1]
+                fails.append(f"[demote] {rel(p)}: melded content still carries operating parts "
+                             f"({', '.join(parts)}) — a melded main is demoted in place: remove them, "
+                             f"or let the tool: lspec import --update {rec['name']} --edits melded "
+                             f"(from mirrored)")
     for p, s in col.specs.items():
         if commit_type_decls(s) and "status" not in s.elems and not imported(p):
             fails.append(f"[seed-shape] {rel(p)}: no element id=status — a main carries "
@@ -2774,24 +2819,46 @@ def mirror_items(ctx):
                         True, detail="mirrored bytes are never edited here: restore them, or "
                         "fetch the change with " + command(col, "import", "--update", outer["name"])
                         + "; to own the content, change the row to melded"))
-    # The row's declaration is part of the record: a revision typed into a
-    # mirrored import's row, with no update behind it, is refused the same way.
+    # The row's declaration is part of the record: a revision, source or
+    # edits setting typed into a mirrored import's row, with no lspec import
+    # behind it, is refused; and a row that changed puts the whole unit to
+    # the test, not only the paths this commit stages — a melded copy
+    # relabelled mirrored keeps its edits in files no commit touches (D7).
     before = ctx.head.imports if ctx.head is not None else {}
+    flagged = {it["key"].partition(":")[2] for it in out}
     for key, rec in sorted(col.imports.items()):
         if rec["nested"] or rec["edits"] != "mirrored":
             continue
         was = before.get(key)
-        changed = was is None or (was["rev"], was["source"]) != (rec["rev"], rec["source"])
-        known = manifest.get(rec["name"])
+        changed = was is None or (was["rev"], was["source"], was["edits"], was["version"]) != \
+            (rec["rev"], rec["source"], rec["edits"], rec["version"])
         if not changed:
             continue                     # the committed record stands; the manifest is evidence for changes
-        if known is None or known.get("rev") != rec["rev"] or known.get("source") != rec["source"]:
+        known = manifest.get(rec["name"])
+        p, rid = rec["row"]
+        if known is None or (known.get("rev"), known.get("source"), known.get("edits")) != \
+                (rec["rev"], rec["source"], "mirrored"):
             why = ("no import manifest in this worktree" if known is None else
-                   f"the manifest holds {known.get('rev', '')[:12]} from {known.get('source')}")
-            p, rid = rec["row"]
+                   f"the manifest holds {known.get('edits')} {known.get('rev', '')[:12]} from {known.get('source')}")
             out.append(item("mirror", addr(p, rid), f"{addr(p, rid)}: the import's recorded "
-                            f"revision or source was not fetched by lspec import ({why})", True,
-                            detail="record what was fetched: " + command(col, "import", "--update", rec["name"])))
+                            f"revision, source or setting was not written by lspec import ({why})", True,
+                            detail="let the tool write it: " + command(col, "import", "--update", rec["name"],
+                                                                        "--edits", "mirrored")))
+            continue
+        base = repo_rel(rec["dir"]) + "/"
+        present = {n[len(base):]: oid for n, oid in index.items() if n.startswith(base)}
+        for inside in sorted(set(present) | set(known.get("files", {}))):
+            n = base + inside
+            if n in flagged:
+                continue
+            want = known.get("files", {}).get(inside)
+            if present.get(inside) == want:
+                continue
+            why = ("missing from the index" if inside not in present else
+                   "not part of the fetched unit" if want is None else "not the fetched bytes")
+            out.append(item("mirror", n, f"{n}: mirrored content differs from what lspec import "
+                            f"wrote ({why})", True,
+                            detail="restore upstream's bytes: " + command(col, "import", "--update", rec["name"])))
     return out
 
 
@@ -2835,6 +2902,28 @@ def import_items(ctx):
         it["unit"] = name
         it["rev"] = rec["rev"]
         out.append(it)
+    return out
+
+
+def section_span(spec, eid):
+    """(start, end) of the section an id'd heading opens — to the next heading
+    of its level or above — or the element's own span for any other tag."""
+    start, end = spec.elems[eid]
+    tag = spec.tags.get(eid, "")
+    if re.fullmatch(r"h[1-6]", tag):
+        nxt = re.search(r"<h[1-" + tag[1] + r"]\b", spec.raw[end:], re.I)
+        end = end + nxt.start() if nxt else len(spec.raw)
+    return start, end
+
+
+def open_item_rows(spec):
+    """Ids of a spec's open items that are not watch entries: rows id'd
+    open-…, and every id'd row of the open-items section (id="open")."""
+    out = [i for i in spec.ids if i.startswith("open-") and spec.tags.get(i) == "tr"]
+    if "open" in spec.elems:
+        a, b = section_span(spec, "open")
+        out += [i for i, (s, _) in spec.elems.items() if a <= s < b and spec.tags.get(i) == "tr"
+                and not i.startswith(WATCH_PREFIX) and i not in out]
     return out
 
 
@@ -3943,12 +4032,15 @@ def validate(it, given, ctx, other_reasons):
         return answer_asked(ctx, kind, answer, ref)
     if kind == "inherit":
         state = it["state"]
+        if answer == "reopen" and not it.get("reopenable"):
+            raise ValueError("reopen is for an item that settles a question — a decision row, a fence "
+                             "item or the directive; keep, modify or delete this one")
         if answer == "keep" and state != "unchanged":
-            raise ValueError("keep is for a row left as copied; this one is " + state)
-        if answer == "modify" and state != "changed":
-            raise ValueError("modify is for a row whose text changed; this one is " + state)
-        if answer in ("reopen", "delete") and state != "absent":
-            raise ValueError(f"{answer} is for a row removed from the file; this one is {state}")
+            raise ValueError("keep is for an item left as copied; this one is " + state)
+        if answer == "modify" and state not in ("changed", "edited or removed"):
+            raise ValueError("modify is for an item whose text changed; this one is " + state)
+        if answer in ("reopen", "delete") and state not in ("absent", "edited or removed"):
+            raise ValueError(f"{answer} is for an item removed from the file; this one is {state}")
         if answer == "reopen":
             p, rid = changed_row(ctx, ref, "open item")
             if not rid.startswith("open-"):
@@ -5309,29 +5401,54 @@ def tree_join(base, href):
     return posixpath.normpath(posixpath.join(posixpath.dirname(base), path))
 
 
-def fetch_upstream(source, rev=None):
+BATCH_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never",
+             "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o ConnectTimeout=10"}
+
+
+def git_net(*args, cwd, batch=False, timeout=None):
+    """git for a network operation; BATCH never prompts for credentials and
+    gives up after TIMEOUT seconds (a check at start must not hang)."""
+    env = None
+    if batch:
+        env = {**os.environ, **{k: v for k, v in BATCH_ENV.items()
+                                if k != "GIT_SSH_COMMAND" or "GIT_SSH_COMMAND" not in os.environ}}
+    try:
+        r = subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd, check=False,
+                           env=env, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"no answer within {timeout}s") from e
+    if r.returncode:
+        raise RuntimeError(r.stderr.strip() or f"git {' '.join(args)} failed")
+    return r.stdout
+
+
+def fetch_upstream(source, rev=None, batch=False, timeout=None):
     """-> (scratch repository holding SOURCE at REV, full sha). REV defaults to
     upstream's HEAD; a sha, tag or branch is fetched directly, or the whole
-    of upstream when the server refuses a bare object."""
+    of upstream when the server refuses a bare object. BATCH (tracking checks)
+    never prompts and stops after TIMEOUT seconds per step."""
     tmp = tempfile.mkdtemp(prefix="lspec-import-")
     git("init", "-q", cwd=tmp)
-    src = canon(source) if os.path.isdir(source) else source
+    src = local_source(source)
+    net = lambda *a: git_net(*a, cwd=tmp, batch=batch, timeout=timeout)
     try:
         if rev is None:
-            head = git("ls-remote", src, "HEAD", cwd=tmp).split()
+            head = net("ls-remote", src, "HEAD").split()
             if not head:
                 raise ImportRefused(f"{source}: no HEAD to import (an empty repository?)")
             rev = head[0]
         try:
-            git("fetch", "-q", src, rev, cwd=tmp)
+            net("fetch", "-q", src, rev)
             sha = git("rev-parse", "--verify", "FETCH_HEAD^{commit}", cwd=tmp).strip()
         except RuntimeError:
-            git("fetch", "-q", src, cwd=tmp)
-            sha = git("rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}", cwd=tmp).strip()
+            net("fetch", "-q", src)
+            sha = git("rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}", cwd=tmp, check=False).strip()
             if not sha:
                 raise ImportRefused(f"{source} has no commit {rev!r}")
-    except RuntimeError as e:
+    except (RuntimeError, ImportRefused) as e:
         shutil.rmtree(tmp, ignore_errors=True)
+        if isinstance(e, ImportRefused):
+            raise
         raise ImportRefused(f"cannot fetch {source}: {e}") from e
     return tmp, sha
 
@@ -5350,6 +5467,25 @@ def blob_bytes(tmp, oid):
     if r.returncode:
         raise RuntimeError(r.stderr.decode(errors="replace").strip() or f"cannot read {oid}")
     return r.stdout
+
+
+REF_ATTR_RE = re.compile(r'\b(?:href|src|poster|data)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.I)
+SRCSET_RE = re.compile(r'\bsrcset\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.I)
+
+
+def resource_refs(raw):
+    """Every repository path an element names — <a>, <img>, <link>, <script>,
+    <source>, <video>, <object>, srcset entries — fragments kept, URLs and
+    bare fragments excluded: what a copy needs beside the spec so nothing it
+    embeds or links breaks (D19)."""
+    out = []
+    for m in REF_ATTR_RE.finditer(raw):
+        out.append(html.unescape(m.group(1) if m.group(1) is not None else m.group(2)))
+    for m in SRCSET_RE.finditer(raw):
+        value = html.unescape(m.group(1) if m.group(1) is not None else m.group(2))
+        out += [part.split()[0] for part in value.split(",") if part.split()]
+    return [r for r in out if r and not r.startswith("#") and not is_external(r)
+            and not re.match(r"^[A-Za-z][\w+.-]*:", r)]
 
 
 def select_unit(tmp, sha, entry):
@@ -5376,10 +5512,8 @@ def select_unit(tmp, sha, entry):
                     queue.append(child)
                 else:
                     notes.append(f"{path}: split row {rid} links {href}, absent upstream")
-        for l in s.links:
-            if is_external(l["href"]):
-                continue                 # a URL; a rel=external repository file still travels
-            tgt = tree_join(path, l["href"])
+        for href in resource_refs(s.raw):    # a rel=external repository file still travels
+            tgt = tree_join(path, href)
             if tgt and tgt in files and tgt not in specs:
                 linked.add(tgt)
     linked -= set(specs)
@@ -5391,27 +5525,63 @@ def select_unit(tmp, sha, entry):
     return specs, linked, notes, files
 
 
-OPERATING_PARTS = ("status", "conventions")
-
-
 def demote_main(text):
     """A melded imported main becomes a supporting spec in place (reuse.html
     dl-demote): its status line, conventions, the paragraph declaring commit
-    types and the tooling instruction are removed; everything else — rows,
-    split rows, open items, the directive — stays. -> (text, removed labels)."""
+    types and the tooling instruction are removed, whatever element holds
+    them; everything else — rows, split rows, open items, the directive —
+    stays. -> (text, removed labels)."""
     removed = []
-    for eid in OPERATING_PARTS:
-        new, n = re.subn(rf'[ \t]*<p\b[^>]*\bid="{eid}"[^>]*>.*?</p>[ \t]*\n?', "", text, count=1, flags=re.S)
-        if n:
-            removed.append(f"#{eid}"); text = new
-    for label, pat in (("the commit-type declaration",
-                        r'[ \t]*<p\b[^>]*>(?:(?!</p>).)*?data-commit-types.*?</p>[ \t]*\n?'),
-                       ("the tooling instruction",
-                        r'[ \t]*<p\b[^>]*>\s*(?:<strong>)?Tooling\b.*?</p>[ \t]*\n?')):
-        new, n = re.subn(pat, "", text, count=1, flags=re.S)
-        if n:
-            removed.append(label); text = new
-    return text, removed
+    while True:
+        found = operating_spans(text)
+        if not found:
+            return text, removed
+        label, a, b = found[0]
+        while a > 0 and text[a - 1] in " \t":
+            a -= 1
+        if text[b:b + 1] == "\n":
+            b += 1
+        text = text[:a] + text[b:]
+        removed.append(label)
+
+
+OPERATING_PARTS = ("status", "conventions")
+TOOLING_RE = re.compile(r'<p\b[^>]*>\s*(?:<strong>)?Tooling\b.*?</p>', re.S)
+COMMIT_TYPES_P_RE = re.compile(r'<p\b[^>]*>(?:(?!</p>).)*?data-commit-types.*?</p>', re.S)
+
+
+def operating_spans(text):
+    """[(label, start, end)] of the operating parts TEXT carries, first in
+    document order: the elements id'd status and conventions (any tag), the
+    paragraph declaring commit types, the tooling instruction."""
+    spec = Spec("operating.html", text)
+    out = [(f"#{eid}", *spec.elems[eid]) for eid in OPERATING_PARTS if eid in spec.elems]
+    for label, rx in (("the commit-type declaration", COMMIT_TYPES_P_RE), ("the tooling instruction", TOOLING_RE)):
+        m = rx.search(text)
+        if m and not any(a <= m.start() < b for _, a, b in out):
+            out.append((label, m.start(), m.end()))
+    return sorted(out, key=lambda x: x[1])
+
+
+def is_main(spec):
+    """SPEC is a main: it declares commit types or carries a bootloader. A
+    main is what a melded import demotes (dl-demote)."""
+    return bool(commit_type_decls(spec)) or "status" in spec.elems
+
+
+def local_source(source, root=None):
+    """A local upstream as an absolute path, so a later command resolves it
+    from anywhere; a URL as given. A relative path recorded before this rule
+    is resolved against the repository root."""
+    if re.match(r"^[A-Za-z][\w+.-]*://|^[\w.-]+@[\w.-]+:", source):
+        return source
+    if os.path.isabs(source):
+        return posix(canon(source))
+    base = root or repo_root() or os.getcwd()
+    for cand in (os.path.join(os.getcwd(), source), os.path.join(base, source)):
+        if os.path.isdir(cand):
+            return posix(canon(cand))
+    return source
 
 
 def import_row(name, entry_rel, adopting, rejected, reason, source, sha, edits, version):
@@ -5501,10 +5671,12 @@ def import_new(col, args):
         raise ImportRefused("--adopting TEXT (the subject or component this unit is) and "
                             "--reason TEXT (why it is adopted) fill the split row; the gate "
                             "asks the adoption question of the commit")
-    if name in col.imports or any(r["name"] == name for r in col.imports.values()) \
-            or f"dl-split-{name}" in col.specs[col.main].elems:
+    if any(r["name"] == name and not r["nested"] for r in col.imports.values()):
         raise ImportRefused(f"{name} is already imported (row dl-split-{name}); "
                             f"lspec import --update {name}, or another name")
+    if f"dl-split-{name}" in col.specs[col.main].elems:
+        raise ImportRefused(f"{rel(col.main)} already has a row dl-split-{name}; choose another name")
+    source = local_source(source)
     dest = os.path.join(os.path.dirname(col.main), IMPORTS_DIR, name)
     if os.path.exists(dest):
         raise ImportRefused(f"{rel(dest)} exists; choose another name or remove it")
@@ -5517,7 +5689,7 @@ def import_new(col, args):
             return 0
         demote = None
         entry_spec = Spec(entry, blob_text(tmp, files[entry]))
-        if commit_type_decls(entry_spec):
+        if is_main(entry_spec):
             if args.edits == "melded":
                 demote = entry
             else:
@@ -5546,16 +5718,20 @@ def import_new(col, args):
     return 0
 
 
-def rewrite_import_decl(main_path, rid, sha):
-    """Replace the revision in row RID's data-import declaration."""
+def rewrite_import_decl(main_path, rid, sha, edits=None, version=None, source=None):
+    """Rewrite row RID's data-import declaration with SHA and, when given,
+    new settings or source."""
     with open(main_path, encoding="utf-8") as fh:
         text = fh.read()
     s = Spec(main_path, text)
     a, b = s.elems[rid]
     row = text[a:b]
-    new_row, n = IMPORT_RE.subn(
-        lambda m: m.group(0).replace(m.group(1), re.sub(r"@ [0-9a-f]{7,40}", f"@ {sha}", m.group(1), count=1)),
-        row, count=1)
+    decl = import_decl(row)
+    if not isinstance(decl, dict):
+        raise ImportRefused(f"{rid}: no well-formed data-import declaration to update")
+    body = (f"{html.escape(source or decl['source'])} @ {sha} {edits or decl['edits']} "
+            f"{version or decl['version']}")
+    new_row, n = IMPORT_RE.subn(lambda m: m.group(0).replace(m.group(1), body), row, count=1)
     if n != 1:
         raise ImportRefused(f"{rid}: no data-import declaration to update")
     with open(main_path, "w", encoding="utf-8") as fh:
@@ -5569,6 +5745,10 @@ def import_update(col, args):
         raise ImportRefused(f"{name} is not an import of {rel(col.main)}; imports: "
                             + (", ".join(sorted(r["name"] for r in col.imports.values()
                                                 if not r["nested"])) or "none"))
+    edits = getattr(args, "edits", None) or rec["edits"]
+    version = getattr(args, "version", None) or rec["version"]
+    if (edits, version) != (rec["edits"], rec["version"]):
+        return import_switch(col, rec, args, edits, version)
     if rec["edits"] == "melded":
         return import_merge(col, rec, args)
     tmp, sha = fetch_upstream(rec["source"], args.at)
@@ -5603,6 +5783,64 @@ def import_update(col, args):
     return 0
 
 
+def import_switch(col, rec, args, edits, version):
+    """A settings change (reuse.html slots-rules), taken at the recorded
+    revision: one move per command, so a switch and an update are two.
+    mirrored -> melded owns the copy as it stands and demotes a main;
+    melded -> mirrored refetches upstream's bytes, dropping every local edit
+    and in-place slot fill (the answers move out to the parameters, which
+    the slot gate then requires); a version change rewrites the row only."""
+    name = rec["name"]
+    if args.at:
+        raise ImportRefused("a settings change stays at the recorded revision; take the change, "
+                            f"then update: lspec import --update {name} --at {args.at}")
+    root = repo_root()
+    p, rid = rec["row"]
+    entry = posix(os.path.relpath(rec["entry"], rec["dir"]))
+    manifest = read_state("imports.json") or {}
+    note = []
+    written = (manifest.get(name) or {}).get("files", {})
+    if edits != rec["edits"]:
+        tmp, sha = fetch_upstream(rec["source"], rec["rev"])
+        try:
+            specs, linked, notes, files = select_unit(tmp, sha, entry)
+            if args.dry_run:
+                print_selection(sha, specs, linked, notes)
+                print("dry run: nothing written")
+                return 0
+            if edits == "mirrored":
+                tracked = git("ls-files", "-z", "--", repo_rel(rec["dir"]), cwd=root).split("\0")
+                if any(tracked):
+                    git("rm", "-r", "-q", "--cached", "--", repo_rel(rec["dir"]), cwd=root)
+                shutil.rmtree(rec["dir"], ignore_errors=True)
+                written, _ = write_unit(tmp, files, specs + linked, rec["dir"])
+                note.append("local edits and in-place slot fills dropped: upstream's bytes at "
+                            f"{sha[:12]} restored; answer each slot in your parameters (rel=\"resolves\")")
+            else:
+                written = {q: files[q] for q in specs + linked if q in files}
+                if is_main(Spec(entry, blob_text(tmp, files[entry]))):
+                    with open(rec["entry"], encoding="utf-8") as fh:
+                        text, removed = demote_main(fh.read())
+                    with open(rec["entry"], "w", encoding="utf-8") as fh:
+                        fh.write(text)
+                    note += [f"demoted {entry}: removed {r}" for r in removed]
+                note.append("the copy is yours now: fill its slots in place, moving each answer in "
+                            "or pointing the slot at its parameter row")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    rewrite_import_decl(p, rid, rec["rev"], edits=edits, version=version)
+    manifest[name] = {"source": rec["source"], "rev": rec["rev"], "edits": edits, "version": version,
+                      "entry": entry, "files": written, "at": now_iso()}
+    write_state("imports.json", manifest)
+    git("add", "-A", "--", repo_rel(rec["dir"]), repo_rel(p), cwd=root)
+    print(f"{name}: {rec['edits']}, {rec['version']} -> {edits}, {version} at {rec['rev'][:12]}; row {rid} updated")
+    for n in note:
+        print(f"  {n}")
+    print("staged, nothing committed; the gate acknowledges the change (updated). Next: "
+          + cmd(command(col, "reconcile", "--subject", f"docs: import {name} {edits}, {version}")))
+    return 0
+
+
 def merge_file(local, base, theirs):
     """git merge-file on three byte strings -> (merged bytes, conflicts)."""
     tmp = tempfile.mkdtemp(prefix="lspec-merge-")
@@ -5631,9 +5869,8 @@ def import_merge(col, rec, args):
     name = rec["name"]
     tmp, sha = fetch_upstream(rec["source"], args.at)
     try:
-        src = canon(rec["source"]) if os.path.isdir(rec["source"]) else rec["source"]
         try:
-            git("fetch", "-q", src, rec["rev"], cwd=tmp)
+            git_net("fetch", "-q", local_source(rec["source"]), rec["rev"], cwd=tmp)
         except RuntimeError as e:
             raise ImportRefused(f"the recorded base {rec['rev'][:12]} is not fetchable from "
                                 f"{rec['source']}: {e}") from e
@@ -5647,7 +5884,12 @@ def import_merge(col, rec, args):
             print("dry run: nothing written")
             return 0
         base_files = upstream_files(tmp, rec["rev"])
-        demote = entry if commit_type_decls(Spec(entry, blob_text(tmp, files[entry]))) else None
+        demote = entry if is_main(Spec(entry, blob_text(tmp, files[entry]))) else None
+        try:
+            bspecs, blinked, _, _ = select_unit(tmp, rec["rev"], entry)
+            before = set(bspecs + blinked)       # the unit as the recorded base defined it
+        except ImportRefused:
+            before = set()
         def side(table, path):
             if path not in table:
                 return None
@@ -5658,7 +5900,7 @@ def import_merge(col, rec, args):
         root = repo_root()
         local_paths = {posix(os.path.relpath(os.path.join(dp, f), rec["dir"]))
                        for dp, _, fs in os.walk(rec["dir"]) for f in fs}
-        written, conflicts, kept, dropped = {}, [], [], []
+        written, conflicts, kept, dropped, held = {}, [], [], [], []
         for path in sorted(set(specs + linked) | local_paths):
             target = os.path.join(rec["dir"], *path.split("/"))
             theirs = side(files, path) if path in specs or path in linked else None
@@ -5673,8 +5915,11 @@ def import_merge(col, rec, args):
                 elif local is not None:
                     kept.append(path)                               # local work survives
                 continue
+            if local is None and path in before:
+                held.append(path)                                   # dropped here: stays dropped (D19)
+                continue
             if local is None or local == base or base is None and local == theirs:
-                out = theirs                                        # take upstream's
+                out = theirs                                        # new upstream, or untouched here
             elif base is None:
                 out, n = merge_file(local, b"", theirs); conflicts += [path] * bool(n)
             else:
@@ -5699,6 +5944,8 @@ def import_merge(col, rec, args):
         print(f"  removed upstream, untouched here, dropped: {q}")
     for q in kept:
         print(f"  removed upstream, edited here, kept: {q}")
+    for q in held:
+        print(f"  dropped here, kept dropped: {q}")
     if conflicts:
         print(f"  {status('OPEN')} {len(conflicts)} file(s) with conflicts, marked <<<<<<< local / >>>>>>> upstream "
               "— resolve by hand, restage, then reconcile:")
@@ -5765,10 +6012,19 @@ def convert_to_main(text, parent, tool_hint):
         if not m:
             raise ImportRefused("the file has no <h1>, <main> or <body> to place the operating parts after")
         text = text[:m.end()] + block + "\n" + text[m.end():]
-    if footer_comment(text) is None:
-        foot = footer_comment(parent.raw)
-        if foot:
-            text = text.rstrip("\n") + "\n\n" + foot + "\n"
+    # The graduate runs the parent's rules and tool, so it carries the
+    # parent's version line, replacing any attribution comment of its own (D11).
+    foot = footer_comment(parent.raw)
+    if foot:
+        own = footer_comment(text)
+        if own:
+            text = text[:text.rstrip().rfind(own)].rstrip("\n")
+        text = text.rstrip("\n") + "\n\n" + foot + "\n"
+        if not re.search(r"@ [0-9a-f]{7,40}", foot):
+            notes.append("the parent's footer names no live-spec revision: set it "
+                         "(github.com/claybford/live-spec @ COMMIT) in both")
+    else:
+        notes.append("the parent carries no footer line: write the version line by hand")
     return text, notes
 
 
@@ -5877,7 +6133,7 @@ def graduate_replace(col, args):
         if n:
             touched[q] = n
     # 4. the import
-    ns = argparse.Namespace(name=name, source=args.source, entry=base, edits=args.edits,
+    ns = argparse.Namespace(name=name, source=local_source(args.source), entry=base, edits=args.edits,
                             version=args.version, at=args.at, adopting=args.adopting,
                             reason=args.reason, rejected=args.rejected or "Keep it as a supporting spec here (replaced by graduation)",
                             dry_run=False, update=None)
@@ -5954,6 +6210,10 @@ def cmd_export(args):
     sha = head_sha()
     if sha is None:
         print("lspec export: no commits; an export carries committed provenance", file=sys.stderr); return 2
+    out_path = canon(os.path.abspath(args.out))
+    if out_path.startswith(canon(root) + os.sep):
+        print(f"lspec export: {args.out} is inside this repository; the source records nothing (D10), "
+              "so write the export outside it", file=sys.stderr); return 2
     source = repo_source(root)
     head = {}
     chosen = []
@@ -6018,14 +6278,121 @@ def cmd_export(args):
 
 # ---- copying a main for a new project (reuse.html dl-copymain)
 
-EVIDENCE_CONFIRMED_RE = re.compile(r"\bconfirmed\(")
+COPY_STATUS = ('<p id="status">Status: [ADAPT: forward design | live-system]. Locked: [ADAPT].\n'
+               '  Open: [ADAPT]. Top risk: [ADAPT]. This status line is a derived view: re-derive\n'
+               '  it whole from the locked list, open table and top-risk source.</p>')
+TOKEN_SEP = r"·|&middot;|&#183;|:|—|&mdash;|–|&ndash;"
+
+
+def evidence_words(main_spec):
+    """(confirmed word, provisional word) the instance's conventions declare
+    on the evidence axis ("evidence confirmed(source) / provisional(source)"),
+    else the methodology's own."""
+    text = norm(main_spec.raw)
+    m = re.search(r"\bevidence\s+([A-Za-z][\w-]*)\s*(?:\([^)]*\))?\s*/\s*([A-Za-z][\w-]*)", text, re.I)
+    if m and m.group(1).lower() != m.group(2).lower():
+        return m.group(1), m.group(2)
+    return "confirmed", "provisional"
+
+
+def masked(raw):
+    """Spans the demotion leaves alone: specimens and literal mentions."""
+    return [m.span() for m in re.finditer(r'<pre\b[^>]*data-specimen="[^"]*"[^>]*>.*?</pre>'
+                                          r'|<code\b[^>]*\bdata-literal\b[^>]*>.*?</code>', raw, re.S)]
+
+
+def demote_evidence(raw, words, prov, note):
+    """Every evidence token spelled with one of WORDS, in any case and with
+    any separator — confirmed(src), Confirmed (src), confirmed · src,
+    confirmed: src, a bare confirmed ending a cell — becomes PROV with NOTE as
+    provenance (D8). -> (text, demoted, [prose occurrences left])."""
+    rx = re.compile(r"\b(" + "|".join(map(re.escape, words)) + r")\b(\s*)(?:(\()|(" + TOKEN_SEP
+                    + r")|(?=\s*</t[dh]>))", re.I)
+    skip = masked(raw)
+    out, pos, n = [], 0, 0
+    for m in rx.finditer(raw):
+        if any(a <= m.start() < b for a, b in skip):
+            continue
+        word = prov.capitalize() if m.group(1)[0].isupper() else prov
+        if m.group(3):
+            rep_ = f"{word}{m.group(2)}({note}; "
+        elif m.group(4):
+            rep_ = f"{word}{m.group(2)}{m.group(4)} {note};"
+        else:
+            rep_ = f"{word} ({note})"
+        out.append(raw[pos:m.start()] + rep_)
+        pos = m.end()
+        n += 1
+    text = "".join(out) + raw[pos:]
+    left = [m.start() for m in re.finditer(r"\b(" + "|".join(map(re.escape, words)) + r")\b", text, re.I)
+            if not any(a <= m.start() < b for a, b in masked(text))]
+    return text, n, left
+
+
+def register_spans(spec, rx_id, phrase):
+    """Offset ranges of a named register: an element whose id matches RX_ID,
+    or a heading whose text contains PHRASE, to the next heading at its level."""
+    spans = []
+    for eid in spec.elems:
+        if re.fullmatch(rx_id, eid, re.I):
+            spans.append(section_span(spec, eid))
+    for match in re.finditer(r"<h([1-6])\b[^>]*>(.*?)</h\1>", spec.raw, re.S | re.I):
+        if re.search(phrase, norm(match[2]), re.I):
+            nxt = re.search(r"<h[1-" + match[1] + r"]\b", spec.raw[match.end():], re.I)
+            spans.append((match.start(), match.end() + nxt.start() if nxt else len(spec.raw)))
+    return spans
+
+
+def ruledout_spans(spec):
+    return register_spans(spec, r"(?:ruled[-_]?out|dead[-_]?ends?)(?:[-_](?:register|hypotheses))?",
+                          r"ruled[- ]out")
+
+
+def fence_items(spec):
+    """The scope fence's items: [(key, text)], an id'd element by its id, an
+    un-id'd list item or paragraph by its position (fence~N)."""
+    if "fence" not in spec.elems:
+        return []
+    a, b = section_span(spec, "fence")
+    heading_end = spec.elems["fence"][1]
+    inner = [(i, v) for i, v in spec.elems.items() if i != "fence" and a <= v[0] < b]
+    out = [(i, spec.text(i) or "") for i, _ in sorted(inner, key=lambda x: x[1][0])]
+    n = 0
+    for m in re.finditer(r"<(li|p)\b[^>]*>(.*?)</\1>", spec.raw[heading_end:b], re.S):
+        at = heading_end + m.start()
+        if any(s <= at < e for _, (s, e) in inner):
+            continue
+        n += 1
+        out.append((f"fence~{n}", norm(m.group(2))))
+    return out
+
+
+def inherited_rows(spec):
+    """{key: {"text", "reopen"}} of every judgment item a copied file carries
+    (D8): decision rows, watch entries, open items, ruled-out and diagnostic
+    rows, the directive and each fence item; reopen marks the items that
+    settle a question (decisions, fence, directive)."""
+    out = {}
+    spans = diagnostic_spans(spec) + ruledout_spans(spec)
+    opens = set(open_item_rows(spec))
+    for eid in spec.elems:
+        if spec.tags.get(eid) != "tr":
+            continue
+        if eid.startswith(("dl-", WATCH_PREFIX)) or eid in opens \
+                or any(a <= spec.elems[eid][0] < b for a, b in spans):
+            out[eid] = {"text": spec.text(eid) or "", "reopen": eid.startswith("dl-")}
+    if "directive" in spec.elems:
+        out["directive"] = {"text": spec.text("directive") or "", "reopen": True}
+    for key, text in fence_items(spec):
+        out.setdefault(key, {"text": text, "reopen": True})
+    return out
 
 
 def copy_main(col, args):
-    """A new repository seeded from this collection's owned files: evidence
-    demoted mechanically with provenance, seals lifted, the status line
-    reset to slots, and every inherited row recorded for the seed gate's
-    per-item judgment (inherit items). Nothing committed."""
+    """A new repository seeded from this collection's owned files: the status
+    line reset to slots, evidence demoted mechanically with provenance,
+    seals lifted, and every inherited judgment item recorded for the seed
+    gate (inherit items). Nothing committed."""
     root = repo_root()
     if not args.to:
         raise ImportRefused("--to DIR names the new repository's directory")
@@ -6039,40 +6406,38 @@ def copy_main(col, args):
     if sha is None:
         raise ImportRefused("no commits; a copy inherits committed text")
     source = repo_source(root)
+    main_head = file_at("HEAD", col.main)
+    conf, prov = evidence_words(main_head)
+    words = sorted({conf, "confirmed"}, key=str.lower)
+    note = f"inherited from {os.path.basename(col.main)} @ {sha[:12]}"
     os.makedirs(dest, exist_ok=True)
     git("init", "-q", cwd=dest)
-    rows, demoted = {}, 0
+    rows, demoted, prose = {}, 0, []
     for p in col.specs:
         spec = file_at("HEAD", p)
         if spec is None:
             raise ImportRefused(f"{rel(p)} is not committed")
         text = spec.raw
-        text, n = EVIDENCE_CONFIRMED_RE.subn(f"provisional(inherited from {os.path.basename(col.main)} @ {sha[:12]}; ", text)
+        if p == col.main and "status" in spec.elems:          # reset first: its tokens go with it
+            a, b = spec.elems["status"]
+            text = text[:a] + COPY_STATUS + text[b:]
+        text, n, left = demote_evidence(text, words, prov, note)
         demoted += n
         text = re.sub(r"\s+data-sealed\b(?:=\"[^\"]*\")?", "", text)
-        if p == col.main and "status" in spec.elems:
-            a, b = spec.elems["status"]
-            text = text.replace(spec.element("status"),
-                                '<p id="status">Status: [ADAPT: forward design | live-system]. Locked: [ADAPT].\n'
-                                '  Open: [ADAPT]. Top risk: [ADAPT]. This status line is a derived view: re-derive\n'
-                                '  it whole from the locked list, open table and top-risk source.</p>', 1)
         relp = posix(os.path.relpath(p, os.path.dirname(col.main)))
+        if left:
+            prose.append(f"{relp}: {len(left)}")
         target = os.path.join(dest, *relp.split("/"))
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "w", encoding="utf-8") as fh:
             fh.write(text)
-        for eid in spec.elems:
-            if spec.tags.get(eid) == "tr" and eid.startswith(("dl-", WATCH_PREFIX, "open-")) \
-                    or eid in ("directive", "fence") \
-                    or any(a <= spec.elems[eid][0] < b for a, b in diagnostic_spans(spec)) and spec.tags.get(eid) == "tr":
-                rows[f"{relp}#{eid}"] = spec.text(eid) or ""
+        for key, rec in inherited_rows(spec).items():
+            rows[f"{relp}#{key}"] = rec
     # every other repository file the specs link travels too, as with an import
     linked = set()
     for p, spec in col.specs.items():
-        for l in spec.links:
-            if is_external(l["href"]):
-                continue
-            tgt, _ = resolve(p, l["href"])
+        for href in resource_refs(spec.raw):
+            tgt, _ = resolve(p, href)
             if tgt and tgt not in col.specs and os.path.isfile(tgt) and tgt.startswith(root + os.sep) \
                     and os.path.basename(tgt) not in TOOL_FILES and not tgt.startswith(os.path.join(root, "hooks") + os.sep):
                 linked.add(tgt)
@@ -6101,9 +6466,12 @@ def copy_main(col, args):
     finally:
         os.chdir(cwd)
     print(f"copied {len(col.specs)} spec file(s) and {len(linked)} linked file(s) of {rel(col.main)} @ {sha[:12]} "
-          f"into {args.to}: {demoted} evidence "
-          f"token(s) demoted to provisional with provenance, seals lifted, status line reset; "
-          f"{len(rows)} inherited row(s) recorded for the seed gate; staged, nothing committed")
+          f"into {args.to}: status line reset, {demoted} evidence "
+          f"token(s) demoted to {prov} with provenance, seals lifted; "
+          f"{len(rows)} inherited item(s) recorded for the seed gate; staged, nothing committed")
+    if prose:
+        print(f"  {status('note')}: the word '{conf}' stays where it is prose, not a token ("
+              + ", ".join(prose) + "): read each, and demote any that is evidence")
     print("next, in the new repository: install the hooks, fill the status line, then")
     print("  " + cmd(f"python3 lspec.py start {main_name}"))
     print("  " + cmd(shlex.join(["python3", "lspec.py", "--main", main_name, "reconcile", "--subject",
@@ -6136,24 +6504,38 @@ def inherit_items(ctx):
     if not copy:
         return out
     base = os.path.dirname(col.main)
-    for name, was in sorted(copy.get("rows", {}).items()):
+    for name, rec in sorted(copy.get("rows", {}).items()):
+        if isinstance(rec, str):
+            rec = {"text": rec, "reopen": True}
+        was = rec["text"]
         relp, _, eid = name.partition("#")
         p = canon(os.path.join(base, *relp.split("/")))
         spec = col.specs.get(p)
-        now = spec.text(eid) if spec is not None and eid in spec.elems else None
-        state = "absent" if now is None else ("unchanged" if now == was else "changed")
+        if eid.startswith("fence~"):        # an un-id'd fence item: found by its text, or not
+            texts = [x for _, x in fence_items(spec)] if spec is not None else []
+            now = was if was in texts else None
+            state = "unchanged" if now is not None else "edited or removed"
+        else:
+            now = spec.text(eid) if spec is not None and eid in spec.elems else None
+            state = "absent" if now is None else ("unchanged" if now == was else "changed")
         it = item("inherit", name, f"inherited {name} ({state})", False,
                   evidence=digest("inherit", name, was, now or ""),
                   excerpt=f"{name} as copied: {shorten(was, 300)}\nnow: {shorten(now, 300) if now is not None else '(absent)'}",
                   question=f"{name} came from {copy.get('main')} @ {copy.get('rev', '')[:12]}. Is it true as "
-                           "written for this project (keep, the row unchanged), true in substance with its "
+                           "written for this project (keep, unchanged), true in substance with its "
                            "wording or details changed and the rewritten reason already checked (modify, "
-                           "with what you checked), an unsettled question (reopen --ref the open- row it "
-                           "moved to, the row itself gone), or inapplicable (delete, the row gone, with "
-                           "why no part of it still guards against a re-proposal)?")
+                           "with what you checked), "
+                           + ("an unsettled question (reopen --ref the open- row it moved to, the item "
+                              "itself gone), " if rec.get("reopen") else "")
+                           + "or inapplicable (delete, the item gone, with why no part of it still guards "
+                           "against a re-proposal)?")
         it["state"] = state
+        it["reopenable"] = bool(rec.get("reopen"))
         out.append(it)
     return out
+
+
+TRACK_TIMEOUT = 30   # seconds per network step of a tracking check at start
 
 
 def tracking_notices(col):
@@ -6164,7 +6546,7 @@ def tracking_notices(col):
         if rec["nested"] or rec["version"] != "tracking":
             continue
         try:
-            tmp, sha = fetch_upstream(rec["source"])
+            tmp, sha = fetch_upstream(rec["source"], batch=True, timeout=TRACK_TIMEOUT)
         except ImportRefused as e:
             out.append(f"{rec['name']}: upstream unreachable ({e})")
             continue
@@ -6173,8 +6555,8 @@ def tracking_notices(col):
                 out.append(f"{rec['name']}: up to date at {sha[:12]}")
                 continue
             try:
-                git("fetch", "-q", canon(rec["source"]) if os.path.isdir(rec["source"]) else rec["source"],
-                    rec["rev"], cwd=tmp)
+                git_net("fetch", "-q", local_source(rec["source"]), rec["rev"], cwd=tmp,
+                        batch=True, timeout=TRACK_TIMEOUT)
                 n = git("rev-list", "--count", f"{rec['rev']}..{sha}", cwd=tmp).strip()
                 out.append(f"{rec['name']}: upstream has {n} new commit(s) since {rec['rev'][:12]}; "
                            + command(col, "import", "--update", rec["name"]))
@@ -6201,6 +6583,11 @@ def imports_report(col):
             print("    mirrored: never edited here; its watches, open items and defects are upstream's (FYI)")
         else:
             print("    melded: owned here; its obligations are this collection's")
+    theirs = [(p, i) for p, s in col.specs.items() if col.mirrored(p) for i in open_item_rows(s)]
+    if theirs:
+        print(f"  {status('FYI')} upstream open items in mirrored imports ({len(theirs)}), upstream's to close:")
+        for p, i in theirs:
+            print(f"    {addr(p, i)}")
     for line in tracking_notices(col):
         print(f"  {status('note')}: {line}")
     print("  rules: reuse.html in the methodology; " + cmd("python3 lspec.py import --help"))
@@ -6383,12 +6770,16 @@ index); prepare-commit-msg writes the reconciled subject, body and Reconciled:
 trailers, keeps other trailers you pass, and refuses --amend, -c and -C;
 commit-msg refuses a message whose subject or trailers differ from the receipt;
 post-commit lists files still uncommitted and prints nothing when there are
-none. Sources must keep executable modes. Upgrading an instance: copy lspec.py
-and hooks/ from one live-spec commit, install, replace its tooling paragraph
-with "begin with python3 lspec.py start MAIN and follow its output", set that
-commit in the footer line (github.com/claybford/live-spec @ COMMIT: rules and
-tool share one revision), commit under an ordinary type — never seed:, which
-discards the review history.""",
+none. Sources must keep executable modes. Upgrading an instance is one move
+from one live-spec commit, rules and tool together: copy that commit's lspec.py
+and hooks/ and install them; bring every paragraph the instance took from the
+seed (status-line instruction, conventions, decisions, session, dependencies,
+tooling, open items, record) to that commit's seed text, keeping the
+instance's own [ADAPT] answers; set the footer line to that commit with the
+attribution copied as it stands there (github.com/claybford/live-spec @ COMMIT.
+NAME, YEAR. MIT.); commit under an ordinary type — never seed:, which discards
+the review history. A footer naming a commit whose seed text the instance does
+not carry misstates its rules.""",
 
 "mv": """\
 Renames a file or an anchor and repairs references, a renamed row's label

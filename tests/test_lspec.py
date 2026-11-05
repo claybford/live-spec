@@ -3680,17 +3680,25 @@ class Imports(unittest.TestCase):
         u, d = upstream(), importer()
         do_import(d, u)
         rc, out = settle(d, "docs: import electrical"); self.assertEqual(rc, 0, out); commit_reconciled(d)
-        edit(d, "main.html", "mirrored pinned</code>", "melded pinned</code>")
+        edit(d, "main.html", "mirrored pinned</code>", "melded pinned</code>")   # by hand: not demoted
         sh("git", "add", "-A", cwd=d)
         rc, out = cli(d, "check", "--staged")
         self.assertEqual(rc, 1, out)
+        self.assertIn("[demote] imports/electrical/electrical.html: melded content still carries operating parts", out)
+        sh("git", "checkout", "HEAD", "--", "main.html", cwd=d)
+        rc, out = cli(d, "import", "--update", "electrical", "--edits", "melded")    # the tool's switch
+        self.assertEqual(rc, 0, out)
+        self.assertIn("mirrored, pinned -> melded, pinned", out); self.assertIn("demoted electrical.html", out)
+        self.assertIn("melded pinned</code>", Path(d, "main.html").read_text())
+        rc, out = cli(d, "check", "--staged")
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn("[demote]", out)
         self.assertIn("resolves imports/electrical/electrical.html#kp-reach, which is not mirrored content", out)
         self.assertIn("[adapt] imports/electrical/electrical.html", out)
         edit(d, "imports/electrical/electrical.html", "[ADAPT: per install]", "60 cm")
         edit(d, "imports/electrical/electrical.html", 'data-watch-until="2020-01-01"', f'data-watch-until="{FUTURE}"')
         edit(d, "imports/electrical/sizing.html", "sizing, no split row", "sizing")
         edit(d, "imports/electrical/battery.html", 'see <a href="sizing.html">sizing</a>', "see nothing")
-        edit(d, "imports/electrical/electrical.html", '; the tool is <a href="lspec.py">here</a>', "")
         main = Path(d, "main.html").read_text().replace(ANSWER_ROW, '<tr id="kp-reach"><td>Reach</td><td>60 cm, in the slot</td><td>confirmed(tape)</td></tr>')
         Path(d, "main.html").write_text(main)
         sh("git", "add", "-A", cwd=d)
@@ -3741,6 +3749,252 @@ class Imports(unittest.TestCase):
         self.assertIn("import --update electrical", out)
         self.assertEqual(sh("git", "status", "--porcelain", cwd=d).strip(), "")
         self.assertIn("12 V", Path(d, "imports", "electrical", "electrical.html").read_text())
+
+
+class ReviewFixes(unittest.TestCase):
+    """Regressions for the 2026-11-04 review of the reuse series (reuse.html
+    watch-reusereview): each test names its finding."""
+
+    melded_committed = Imports.melded_committed
+
+    def test_A1_relabelling_melded_as_mirrored_is_refused(self):
+        """A hand edit of the row from melded to mirrored keeps the local
+        edits in files the commit never stages; the gate refuses it."""
+        u, d = self.melded_committed()
+        edit(d, "main.html", "melded pinned</code>", "mirrored pinned</code>")
+        sh("git", "add", "-A", cwd=d)
+        out = reconcile_out(d, "docs: electrical mirrored")
+        self.assertIn("[mirror] main.html#dl-split-electrical", out)
+        self.assertIn("the manifest holds melded", out)
+
+    def test_A1_the_tool_switch_restores_upstream_bytes(self):
+        """import --update NAME --edits mirrored refetches the recorded
+        revision: local edits and in-place fills are dropped, and the slot
+        then needs an answer in the importer's parameters (D7)."""
+        u, d = self.melded_committed()
+        rc, out = cli(d, "import", "--update", "electrical", "--edits", "mirrored")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("melded, pinned -> mirrored, pinned", out)
+        self.assertIn("100 Ah", Path(d, "imports/electrical/battery.html").read_text())   # 120 Ah dropped
+        e = Path(d, "imports/electrical/electrical.html").read_text()
+        self.assertIn('id="status"', e); self.assertIn("[ADAPT: per install]", e)
+        rc, out = cli(d, "check", "--staged")
+        self.assertIn("kp-reach has no disposition", out)
+        edit(d, "main.html", "</table>\n<h2 id=\"log\">", ANSWER_ROW + "</table>\n<h2 id=\"log\">")
+        sh("git", "add", "-A", cwd=d)
+        out = reconcile_out(d, "docs: electrical mirrored")
+        self.assertNotIn("[mirror]", out); self.assertIn("0 to fix", out)
+        rc, out = cli(d, "import", "--update", "electrical", "--edits", "melded", "--at", "HEAD")
+        self.assertEqual(rc, 2); self.assertIn("stays at the recorded revision", out)
+
+    def test_A1_a_whole_unit_is_checked_when_the_row_changes(self):
+        """An edited mirrored file left unstaged from an earlier commit is
+        caught when the row next changes, not only staged paths."""
+        u, d = upstream(), importer()
+        do_import(d, u)
+        rc, out = settle(d, "docs: import electrical"); self.assertEqual(rc, 0, out)
+        sh("git", "-c", "core.hooksPath=/dev/null", "-c", "user.email=t@t", "-c", "user.name=t",
+           "commit", "-q", "--no-verify", "-m", "docs: x", cwd=d)
+        edit(d, "imports/electrical/battery.html", "100 Ah", "200 Ah")
+        sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--no-verify", "-am",
+           "docs: slipped past the gate", cwd=d)
+        edit(d, "main.html", "mirrored pinned</code>", "mirrored tracking</code>")
+        sh("git", "add", "-A", cwd=d)
+        state_file(d, "imports.json").write_text(state_file(d, "imports.json").read_text())
+        out = reconcile_out(d, "docs: track electrical")
+        self.assertIn("[mirror] imports/electrical/battery.html: mirrored content differs", out)
+
+    def test_A2_a_main_without_commit_types_is_demoted(self):
+        u = upstream()
+        edit(u, "electrical.html", '<p>Session: commit types <code data-commit-types>docs fix seed audit review</code>.</p>\n', "")
+        commit(u, "docs: no declaration")
+        d = importer()
+        rc, out = do_import(d, u, "melded", "pinned")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("removed #status", out)
+        self.assertNotIn('id="status"', Path(d, "imports/electrical/electrical.html").read_text())
+
+    def test_A2_the_check_requires_demotion(self):
+        u, d = upstream(), importer()
+        do_import(d, u, "melded", "pinned")
+        Path(d, "imports/electrical/electrical.html").write_text(UP_MAIN.format(bus="12 V"))
+        rc, out = cli(d, "check")
+        self.assertIn("[demote] imports/electrical/electrical.html", out)
+
+    def nested(self, answer_in_component=True):
+        inner = upstream()
+        comp = upstream()
+        os.chdir_back = os.getcwd()
+        cwd = os.getcwd(); os.chdir(comp)
+        try:
+            lspec_cli("start", "electrical.html")
+            rc, out = lspec_cli("--main", "electrical.html", "import", inner, "electrical.html", "--as", "cells",
+                                "--edits", "mirrored", "--version", "pinned", "--adopting", "cells", "--reason", "why")
+            self.assertEqual(rc, 0, out)
+        finally:
+            os.chdir(cwd)
+        if answer_in_component:
+            edit(comp, "electrical.html", '<tr id="kp-reach">',
+                 '<tr id="kp-cellreach"><td>Cell reach</td><td>30 cm <a rel="resolves" '
+                 'href="imports/cells/electrical.html#kp-reach">slot</a></td><td>open</td></tr>\n<tr id="kp-reach">')
+        commit(comp, "docs: nested import")
+        d = importer()
+        rc, out = do_import(d, comp)
+        self.assertEqual(rc, 0, out)
+        return d
+
+    def test_A3_a_components_nested_slot_is_not_the_outer_importers(self):
+        d = self.nested()
+        rc, out = cli(d, "check")
+        self.assertNotIn("imports/electrical/imports/cells/electrical.html#kp-reach has no disposition", out)
+        self.assertEqual(rc, 0, out)
+        edit(d, "main.html", "</table>\n<h2 id=\"log\">",
+             '<tr id="kp-x"><td>x</td><td>1 <a rel="resolves" href="imports/electrical/imports/cells/electrical.html#kp-reach">'
+             's</a></td><td>open</td></tr></table>\n<h2 id="log">')
+        rc, out = cli(d, "check")
+        self.assertIn("a slot of a component's own import", out)
+
+    def test_A4_A5_copy_demotes_every_spelling_and_resets_status_first(self):
+        u = upstream()
+        edit(u, "electrical.html", "Open: none.", "Open: none, confirmed(by inspection).")
+        edit(u, "electrical.html", "</table>\n<h2 id=\"log\">",
+             '<tr id="kp-a"><td>A</td><td>1</td><td>Confirmed (tape)</td></tr>\n'
+             '<tr id="kp-b"><td>B</td><td>2</td><td>confirmed · bench test</td></tr>\n'
+             '<tr id="kp-c"><td>C</td><td>3</td><td>confirmed</td></tr>\n</table>\n<h2 id="log">')
+        commit(u, "docs: tokens")
+        n = os.path.join(os.path.dirname(u), "copy4-" + os.path.basename(u))
+        cwd = os.getcwd(); os.chdir(u)
+        try:
+            rc, out = lspec_cli("--main", "electrical.html", "copy", "--to", n)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("status line reset, 4 evidence token(s) demoted", out)
+        text = Path(n, "electrical.html").read_text()
+        self.assertIn("[ADAPT: forward design | live-system]", text)
+        self.assertNotIn("by inspection", text)
+        self.assertIn("Provisional (inherited from electrical.html @", text)
+        self.assertIn("provisional · inherited from electrical.html @", text)
+        self.assertRegex(text, r"<td>provisional \(inherited from electrical.html @ \w+\)</td>")
+        self.assertNotRegex(text, r"(?i)\bconfirmed\b")
+
+    def test_A6_copy_asks_ruled_out_and_fence_items_and_limits_reopen(self):
+        u = upstream()
+        edit(u, "electrical.html", "</main>",
+             '<h2 id="ruled-out">Ruled out</h2><table><tr id="ro-ground"><td>Ground loop</td><td>scoped</td></tr></table>\n'
+             '<h2 id="fence">Out of Scope</h2><ul><li>Solar charging.</li><li>Shore power.</li></ul>\n</main>')
+        commit(u, "docs: registers")
+        n = os.path.join(os.path.dirname(u), "copy6-" + os.path.basename(u))
+        cwd = os.getcwd(); os.chdir(u)
+        try:
+            lspec_cli("--main", "electrical.html", "copy", "--to", n)
+        finally:
+            os.chdir(cwd)
+        rows = json.loads(state_file(n, "copy.json").read_text())["rows"]
+        self.assertIn("electrical.html#ro-ground", rows)
+        self.assertEqual(rows["electrical.html#fence~1"]["text"], "Solar charging.")
+        self.assertTrue(rows["electrical.html#fence~2"]["reopen"])
+        self.assertFalse(rows["electrical.html#watch-fuse"]["reopen"])
+        self.assertTrue(rows["electrical.html#dl-bus"]["reopen"])
+        self.assertNotIn("electrical.html#fence", rows)
+
+    def test_A7_a_melded_update_keeps_a_dropped_file_dropped(self):
+        u, d = self.melded_committed()
+        sh("git", "rm", "-q", "imports/electrical/sizing.html", cwd=d)
+        edit(d, "imports/electrical/battery.html", "see nothing", "see nothing")
+        rc, out = settle(d, "docs: drop sizing"); self.assertEqual(rc, 0, out); commit_reconciled(d)
+        edit(u, "sizing.html", "sizing, no split row", "sizing, revised"); commit(u, "docs: sizing")
+        rc, out = cli(d, "import", "--update", "electrical")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("dropped here, kept dropped: sizing.html", out)
+        self.assertFalse(Path(d, "imports/electrical/sizing.html").exists())
+
+    def test_A8_sources_are_recorded_absolute_and_may_hold_spaces(self):
+        base = tempfile.mkdtemp()
+        u = os.path.join(base, "up stream")
+        shutil.copytree(upstream(), u)
+        d = importer()
+        ensure_request(d)
+        rel_u = os.path.relpath(u, d)
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            rc, out = lspec_cli("--main", "main.html", "import", rel_u, "electrical.html", "--as", "electrical",
+                                "--edits", "mirrored", "--version", "tracking", "--adopting", "a", "--reason", "b")
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"<code data-import>{lspec.posix(lspec.canon(u))} @ ", Path(d, "main.html").read_text())
+        rc, out = cli(d, "start")
+        self.assertIn("electrical: mirrored, tracking", out)
+        self.assertIn("electrical: up to date at", out)
+
+    def test_A9_embedded_files_travel(self):
+        u = upstream()
+        Path(u, "img").mkdir(); Path(u, "img", "wiring.svg").write_text("<svg/>")
+        Path(u, "style.css").write_text("p{}")
+        edit(u, "battery.html", "</main>", '<img src="img/wiring.svg" alt="w"><link rel="stylesheet" href="style.css"></main>')
+        commit(u, "docs: figure")
+        d = importer()
+        rc, out = do_import(d, u, "mirrored", "pinned", "electrical", "--dry-run")
+        self.assertIn("linked img/wiring.svg", out); self.assertIn("linked style.css", out)
+
+    def test_A10_the_upgrade_procedure_moves_rules_with_the_tool(self):
+        self.assertIn("bring every paragraph the instance took from the", lspec.HELP["hook"])
+        self.assertIn("attribution copied as it stands there", lspec.HELP["hook"])
+
+    def test_A11_the_graduate_carries_the_parents_footer(self):
+        u = upstream()
+        Path(u, "electrical.html").write_text(Path(u, "electrical.html").read_text()
+                                              + "\n<!-- github.com/claybford/live-spec @ abc1234. Clayton Ford, 2026. MIT. -->\n")
+        Path(u, "battery.html").write_text(UP_BATTERY + "\n<!-- Clayton Ford, 2026. MIT. -->\n")
+        commit(u, "docs: footers")
+        to = os.path.join(os.path.dirname(u), "bat11-" + os.path.basename(u))
+        cwd = os.getcwd(); os.chdir(u)
+        try:
+            rc, out = lspec_cli("--main", "electrical.html", "graduate", "battery.html", "--to", to)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 0, out)
+        text = Path(to, "battery.html").read_text()
+        self.assertTrue(text.rstrip().endswith("<!-- github.com/claybford/live-spec @ abc1234. Clayton Ford, 2026. MIT. -->"))
+        self.assertEqual(text.count("<!--"), 1)
+
+    def test_A12_upstream_open_items_are_shown(self):
+        u = upstream()
+        edit(u, "electrical.html", '<tr id="watch-fuse"', '<tr id="open-solar"><td>Solar sizing</td><td>panels</td><td>a survey</td></tr>\n<tr id="watch-fuse"')
+        commit(u, "docs: open")
+        d = importer(); do_import(d, u)
+        rc, out = cli(d, "start")
+        self.assertIn("upstream open items in mirrored imports (1)", out)
+        self.assertIn("imports/electrical/electrical.html#open-solar", out)
+
+    def test_A12_a_nested_name_does_not_block_a_direct_import(self):
+        d = self.nested()
+        inner = upstream()
+        rc, out = do_import(d, inner, "mirrored", "pinned", "cells")
+        self.assertEqual(rc, 0, out)
+
+    def test_A12_tracking_network_steps_give_up(self):
+        tmp = tempfile.mkdtemp()
+        sh("git", "init", "-q", cwd=tmp)
+        with self.assertRaises(RuntimeError) as e:
+            lspec.git_net("ls-remote", upstream(), "HEAD", cwd=tmp, batch=True, timeout=0.0001)
+        self.assertIn("no answer within", str(e.exception))
+        self.assertEqual(lspec.BATCH_ENV["GIT_TERMINAL_PROMPT"], "0")
+
+    def test_A12_one_claim_linking_twice_is_one_answer(self):
+        u, d = upstream(), importer()
+        do_import(d, u, rows=ANSWER_ROW.replace("</a></td>", '</a> <a rel="resolves" href="imports/electrical/electrical.html#kp-reach">again</a></td>'))
+        rc, out = cli(d, "check")
+        self.assertNotIn("answered twice", out); self.assertEqual(rc, 0, out)
+
+    def test_A12_an_open_item_states_what_resolves_it(self):
+        u, d = upstream(), importer()
+        do_import(d, u, rows="")
+        edit(d, "main.html", "</main>", '<table><tr id="open-reach"><td>reach <a href="imports/electrical/electrical.html#kp-reach">slot</a></td><td>shelves</td><td></td></tr></table></main>')
+        rc, out = cli(d, "check")
+        self.assertIn("main.html#open-reach opens imports/electrical/electrical.html#kp-reach but states nothing", out)
+        self.assertIn("has no disposition", out)
 
 
 class Slots(unittest.TestCase):
@@ -3921,22 +4175,26 @@ class Export(unittest.TestCase):
         u = upstream()
         cwd = os.getcwd(); os.chdir(u)
         try:
-            rc, out = lspec_cli("--main", "electrical.html", "export", "out.html", "kp-bus", "dl-bus", "battery.html#capacity")
+            rc, out = lspec_cli("--main", "electrical.html", "export", "out.html", "kp-bus")
+            self.assertEqual(rc, 2); self.assertIn("inside this repository", out)
+            outdir = tempfile.mkdtemp()
+            rc, out = lspec_cli("--main", "electrical.html", "export", os.path.join(outdir, "out.html"),
+                                "kp-bus", "dl-bus", "battery.html#capacity")
         finally:
             os.chdir(cwd)
         self.assertEqual(rc, 0, out)
         sha = sh("git", "rev-parse", "HEAD", cwd=u).strip()
-        text = Path(u, "out.html").read_text()
+        text = Path(outdir, "out.html").read_text()
         self.assertIn(f"Export from electrical.html @ {sha[:12]}", text)
         self.assertIn('<tr id="kp-bus">', text); self.assertIn('<tr id="dl-bus" data-sealed>', text)
         self.assertIn(f"from {u} @ {sha[:12]} (electrical.html#kp-bus)", text)
         self.assertIn(f"(battery.html#capacity)", text)
         self.assertIn("<th>P</th><th>V</th><th>S</th>", text); self.assertIn("<th>S</th><th>R</th><th>W</th>", text)
         self.assertIn("confirmed(", text)                       # status kept
-        self.assertEqual(sh("git", "status", "--porcelain", cwd=u).strip(), "?? out.html")
+        self.assertEqual(sh("git", "status", "--porcelain", cwd=u).strip(), "")
         os.chdir(u)
         try:
-            rc, out = lspec_cli("--main", "electrical.html", "export", "out2.html", "nope")
+            rc, out = lspec_cli("--main", "electrical.html", "export", os.path.join(outdir, "o2.html"), "nope")
         finally:
             os.chdir(cwd)
         self.assertEqual(rc, 2); self.assertIn("not a committed element", out)
@@ -3956,7 +4214,7 @@ class CopyMain(unittest.TestCase):
         finally:
             os.chdir(cwd)
         self.assertEqual(rc, 0, out)
-        self.assertIn("1 evidence token(s) demoted", out); self.assertIn("inherited row(s) recorded", out)
+        self.assertIn("1 evidence token(s) demoted", out); self.assertIn("inherited item(s) recorded", out)
         sha = sh("git", "rev-parse", "HEAD", cwd=u).strip()
         text = Path(n, "electrical.html").read_text()
         self.assertIn(f"provisional(inherited from electrical.html @ {sha[:12]}; ", text)
@@ -3989,7 +4247,7 @@ class CopyMain(unittest.TestCase):
                 kind = re.search(r"ITEM \d+ of \d+ \[(\w+)\]", out).group(1)
                 if kind == "inherit" and "watch-fuse (changed)" in out:
                     rc, out2 = lspec_cli("--main", "electrical.html", "reconcile", "--tick", tok.group(1), "--answer", "keep")
-                    self.assertIn("keep is for a row left as copied; this one is changed", out2)
+                    self.assertIn("keep is for an item left as copied; this one is changed", out2)
                     reply = ["modify", "the", "donor", "build", "is", "this", "project's", "own", "history"]
                 else:
                     reply = DEFAULT_ANSWERS[kind](0)

@@ -115,7 +115,7 @@ TENS_WORDS = {"twenty", *TENS}
 VOID = {"br", "hr", "meta", "link", "img", "input", "col", "wbr", "source"}
 # The typed relations: depends-on (the claim owes review when its target
 # changes) and resolves (an answer to an imported slot, reviewed the same way;
-# reuse.html dl-slots). Everything else a link carries is navigation.
+# portability.html dl-slots). Everything else a link carries is navigation.
 DEP_RELS = ("depends-on", "resolves")
 
 
@@ -1249,7 +1249,7 @@ class Collection:
 
     def mirrored(self, path):
         """PATH is mirrored content: bytes this repository never edits, whose
-        obligations are upstream's (reuse.html participation). Any mirrored
+        obligations are upstream's (portability.html participation). Any mirrored
         import on the chain makes it so; melded all the way down is owned."""
         return any(rec["edits"] == "mirrored" for rec in self.import_chain(path))
 
@@ -1370,7 +1370,7 @@ class Collection:
         root = os.path.dirname(self.main)
         stray = [fp for fp in html_files(root, self.basis)
                  if fp not in self.specs and fp not in self.orphans]
-        # One operating main per repository (reuse.html dl-onemain): a stray
+        # One operating main per repository (portability.html dl-onemain): a stray
         # file declaring its own commit vocabulary outside imports/ is a second
         # operating main, refused. Under imports/ it is imported content — a
         # mirrored main's declarations are inert there (dl-importdir). Nothing
@@ -1650,7 +1650,7 @@ def slot_is_ours(col, p):
 
 
 def slots(col, ours=True):
-    """Slots of the collection's mirrored imports (reuse.html dl-slots): the
+    """Slots of the collection's mirrored imports (portability.html dl-slots): the
     id'd elements whose own text carries an [ADAPT]/[PROJECT] marker, each one
     address the importer answers. OURS=False gives the slots of components'
     nested imports instead. -> ({(path, id): markers}, [files with a marker
@@ -1770,7 +1770,7 @@ def slots_report(col):
 def check_structure(col, specimens=True, markers=True):
     """Structural failures of the collection. A defect wholly inside a
     mirrored import is upstream's to fix: it goes to col.fyi, not the result
-    (reuse.html participation); a melded import's defects are the importer's."""
+    (portability.html participation); a melded import's defects are the importer's."""
     fails = list(col.fails)
     mirrored = getattr(col, "mirrored", lambda p: False)
     imported = getattr(col, "imported", lambda p: False)
@@ -2790,7 +2790,7 @@ def mirror_items(ctx):
     recorded revision; a staged blob under a mirrored import must match it,
     and the row's revision must be the manifest's. No network: the manifest
     is the evidence, so a hand edit, a deletion, or a rev typed into the row
-    is refused (reuse.html participation: local edits prohibited)."""
+    is refused (portability.html participation: local edits prohibited)."""
     col = ctx.staged
     out = []
     root = ctx.root
@@ -3017,7 +3017,7 @@ def retirement_items(ctx, named, pending):
         name = f"{repo_rel(fp)}#{link['src']}"
         if link["rel"] == "resolves" and not col.mirrored(tp):
             continue      # the slot became owned (mirrored -> melded): the answer moves in place,
-                          # the import item acknowledges the switch (reuse.html dl-slots)
+                          # the import item acknowledges the switch (portability.html dl-slots)
         if fp not in pending and name not in named:
             out.append(item("review", name + " retired", f"{name}: dependency on "
                             f"{addr(tp, fr)} removed or redirected", True,
@@ -5378,7 +5378,7 @@ def cmd_review(args):
 
 
 # =============================================================== imports
-# lspec import: copy-based transport between repositories (reuse.html
+# lspec import: copy-based transport between repositories (portability.html
 # dl-transport). The unit — one entry file, what its split rows reach, and
 # every upstream file those specs link — is fetched at a revision and written
 # under imports/<name>/ with upstream's layout intact (dl-importdir); the
@@ -5526,7 +5526,7 @@ def select_unit(tmp, sha, entry):
 
 
 def demote_main(text):
-    """A melded imported main becomes a supporting spec in place (reuse.html
+    """A melded imported main becomes a supporting spec in place (portability.html
     dl-demote): its status line, conventions, the paragraph declaring commit
     types and the tooling instruction are removed, whatever element holds
     them; everything else — rows, split rows, open items, the directive —
@@ -5784,7 +5784,7 @@ def import_update(col, args):
 
 
 def import_switch(col, rec, args, edits, version):
-    """A settings change (reuse.html slots-rules), taken at the recorded
+    """A settings change (portability.html slots-rules), taken at the recorded
     revision: one move per command, so a switch and an update are two.
     mirrored -> melded owns the copy as it stands and demotes a main;
     melded -> mirrored refetches upstream's bytes, dropping every local edit
@@ -5861,7 +5861,7 @@ def merge_file(local, base, theirs):
 
 
 def import_merge(col, rec, args):
-    """A melded update (reuse.html dl-demote, transport): the recorded base,
+    """A melded update (portability.html dl-demote, transport): the recorded base,
     the new revision and the local copy, three-way merged file by file; the
     demotion is applied to base and new first, so an upstream edit to a
     removed operating part never reaches the merge. Conflicts stay in the
@@ -5957,7 +5957,7 @@ def import_merge(col, rec, args):
     return 1 if conflicts else 0
 
 
-# ---- graduation (reuse.html dl-graduate, dl-gradproc)
+# ---- graduation (portability.html dl-graduate, dl-gradproc)
 
 def operating_parts(spec):
     """The operating paragraphs of a main, as markup: status, conventions,
@@ -5978,7 +5978,7 @@ def operating_parts(spec):
 
 def footer_comment(raw):
     """The trailing HTML comment an instance carries (attribution, license,
-    the live-spec revision: reuse.html version-record), or None."""
+    the live-spec revision: portability.html version-record), or None."""
     m = re.search(r"<!--[^>]*-->\s*$", raw)
     return m.group(0).strip() if m else None
 
@@ -6165,7 +6165,7 @@ def cmd_graduate(args):
         return 2
 
 
-# ---- one-off export (reuse.html dl-export)
+# ---- one-off export (portability.html dl-export)
 
 def repo_source(root):
     """How this repository is named in provenance: its origin URL, else its path."""
@@ -6241,7 +6241,7 @@ def cmd_export(args):
     out = ['<!DOCTYPE html>', '<html lang="en"><head><meta charset="UTF-8">', f'<title>{title_}</title>',
            '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css">',
            '</head><body><main>', f'<h1 id="top">{title_}</h1>',
-           f'<p id="about">A one-off export (the methodology\'s reuse.html): subject-shaped material selected from '
+           f'<p id="about">A one-off export (the methodology\'s portability.html): subject-shaped material selected from '
            f'<code>{html.escape(source)}</code> at <code>{sha}</code>, each item carrying its provenance and '
            'keeping its status. No relationship survives it: the recipient places this material in its own '
            'structure through its own gate; links inside it refer to the source collection.</p>']
@@ -6276,7 +6276,7 @@ def cmd_export(args):
     return 0
 
 
-# ---- copying a main for a new project (reuse.html dl-copymain)
+# ---- copying a main for a new project (portability.html dl-copymain)
 
 COPY_STATUS = ('<p id="status">Status: [ADAPT: forward design | live-system]. Locked: [ADAPT].\n'
                '  Open: [ADAPT]. Top risk: [ADAPT]. This status line is a derived view: re-derive\n'
@@ -6492,7 +6492,7 @@ def cmd_copy(args):
 
 
 def inherit_items(ctx):
-    """The copied-main seed gate (reuse.html dl-copymain): one judgment per
+    """The copied-main seed gate (portability.html dl-copymain): one judgment per
     inherited row while the first commit is pending — keep (unchanged),
     modify (changed, its reason checked), reopen (moved to an open item) or
     delete (gone, with the reason); the staged file is the evidence."""
@@ -6540,7 +6540,7 @@ TRACK_TIMEOUT = 30   # seconds per network step of a tracking check at start
 
 def tracking_notices(col):
     """One line per tracking import: behind by N commits, up to date, or
-    unreachable; never a block, never a write (reuse.html dl-tracking)."""
+    unreachable; never a block, never a write (portability.html dl-tracking)."""
     out = []
     for key, rec in sorted(col.imports.items()):
         if rec["nested"] or rec["version"] != "tracking":
@@ -6590,7 +6590,7 @@ def imports_report(col):
             print(f"    {addr(p, i)}")
     for line in tracking_notices(col):
         print(f"  {status('note')}: {line}")
-    print("  rules: reuse.html in the methodology; " + cmd("python3 lspec.py import --help"))
+    print("  rules: portability.html in the methodology; " + cmd("python3 lspec.py import --help"))
 
 
 # ================================================================== main
@@ -6603,7 +6603,7 @@ A session: start MAIN, read what it lists whole, edit and stage, reconcile
 --subject "type: one transition", answer the checklist (--next / --tick), commit
 with `git commit --no-edit` (the hooks write subject and Reconciled: trailers),
 finish on a clean tree. Content across repositories (the methodology's
-reuse.html): import, export, graduate and copy, each with its own --help.
+portability.html): import, export, graduate and copy, each with its own --help.
 Every verb takes --main MAIN before or after the verb;
 with a request open, MAIN defaults to the request's. --color auto|always|never
 goes before the verb: auto (the default) colors only a terminal, never a pipe,
@@ -6788,7 +6788,7 @@ dependency target owes a review: its edge's baseline is unknown until a
 review: commit names the dependent claim.""",
 
 "export": """\
-A one-off export (the methodology's reuse.html): subject-shaped material —
+A one-off export (the methodology's portability.html): subject-shaped material —
 parameter rows, decision rows with their rejected alternatives and reasons,
 fence items, any claim — selected by id (path#id, or id) from the committed
 collection and written to OUT.html as an ordinary spec-shaped file, each item
@@ -6801,7 +6801,7 @@ refer to the source collection and are re-pointed or dropped there.""",
 
 "copy": """\
 Copying a main to start a new project is project-shaped inheritance, not an
-import (the methodology's reuse.html). copy --to DIR seeds a new repository
+import (the methodology's portability.html). copy --to DIR seeds a new repository
 from this collection's owned files as committed at HEAD: every confirmed(...)
 token becomes provisional(inherited from MAIN @ COMMIT; ...), every data-sealed
 is lifted (seals are reassessed at the seed), the status line is reset to
@@ -6820,7 +6820,7 @@ project is demoted.""",
 
 "graduate": """\
 Graduation gives a supporting spec its own operational life (the methodology's
-reuse.html): it moves into a repository of its own and becomes that
+portability.html): it moves into a repository of its own and becomes that
 repository's main; the old parent imports it. Two halves, two commits.
 
 graduate FILE --to DIR [--name NAME] [--remote URL] [--at COMMIT]: half one.
@@ -6844,7 +6844,7 @@ identical text is confirmed by `lspec review CLAIM` after the commit.""",
 
 "import": """\
 Adopts another repository's subject-shaped content (the methodology's
-reuse.html). SOURCE is a git URL or local path, ENTRY the unit's entry file in
+portability.html). SOURCE is a git URL or local path, ENTRY the unit's entry file in
 it; --at REV picks a commit, tag or branch (default: upstream HEAD). The unit
 is ENTRY, everything its split rows reach (upstream's own imports included) and
 every other upstream file those specs link; upstream's lspec.py and hooks/ stay

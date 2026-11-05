@@ -3362,7 +3362,7 @@ class ReadProbe(unittest.TestCase):
         self.assertIn('--answer read-whole\n', out)
 
 
-# ------------------------------------------------------- imports (reuse.html)
+# ------------------------------------------------------- imports (portability.html)
 
 UP_MAIN = """<!DOCTYPE html><html><body><main>
 <h1 id="top">Electrical</h1>
@@ -3442,7 +3442,7 @@ def do_import(d, u, edits="mirrored", version="pinned", name="electrical", *extr
 class Imports(unittest.TestCase):
     """lspec import: copy-based transport, the split row's declaration, the
     manifest, participation by setting, and the gate's mirror and import
-    items (reuse.html dl-transport, dl-importdir, dl-participation)."""
+    items (portability.html dl-transport, dl-importdir, dl-participation)."""
 
     def test_unit_is_the_entry_closure_without_the_tool(self):
         """dl-selection: entry, split-row reach, other linked repository files
@@ -3752,8 +3752,8 @@ class Imports(unittest.TestCase):
 
 
 class ReviewFixes(unittest.TestCase):
-    """Regressions for the 2026-11-04 review of the reuse series (reuse.html
-    watch-reusereview): each test names its finding."""
+    """Regressions for the 2026-11-04 review of the reuse series, since renamed
+    portability (portability.html watch-reusereview): each test names its finding."""
 
     melded_committed = Imports.melded_committed
 
@@ -3998,7 +3998,7 @@ class ReviewFixes(unittest.TestCase):
 
 
 class Slots(unittest.TestCase):
-    """The slot gate (reuse.html dl-slots): every mirrored [ADAPT] is answered
+    """The slot gate (portability.html dl-slots): every mirrored [ADAPT] is answered
     or opened in the importer's own files; one answer per slot; an answer
     follows its slot's text like a dependency."""
 
@@ -4063,7 +4063,7 @@ class Slots(unittest.TestCase):
 
 
 class Graduation(unittest.TestCase):
-    """lspec graduate (reuse.html dl-graduate, dl-gradproc): the supporting
+    """lspec graduate (portability.html dl-graduate, dl-gradproc): the supporting
     spec becomes a main in a new repository with the parent's rules; the
     parent replaces ownership with an import in one commit."""
 
@@ -4201,7 +4201,7 @@ class Export(unittest.TestCase):
 
 
 class CopyMain(unittest.TestCase):
-    """lspec copy (reuse.html dl-copymain): evidence demoted with provenance,
+    """lspec copy (portability.html dl-copymain): evidence demoted with provenance,
     seals lifted, status reset, and the seed gate asking keep / modify /
     reopen / delete of every inherited row."""
 

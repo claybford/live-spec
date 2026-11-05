@@ -28,7 +28,7 @@ better.
   move content between repositories (`import`, `export`, `graduate`, `copy`). The
   spec reads and operates without it. `python3 lspec.py --help` and `python3
   lspec.py VERB --help` are its reference.
-- **`reuse.html`** — how content moves between repositories: import, export,
+- **`portability.html`** — how content moves between repositories: import, export,
   graduation, copying a main. Read it whole when a move does any of those.
 
 The evaluation harness (scripted sessions that instantiate and operate specs

@@ -4779,6 +4779,82 @@ class ConsolidatedView(unittest.TestCase):
         self.assertIn('unaffected by this change', it['question'])
 
 
+class NestedChange(unittest.TestCase):
+    """watch-ownchange: an edit inside an id'd descendant changes the claim
+    that encloses it. ctx.changed answers which element was edited;
+    ctx.claim_changed answers which claim now says something else, and the
+    claim's citers, dependents and seal are asked on that."""
+
+    def fixture(self, sealed=False):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        edit(d, 'motor.html', '<p id="power">120 kW, see',
+             f'<p id="power"{" data-sealed" if sealed else ""}><span id="rating">120 kW</span>, see')
+        edit(d, 'main.html', '<table>',
+             '<p id="note">See <a href="motor.html#power">the drive power</a>.</p>\n<table>')
+        commit(d, 'docs: nested rating'); ensure_request(d)
+        edit(d, 'motor.html', '<span id="rating">120 kW</span>', '<span id="rating">105 kW</span>')
+        sh('git', 'add', '-A', cwd=d)
+        return d
+
+    def test_both_results_are_carried(self):
+        d = self.fixture()
+        ctx, _, _ = evaluate_in(d, 'docs: derate')
+        power, rating = (lspec.canon(os.path.join(d, 'motor.html')), 'power'), \
+                        (lspec.canon(os.path.join(d, 'motor.html')), 'rating')
+        self.assertNotIn(power, ctx.changed)                     # not itself edited
+        self.assertEqual(ctx.changed.get(rating), 'changed')
+        self.assertEqual(ctx.claim_changed.get(power), 'changed')  # but it says something else
+        self.assertEqual(ctx.claim_changed.get(rating), 'changed')
+
+    def test_a_dependent_is_asked_its_review_at_the_commit(self):
+        d = self.fixture()
+        _, items, _ = evaluate_in(d, 'docs: derate')
+        it = next(i for i in items if i['kind'] == 'neighbor' and i['key'].endswith('main.html#claim'))
+        self.assertIn('It depends on motor.html#power', it['question'])
+        self.assertIn('cites motor.html#power (changed)', it['excerpt'])
+
+    def test_a_plain_citer_is_asked_as_a_neighbor(self):
+        d = self.fixture()
+        _, items, _ = evaluate_in(d, 'docs: derate')
+        names = [i['key'] for i in items if i['kind'] == 'neighbor']
+        self.assertTrue(any(n.endswith('main.html#note') for n in names), names)
+
+    def test_a_sealed_claim_is_asked_when_a_nested_part_changes(self):
+        d = self.fixture(sealed=True)
+        _, items, _ = evaluate_in(d, 'docs: derate')
+        it = next(i for i in items if i['kind'] == 'sealed')
+        self.assertIn('motor.html#power', it['key']); self.assertIn('content changed', it['title'])
+
+    def test_a_row_changed_inside_a_descendant_can_be_named_decided(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        decision_row(d, 'dl-x', cells=('x is <span id="x-state">open</span>', 'r', 'w'))
+        commit(d, 'docs: x'); ensure_request(d)
+        edit(d, 'main.html', '<span id="x-state">open</span>', '<span id="x-state">locked</span>')
+        sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: lock x')
+        it = next(i for i in items if i['kind'] == 'decided')
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            self.assertIn('dl-x', lspec.validate(it, given(['decided', 'dl-x']), ctx, set())[1])
+        finally:
+            os.chdir(cwd)
+
+    def test_an_unrelated_ancestor_edit_asks_nothing_new(self):
+        """A cosmetic change to the descendant (markup only) changes no
+        signature, so no ancestor is reported."""
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        edit(d, 'motor.html', '<p id="power">120 kW, see', '<p id="power"><span id="rating">120 kW</span>, see')
+        commit(d, 'docs: nested rating'); ensure_request(d)
+        edit(d, 'motor.html', '<span id="rating">120 kW</span>', '<span id="rating"><em>120 kW</em></span>')
+        sh('git', 'add', '-A', cwd=d)
+        ctx, _, _ = evaluate_in(d, 'docs: emphasis')
+        power = (lspec.canon(os.path.join(d, 'motor.html')), 'power')
+        self.assertNotIn(power, ctx.claim_changed)
+
+
 class TickShowsNext(unittest.TestCase):
     """--tick answers its item and then prints the next open one exactly as
     --next would, so an agent needs no --next between answers; once nothing
@@ -5764,16 +5840,20 @@ class Checklist(unittest.TestCase):
         edit(d, 'main.html', 'This design needs', 'This design still needs')
         self.assertEqual(self.keys(d, 'neighbor'), ['neighbor:main.html#far'])   # claim changed too
 
-    def test_container_only_change_has_no_neighbors_of_its_own(self):
+    def test_a_nested_edit_asks_the_containers_citers(self):
+        """#ref cites the whole #box, which encloses #inner: an edit to #inner
+        changes what #box says, so #ref is asked. The edited-element result
+        still names #inner alone (watch-ownchange)."""
         d = self.fixture()
         edit(d, 'main.html', '<table>', '<section id="box"><p id="inner">Inner.</p></section>'
              '<p id="ref">See <a href="#box">box</a>.</p><table>')
         commit(d, 'docs: box')
         edit(d, 'main.html', 'Inner.', 'Inner, revised.')
-        self.assertEqual(self.keys(d, 'neighbor'), [])       # #ref cites the box, not #inner
+        self.assertEqual(self.keys(d, 'neighbor'), ['neighbor:main.html#ref'])
         ctx = evaluate_in(d)[0]
-        changed = {eid for (_, eid) in ctx.changed}
-        self.assertIn('inner', changed); self.assertNotIn('box', changed)
+        edited = {eid for (_, eid) in ctx.changed}
+        self.assertIn('inner', edited); self.assertNotIn('box', edited)
+        self.assertIn('box', {eid for (_, eid) in ctx.claim_changed})
 
     def test_text_outside_claims_checks_only_what_it_links(self):
         d = self.fixture()

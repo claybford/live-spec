@@ -2552,6 +2552,29 @@ def changed_claims(head_specs, staged_specs):
     return out
 
 
+def claims_now_differ(head_specs, staged_specs, edited):
+    """{(path, id): kind} for claims that now say something else: every
+    element EDITED (changed_claims: which element was edited), plus each
+    id'd ancestor of one whose whole signature differs, an edit nested in a
+    descendant included. A claim's citers and dependents are answered on
+    this result; what a commit edited stays answered on EDITED
+    (watch-ownchange). Only ancestors of edited elements are compared, so
+    the cost follows the edit, not the collection."""
+    out = dict(edited)
+    for (p, eid), kind in edited.items():
+        hs, ss = head_specs.get(p), staged_specs.get(p)
+        spec = hs if kind == "removed" else ss
+        if hs is None or ss is None or spec is None or eid not in spec.elems:
+            continue
+        lo, hi = spec.elems[eid]
+        for aid, (a, b) in spec.elems.items():
+            if aid == eid or (p, aid) in out or not (a <= lo and hi <= b):
+                continue
+            if aid in hs.elems and aid in ss.elems and hs.sig(aid) != ss.sig(aid):
+                out[(p, aid)] = "changed"
+    return out
+
+
 def changed_rows(ctx):
     """Decision rows added or with changed cells in this commit: {rid: path}."""
     out = {}
@@ -2628,6 +2651,7 @@ def gather(col, subject, request):
                 if s is not None:
                     ctx.head_specs[p] = s
     ctx.changed = changed_claims(ctx.head_specs, col.specs)
+    ctx.claim_changed = claims_now_differ(ctx.head_specs, col.specs, ctx.changed)
     ctx.rows = changed_rows(ctx)
     return ctx
 
@@ -3640,7 +3664,9 @@ def neighbor_relations(ctx):
             if fr is None:
                 continue
             tp = tp or q
-            if ctx.changed.get((tp, fr)) in ("added", "changed"):
+            # a citer is answered when the claim it cites now says something
+            # else, an edit nested in one of its id'd descendants included
+            if ctx.claim_changed.get((tp, fr)) in ("added", "changed"):
                 neighbors.setdefault((q, l["src"]), set()).add(claim_rel(ctx, tp, fr, "cites"))
     return {k: v for k, v in neighbors.items()
             if k not in ctx.changed and not col.mirrored(k[0])}
@@ -3659,7 +3685,7 @@ def changed_dependencies(ctx, np_, nid):
         if not is_dep(l) or l["src"] != nid or not fr:
             continue
         was = ctx.head_specs[tp].sig(fr) if tp in ctx.head_specs else None
-        if ctx.changed.get((tp, fr)) in ("added", "changed") and was != col.specs[tp].sig(fr):
+        if ctx.claim_changed.get((tp, fr)) in ("added", "changed") and was != col.specs[tp].sig(fr):
             out.append(addr(tp, fr))
     return out
 
@@ -3712,9 +3738,10 @@ def judgment_items(ctx):
 def cause_records(ctx):
     """Watch entries and diagnostic-register rows this commit adds or changes:
     the records a fix's cause answer names. Their text is part of the cause
-    item's evidence, so rewriting one reopens the answer."""
+    item's evidence, so rewriting one reopens the answer. A row changed only
+    inside an id'd descendant is still a changed row (watch-ownchange)."""
     out = []
-    for (p, eid), kind in sorted(ctx.changed.items()):
+    for (p, eid), kind in sorted(ctx.claim_changed.items()):
         if kind == "removed" or p not in ctx.staged.specs:
             continue
         s = ctx.staged.specs[p]
@@ -3732,7 +3759,7 @@ def claim_rel(ctx, p, eid, how):
     was = ctx.head_specs[p].sig(eid) if p in ctx.head_specs else None
     now_sig = ctx.staged.specs[p].sig(eid)
     _, now = change_window(*sig_views(was, now_sig), 200)
-    return (f"{how} {addr(p, eid)} ({ctx.changed[(p, eid)]})", now,
+    return (f"{how} {addr(p, eid)} ({ctx.claim_changed[(p, eid)]})", now,
             f"{addr(p, eid)}={sig_key(now_sig)}")
 
 
@@ -3953,7 +3980,7 @@ def changed_row(ctx, ref, what, prefix=None):
     p, eid = found
     if ctx.staged.specs[p].tags.get(eid) != "tr":
         raise ValueError(f"{ref} is not a table row; a {what} is a row")
-    if ctx.changed.get(found) not in ("added", "changed"):
+    if ctx.claim_changed.get(found) not in ("added", "changed"):
         raise ValueError(f"{ref} is not added or changed in this commit; record the "
                          f"{what} in the same commit")
     if prefix == WATCH_PREFIX and not eid.startswith(WATCH_PREFIX):

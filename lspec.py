@@ -1643,7 +1643,7 @@ def own_visible(spec, eid):
 def slot_is_ours(col, p):
     """Mirrored file P's slots are this collection's to answer when the
     innermost import holding P is declared in a file we own. A component's
-    own nested import is answered in the component's files (D6): charging it
+    own nested import is answered in the component's files (dl-nested): charging it
     to the outer importer would force a second answer or an override."""
     chain = col.import_chain(p)
     return bool(chain) and not col.mirrored(chain[-1]["row"][0])
@@ -2823,7 +2823,7 @@ def mirror_items(ctx):
     # edits setting typed into a mirrored import's row, with no lspec import
     # behind it, is refused; and a row that changed puts the whole unit to
     # the test, not only the paths this commit stages — a melded copy
-    # relabelled mirrored keeps its edits in files no commit touches (D7).
+    # relabelled mirrored keeps its edits in files no commit touches (dl-slots).
     before = ctx.head.imports if ctx.head is not None else {}
     flagged = {it["key"].partition(":")[2] for it in out}
     for key, rec in sorted(col.imports.items()):
@@ -5477,7 +5477,7 @@ def resource_refs(raw):
     """Every repository path an element names — <a>, <img>, <link>, <script>,
     <source>, <video>, <object>, srcset entries — fragments kept, URLs and
     bare fragments excluded: what a copy needs beside the spec so nothing it
-    embeds or links breaks (D19)."""
+    embeds or links breaks (dl-selection)."""
     out = []
     for m in REF_ATTR_RE.finditer(raw):
         out.append(html.unescape(m.group(1) if m.group(1) is not None else m.group(2)))
@@ -5916,7 +5916,7 @@ def import_merge(col, rec, args):
                     kept.append(path)                               # local work survives
                 continue
             if local is None and path in before:
-                held.append(path)                                   # dropped here: stays dropped (D19)
+                held.append(path)                                   # dropped here: stays dropped (dl-selection)
                 continue
             if local is None or local == base or base is None and local == theirs:
                 out = theirs                                        # new upstream, or untouched here
@@ -6013,7 +6013,7 @@ def convert_to_main(text, parent, tool_hint):
             raise ImportRefused("the file has no <h1>, <main> or <body> to place the operating parts after")
         text = text[:m.end()] + block + "\n" + text[m.end():]
     # The graduate runs the parent's rules and tool, so it carries the
-    # parent's version line, replacing any attribution comment of its own (D11).
+    # parent's version line, replacing any attribution comment of its own (dl-versionrec).
     foot = footer_comment(parent.raw)
     if foot:
         own = footer_comment(text)
@@ -6212,7 +6212,7 @@ def cmd_export(args):
         print("lspec export: no commits; an export carries committed provenance", file=sys.stderr); return 2
     out_path = canon(os.path.abspath(args.out))
     if out_path.startswith(canon(root) + os.sep):
-        print(f"lspec export: {args.out} is inside this repository; the source records nothing (D10), "
+        print(f"lspec export: {args.out} is inside this repository; the source records nothing (dl-export), "
               "so write the export outside it", file=sys.stderr); return 2
     source = repo_source(root)
     head = {}
@@ -6305,7 +6305,7 @@ def demote_evidence(raw, words, prov, note):
     """Every evidence token spelled with one of WORDS, in any case and with
     any separator — confirmed(src), Confirmed (src), confirmed · src,
     confirmed: src, a bare confirmed ending a cell — becomes PROV with NOTE as
-    provenance (D8). -> (text, demoted, [prose occurrences left])."""
+    provenance (dl-copymain). -> (text, demoted, [prose occurrences left])."""
     rx = re.compile(r"\b(" + "|".join(map(re.escape, words)) + r")\b(\s*)(?:(\()|(" + TOKEN_SEP
                     + r")|(?=\s*</t[dh]>))", re.I)
     skip = masked(raw)
@@ -6369,7 +6369,7 @@ def fence_items(spec):
 
 def inherited_rows(spec):
     """{key: {"text", "reopen"}} of every judgment item a copied file carries
-    (D8): decision rows, watch entries, open items, ruled-out and diagnostic
+    (dl-copymain): decision rows, watch entries, open items, ruled-out and diagnostic
     rows, the directive and each fence item; reopen marks the items that
     settle a question (decisions, fence, directive)."""
     out = {}

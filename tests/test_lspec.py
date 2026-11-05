@@ -3146,8 +3146,8 @@ class SealGate(unittest.TestCase):
         self.assertIn('sealed:main.html#req', sealed)          # old address named
 
     def test_a_supporting_specs_sealed_claim_is_asked(self):
-        """reuse.html open-sealsupport: a seal in a supporting spec takes part
-        in the gate exactly as main's does (the participation table's melded
+        """dl-seal: a seal in a supporting spec takes part
+        in the gate exactly as main's does (dl-participation's melded
         column rests on it)."""
         d = lrepo()
         edit(d, 'motor.html', '<p id="power">', '<p id="hard" data-sealed>Never exceed 130 kW.</p><p id="power">')
@@ -3770,7 +3770,7 @@ class ReviewFixes(unittest.TestCase):
     def test_A1_the_tool_switch_restores_upstream_bytes(self):
         """import --update NAME --edits mirrored refetches the recorded
         revision: local edits and in-place fills are dropped, and the slot
-        then needs an answer in the importer's parameters (D7)."""
+        then needs an answer in the importer's parameters (dl-slots)."""
         u, d = self.melded_committed()
         rc, out = cli(d, "import", "--update", "electrical", "--edits", "mirrored")
         self.assertEqual(rc, 0, out)

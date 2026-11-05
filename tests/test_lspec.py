@@ -3259,6 +3259,28 @@ class SealCorrection(unittest.TestCase):
         finally:
             os.chdir(cwd)
 
+    def test_corrections_are_walked_once_per_head(self):
+        """diag-gatecost: start walks the log for pending corrections once and
+        memoizes them under HEAD; a later process (each reconcile run) reads
+        the memo, and a new commit rebuilds it."""
+        d = self.fixture()
+        self.correct(d, ['correction', 'fixing', 'a', 'typo', 'here'])
+        self.assertEqual(cli(d, 'finish')[0], 0)
+        lspec.forget_history()                           # each command below is its own process
+        cli(d, 'start')                                  # builds the memo
+        lspec.forget_history()                           # a new process: only history.json survives
+        calls, got = N._git_calls(self, d, lambda: lspec.pending_corrections(d))
+        self.assertEqual([n for n, _, _ in got], ['main.html#req'])
+        self.assertNotIn('log', calls)
+        out = cli(d, 'reconcile', '--subject', 'review: main.html#req')[1]
+        self.assertIn('confirm 1', out)
+        sh('git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty',
+           '--no-verify', '-m', 'docs: unrelated', cwd=d)
+        lspec.forget_history()
+        calls, got = N._git_calls(self, d, lambda: lspec.pending_corrections(d))
+        self.assertIn('log', calls)                      # a new HEAD: walked again, then memoized
+        self.assertEqual([n for n, _, _ in got], ['main.html#req'])
+
     def test_a_resumed_request_cannot_confirm_its_own_correction(self):
         """watch-resumeconfirm: start --resume opens a follow-up in the same
         conversation; it keeps the session's floor, so the correction made

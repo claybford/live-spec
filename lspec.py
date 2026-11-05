@@ -486,6 +486,26 @@ def pending_corrections(root, before=None):
     row and not yet confirmed, superseded or decided by a later commit. With
     BEFORE (a commit), only corrections at or before it count: a session does
     not confirm its own correction."""
+    return [(name, sha, reason) for name, sha, reason in correction_log(root)
+            if before is None or sha == before or subprocess.run(
+                ["git", "merge-base", "--is-ancestor", sha, before],
+                cwd=root, check=False, capture_output=True).returncode == 0]
+
+
+def correction_log(root):
+    """[(name, sha, reason)] of unsettled sealed corrections, newest first:
+    one walk of the log per HEAD, memoized beside the review baselines in
+    lspec/history.json under the HEAD and tool it was derived from, so a
+    review: reconcile after start walks no log (diag-gatecost)."""
+    head = commit_sha("HEAD", root)
+    try:
+        boundaries = shallow_boundaries(root)
+    except (RuntimeError, OSError):
+        boundaries = None
+    store = baseline_store(root, head, boundaries) if head and boundaries is not None else None
+    key = "\0corrections"
+    if store is not None and key in store:
+        return [tuple(r) for r in store[key]]
     settled, out = set(), []
     for rec in git("log", "--format=%H%x1f%b%x1e", cwd=root).split("\x1e"):
         if not rec.strip():
@@ -500,10 +520,10 @@ def pending_corrections(root, before=None):
                 settled.add(name)
             elif name not in settled:
                 settled.add(name)
-                if before is None or sha == before or subprocess.run(
-                        ["git", "merge-base", "--is-ancestor", sha, before],
-                        cwd=root, check=False, capture_output=True).returncode == 0:
-                    out.append((name, sha, reason))
+                out.append((name, sha, reason))
+    if store is not None:
+        store[key] = [list(r) for r in out]
+        save_baselines(root, head, boundaries)
     return out
 
 

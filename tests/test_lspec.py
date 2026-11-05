@@ -85,7 +85,7 @@ class Guards(unittest.TestCase):
             self.assertEqual(bare, [], f"{src.name}: open() outside `with` at lines {bare}")
 
     def test_no_top_level_name_is_bound_twice(self):
-        """watch-dupname: a module-level constant or function rebound later in
+        """A module-level constant or function rebound later in
         the file silently replaces the first (CONFIRMED_RE, 2026-11-04)."""
         tree = ast.parse(Path(lspec.__file__).read_text(encoding="utf-8"))
         seen, twice = {}, []
@@ -790,7 +790,7 @@ class G(unittest.TestCase):
         self.assertNotIn('dl-split-motor', m)
 
     def test_mv_anchor_renames_link_text_citing_the_id(self):
-        """watch-mvlabel: a reference cites the row id as its link text
+        """dl-rowname: a reference cites the row id as its link text
         (dl-rowname), in its own file and across files; mv renames that text
         with the href, and leaves other link text alone."""
         d = repo()
@@ -811,8 +811,18 @@ class G(unittest.TestCase):
         self.assertNotIn("dl-split-motor", m + mo)
         rc, out = cli(d, "check"); self.assertEqual(rc, 0, out)
 
+    def test_mv_leaves_prose_link_text_alone(self):
+        """Only a row id is cited as link text; renaming a plain claim id
+        keeps prose that happens to equal it."""
+        d = repo()
+        edit(d, "main.html", "<table>", '<p id="cite">Rated by <a href="motor.html#power">power</a>.</p>\n<table>')
+        commit(d, "docs: cite power")
+        rc, out = cli(d, "mv", "motor.html#power", "motor.html#rating")
+        self.assertEqual(rc, 0, out)
+        self.assertIn('<a href="motor.html#rating">power</a>', Path(d, "main.html").read_text())
+
     def test_check_flags_link_text_naming_another_row(self):
-        """watch-mvlabel: a link whose text is a row id other than its
+        """dl-rowname: a link whose text is a row id other than its
         target's is a stale label; check fails it, across files too."""
         d = repo()
         edit(d, "main.html", "<table>",
@@ -3385,7 +3395,7 @@ class ReadProbe(unittest.TestCase):
         return d
 
     def test_a_moved_probe_never_repeats_its_predecessor(self):
-        """watch-probecollide: a wrong answer moves the probe, and the moved
+        """dl-wholeload: a wrong answer moves the probe, and the moved
         probe is a different question whatever the secret. Checked as a
         property, not a run count: for many secrets, over every attempt,
         consecutive probes differ, and the wrong answer that moved it is
@@ -3599,7 +3609,7 @@ class Imports(unittest.TestCase):
         rc, out = cli(d, "reconcile", "--tick", tok, "--answer", "updated")
         self.assertEqual(rc, 1); self.assertIn("takes adopted", out)
         rc, out = cli(d, "reconcile", "--tick", tok, "--answer", "adopted", "--reason", "the whole unit is the component")
-        self.assertIn("[derived]", out)                  # watch-importstatus: no imported bootloader
+        self.assertIn("[derived]", out)                  # dl-operate: no imported bootloader
         self.assertNotIn("imports/electrical/electrical.html#status", out)
         self.assertIn("bootloader main.html#status", out)
         rc, out = settle(d, "docs: import electrical")
@@ -4700,7 +4710,7 @@ class ConsolidatedView(unittest.TestCase):
     def test_a_nested_edit_in_the_status_line_counts_as_a_status_change(self):
         """ctx.changed attributes an id'd descendant's change to the descendant,
         not the line; the view item keys on the whole signature instead, for
-        the trigger, the evidence and the answer rules (watch-viewbind)."""
+        the trigger, the evidence and the answer rules (diag-viewsource)."""
         d = repo()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         decision_row(d, 'dl-x'); decision_row(d, 'dl-y'); decision_row(d, 'dl-z', cells=('z', 'r', 'w'))
@@ -4742,7 +4752,7 @@ class ConsolidatedView(unittest.TestCase):
     def test_a_nested_edit_in_a_linked_source_counts_as_a_source_change(self):
         """A linked source moved when its whole signature did, descendants
         included: the view item fires, cites it, shows it whole, and refuses
-        unaffected and consistent alike (watch-viewbind)."""
+        unaffected and consistent alike (diag-viewsource)."""
         d = repo()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         decision_row(d, 'dl-x', cells=('x is <span id="x-state">locked</span>', 'r', 'w'))
@@ -4853,7 +4863,9 @@ class ConsolidatedView(unittest.TestCase):
         """The question keys on a changed line and cited sources, as the answer
         rules do: a status edit mixed with an unlinked change is asked for
         consistent, not unaffected; a changed line with a changed linked source
-        is asked only to re-derive; a source-only move still offers unaffected."""
+        is asked only to re-derive; a source-only move of a source the line
+        names is asked only to re-derive too, since validate refuses
+        unaffected for it."""
         d = self.fixture()
         edit(d, 'main.html', 'Status: forward design.<br>', 'Status: nothing remains locked.<br>')
         decision_row(d, 'dl-z'); sh('git', 'add', '-A', cwd=d)
@@ -4869,7 +4881,8 @@ class ConsolidatedView(unittest.TestCase):
         edit(d, 'main.html', 'Status: nothing remains locked.<br>', 'Status: forward design.<br>')
         sh('git', 'add', '-A', cwd=d)
         it = next(i for i in evaluate_in(d, 'docs: source only')[1] if i['kind'] == 'derived')
-        self.assertIn('unaffected by this change', it['question'])
+        self.assertIn('main.html#dl-x', it['cited'])
+        self.assertIn('answer rederived', it['question']); self.assertNotIn('state why', it['question'])
 
 
 class WholeFileSource(unittest.TestCase):
@@ -4892,6 +4905,29 @@ class WholeFileSource(unittest.TestCase):
         ctx, items, _ = evaluate_in(d)
         it = next(i for i in items if i["kind"] == "derived")
         self.assertIn("linked source motor.html#open-x (added)", it["excerpt"])
+        # reached only through the file link: asked, and unaffected is offered
+        # and accepted with a reason, as most edits leave the clause true
+        self.assertNotIn("cited", it)
+        self.assertIn("unaffected by this change (state why)", it["question"])
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            self.assertEqual(lspec.validate(it, given(["unaffected", "nothing", "here", "is", "open"]),
+                                            ctx, set())[0][0], "unaffected")
+        finally:
+            os.chdir(cwd)
+
+    def test_a_named_source_question_offers_only_what_is_accepted(self):
+        """A source the line names exactly refuses unaffected; its question
+        does not offer it."""
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        edit(d, "main.html", "Open: nothing.", 'Open: nothing in <a href="motor.html#power">power</a>.')
+        commit(d, "docs: link the claim"); ensure_request(d)
+        edit(d, "motor.html", "120 kW", "105 kW"); sh("git", "add", "-A", cwd=d)
+        ctx, items, _ = evaluate_in(d)
+        it = next(i for i in items if i["kind"] == "derived")
+        self.assertIn("cited", it)
+        self.assertNotIn("state why", it["question"])
         cwd = os.getcwd(); os.chdir(d)
         try:
             with self.assertRaisesRegex(ValueError, "unaffected"):
@@ -4915,7 +4951,7 @@ class WholeFileSource(unittest.TestCase):
 
 
 class NestedChange(unittest.TestCase):
-    """watch-ownchange: an edit inside an id'd descendant changes the claim
+    """dl-twochanges: an edit inside an id'd descendant changes the claim
     that encloses it. ctx.changed answers which element was edited;
     ctx.claim_changed answers which claim now says something else, and the
     claim's citers, dependents and seal are asked on that."""
@@ -4975,6 +5011,27 @@ class NestedChange(unittest.TestCase):
             self.assertIn('dl-x', lspec.validate(it, given(['decided', 'dl-x']), ctx, set())[1])
         finally:
             os.chdir(cwd)
+
+    def test_a_child_moved_between_containers_changes_both(self):
+        """Moving #inner from #boxa to #boxb edits neither element's own
+        text, yet both containers now say something else; #ref, citing
+        #boxa, is asked."""
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        edit(d, 'main.html', '<table>',
+             '<section id="boxa"><p id="inner">Inner.</p><p>A.</p></section>'
+             '<section id="boxb"><p>B.</p></section>'
+             '<p id="ref">See <a href="#boxa">box a</a>.</p>\n<table>')
+        commit(d, 'docs: boxes'); ensure_request(d)
+        edit(d, 'main.html', '<section id="boxa"><p id="inner">Inner.</p><p>A.</p></section>'
+             '<section id="boxb"><p>B.</p></section>',
+             '<section id="boxa"><p>A.</p></section>'
+             '<section id="boxb"><p>B.</p><p id="inner">Inner.</p></section>')
+        sh('git', 'add', '-A', cwd=d)
+        ctx, items, _ = evaluate_in(d, 'docs: move inner')
+        changed = {eid for (_, eid) in ctx.claim_changed}
+        self.assertTrue({'boxa', 'boxb'} <= changed, changed)
+        self.assertIn('neighbor:main.html#ref', [i['key'] for i in items if i['kind'] == 'neighbor'])
 
     def test_an_unrelated_ancestor_edit_asks_nothing_new(self):
         """A cosmetic change to the descendant (markup only) changes no
@@ -5990,7 +6047,7 @@ class Checklist(unittest.TestCase):
     def test_a_nested_edit_asks_the_containers_citers(self):
         """#ref cites the whole #box, which encloses #inner: an edit to #inner
         changes what #box says, so #ref is asked. The edited-element result
-        still names #inner alone (watch-ownchange)."""
+        still names #inner alone (dl-twochanges)."""
         d = self.fixture()
         edit(d, 'main.html', '<table>', '<section id="box"><p id="inner">Inner.</p></section>'
              '<p id="ref">See <a href="#box">box</a>.</p><table>')
@@ -6220,7 +6277,6 @@ class Checklist(unittest.TestCase):
         self.assertFalse(state_file(d, 'receipt.json').exists())
 
 
-@acceptance
 class RequestSecret(unittest.TestCase):
     """diag-requeststate: tokens and the read probe come from a secret drawn
     per request, so two requests on the same commit share neither."""
@@ -6255,6 +6311,7 @@ class RequestSecret(unittest.TestCase):
         self.assertFalse(state_file(d, "secret").exists())
 
 
+@acceptance
 class Receipts(unittest.TestCase):
     """The hooks only confirm that the commit matches the reconcile receipt."""
     HOOKS = HookIntegration.HOOKS

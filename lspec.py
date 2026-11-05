@@ -487,9 +487,28 @@ def pending_corrections(root, before=None):
     BEFORE (a commit), only corrections at or before it count: a session does
     not confirm its own correction."""
     return [(name, sha, reason) for name, sha, reason in correction_log(root)
-            if before is None or sha == before or subprocess.run(
-                ["git", "merge-base", "--is-ancestor", sha, before],
-                cwd=root, check=False, capture_output=True).returncode == 0]
+            if before is None or sha == before or is_ancestor(root, sha, before)]
+
+
+def is_ancestor(root, sha, of):
+    """SHA is an ancestor of OF: a fact of history, memoized beside the
+    review baselines under the HEAD and tool, so a gate run after start
+    spawns no history walk for it (diag-gatecost)."""
+    head = commit_sha("HEAD", root)
+    try:
+        boundaries = shallow_boundaries(root)
+    except (RuntimeError, OSError):
+        boundaries = None
+    store = baseline_store(root, head, boundaries) if head and boundaries is not None else None
+    key = f"\0ancestor\0{sha}\0{of}"
+    if store is not None and key in store:
+        return bool(store[key])
+    got = subprocess.run(["git", "merge-base", "--is-ancestor", sha, of],
+                         cwd=root, check=False, capture_output=True).returncode == 0
+    if store is not None:
+        store[key] = got
+        save_baselines(root, head, boundaries)
+    return got
 
 
 def correction_log(root):
@@ -2577,26 +2596,45 @@ def changed_claims(head_specs, staged_specs):
     return out
 
 
+def id_parents(spec):
+    """{id: nearest id'd ancestor or None}, from the parser's element spans."""
+    out, stack = {}, []
+    for eid, (lo, hi) in sorted(spec.elems.items(), key=lambda kv: (kv[1][0], -kv[1][1])):
+        while stack and not (stack[-1][1] <= lo < stack[-1][2] and hi <= stack[-1][2]):
+            stack.pop()
+        out[eid] = stack[-1][0] if stack else None
+        stack.append((eid, lo, hi))
+    return out
+
+
 def claims_now_differ(head_specs, staged_specs, edited):
     """{(path, id): kind} for claims that now say something else: every
     element EDITED (changed_claims: which element was edited), plus each
-    id'd ancestor of one whose whole signature differs, an edit nested in a
-    descendant included. A claim's citers and dependents are answered on
-    this result; what a commit edited stays answered on EDITED
-    (watch-ownchange). Only ancestors of edited elements are compared, so
-    the cost follows the edit, not the collection."""
+    id'd ancestor whose whole signature differs of an element edited, or
+    moved to another container (both its old and new containers), nested
+    edits included. A claim's citers and dependents are answered on this
+    result; what a commit edited stays answered on EDITED (dl-twochanges).
+    Only ancestors of edited or moved elements are compared, so the cost
+    follows the edit, not the collection."""
     out = dict(edited)
-    for (p, eid), kind in edited.items():
-        hs, ss = head_specs.get(p), staged_specs.get(p)
-        spec = hs if kind == "removed" else ss
-        if hs is None or ss is None or spec is None or eid not in spec.elems:
-            continue
-        lo, hi = spec.elems[eid]
-        for aid, (a, b) in spec.elems.items():
-            if aid == eid or (p, aid) in out or not (a <= lo and hi <= b):
+    for p in set(head_specs) & set(staged_specs):
+        hs, ss = head_specs[p], staged_specs[p]
+        moved = []
+        hp = id_parents(hs) if hs.raw != ss.raw else {}
+        sp = id_parents(ss) if hp else {}
+        for eid in hp.keys() & sp.keys():
+            if hp[eid] != sp[eid]:
+                moved += [(hs, eid), (ss, eid)]
+        starts = [(ss if kind != "removed" else hs, eid) for (q, eid), kind in edited.items() if q == p]
+        for spec, eid in starts + moved:
+            if eid not in spec.elems:
                 continue
-            if aid in hs.elems and aid in ss.elems and hs.sig(aid) != ss.sig(aid):
-                out[(p, aid)] = "changed"
+            lo, hi = spec.elems[eid]
+            for aid, (a, b) in spec.elems.items():
+                if aid == eid or (p, aid) in out or not (a <= lo and hi <= b):
+                    continue
+                if aid in hs.elems and aid in ss.elems and hs.sig(aid) != ss.sig(aid):
+                    out[(p, aid)] = "changed"
     return out
 
 
@@ -3502,7 +3540,7 @@ def derived_item(ctx, head):
     # An imported main's status line is inert here (dl-operate): never a bootloader.
     status = [(p, s) for p, s in col.specs.items() if "status" in s.elems and not col.imported(p)]
     # What each status line links, resolved across files, in document order.
-    linked, linked_by, whole_files = [], {}, {}
+    linked, linked_by, whole_files, via_file = [], {}, {}, set()
     for p, s in status:
         for l in s.links_in("status"):
             tp, fr = resolve(p, l["href"])
@@ -3522,7 +3560,7 @@ def derived_item(ctx, head):
                 linked_by[(tp, fr)] = addr(p, "status")
                 linked.append((tp, fr))
     # A linked source moved when its whole signature did, descendants
-    # included; ctx.changed attributes a nested edit to the child (watch-viewbind).
+    # included; ctx.changed attributes a nested edit to the child (diag-viewsource).
     def source_kind(tp, fr):
         hs = ctx.head_specs.get(tp)
         if hs is None or fr not in hs.elems:
@@ -3536,6 +3574,7 @@ def derived_item(ctx, head):
         if q in whole_files and (q, eid) not in linked_by:
             linked_by[(q, eid)] = whole_files[q]
             moved_sources[(q, eid)] = kind
+            via_file.add((q, eid))
             if kind != "removed":
                 linked.append((q, eid))
     sources, texts, cited = [], [], set()
@@ -3557,11 +3596,15 @@ def derived_item(ctx, head):
         sources.append(f"{label} {addr(p, eid)} ({kind})")
         staged = col.specs.get(p)
         texts.append(sig_key(staged.sig(eid)) if staged and eid in staged.elems else "")
-        if (p, eid) in linked_by and (p, eid) in moved_sources:
+        # A source the line names exactly refuses unaffected; one reached
+        # only through a whole-file link asks the item but may be answered
+        # unaffected with a reason: most edits in a linked file leave the
+        # clause about it true (diag-viewsource).
+        if (p, eid) in linked_by and (p, eid) in moved_sources and (p, eid) not in via_file:
             cited.add(addr(p, eid))
     # A status line changed when its whole signature did: text and cited
     # structure including id'd descendants, which ctx.changed attributes to
-    # the descendant and not to the line (watch-viewbind).
+    # the descendant and not to the line (diag-viewsource).
     def moved(p, s):
         if p not in ctx.head_specs or "status" not in ctx.head_specs[p].elems:
             return True
@@ -3637,6 +3680,10 @@ def derived_item(ctx, head):
         question = ("The status line changed and so did a source it links. Re-derive the line "
                     "whole from the locked list, open table and top-risk source, in the files, and "
                     "answer rederived.")
+    elif cited:
+        question = ("A source the status line names moved. Re-derive the line whole from the "
+                    "locked list, open table and top-risk source, in the files, and answer "
+                    "rederived; unaffected is not offered for a source the line names.")
     else:
         question = ("These sources of the bootloader moved. Was the status line re-derived whole "
                     "from the locked list, open table and top-risk source (answer rederived, after "
@@ -3790,7 +3837,7 @@ def cause_records(ctx):
     """Watch entries and diagnostic-register rows this commit adds or changes:
     the records a fix's cause answer names. Their text is part of the cause
     item's evidence, so rewriting one reopens the answer. A row changed only
-    inside an id'd descendant is still a changed row (watch-ownchange)."""
+    inside an id'd descendant is still a changed row (dl-twochanges)."""
     out = []
     for (p, eid), kind in sorted(ctx.claim_changed.items()):
         if kind == "removed" or p not in ctx.staged.specs:
@@ -5263,19 +5310,24 @@ def mv_anchor(col, old, new):
               file=sys.stderr); return 2
     # A reference cites the id as its link text (dl-rowname): link text equal
     # to the old id, on a link now pointing at the new one, is renamed with it.
-    relabel = (rf'(<a\b[^>]*\bhref="[^"#]*#{re.escape(nfrag)}"[^>]*>(?:\s*<code>)?)'
-               rf'{re.escape(frag)}((?:</code>\s*)?</a>)', rf'\g<1>{nfrag}\g<2>')
+    # Only a row id is cited as link text (dl-rowname); prose link text that
+    # happens to equal another kind of id is left alone.
+    def relabel(target):
+        if not ROW_ID_TEXT.fullmatch(frag):
+            return []
+        return [(rf'(<a\b[^>]*\bhref="{target}#{re.escape(nfrag)}"[^>]*>(?:\s*<code>)?)'
+                 rf'{re.escape(frag)}((?:</code>\s*)?</a>)', rf'\g<1>{nfrag}\g<2>')]
     touched = {}
     touched[p] = rewrite(p, [(rf'(?<![-\w])id="{re.escape(frag)}"', f'id="{nfrag}"'),
                              (rf'href="#{re.escape(frag)}"', f'href="#{nfrag}"'),
                              (rf'<code>{re.escape(frag)}</code>', f'<code>{nfrag}</code>'),
-                             relabel])
+                             *relabel("")])
     for q in col.specs:
         if q == p:
             continue
         r = posix(os.path.relpath(p, os.path.dirname(q)))
         n = rewrite(q, [(rf'href="(?:\./)?{re.escape(r)}#{re.escape(frag)}"',
-                         f'href="{r}#{nfrag}"'), relabel])
+                         f'href="{r}#{nfrag}"'), *relabel(rf"(?:\./)?{re.escape(r)}")])
         if n:
             touched[q] = n
     print(f"renamed {addr(p, frag)} -> {addr(p, nfrag)}")
@@ -5656,43 +5708,97 @@ def demote_main(text):
 
 
 OPERATING_PARTS = ("status", "conventions")
-TOOLING_RE = re.compile(r'<p\b[^>]*>\s*(?:<strong>)?Tooling\b.*?</p>', re.S)
-# The element declaring commit types, whatever block holds it: the
-# innermost p, li, dd, dt, td or div around the attribute (dl-demote).
-COMMIT_TYPES_BLOCKS = ("p", "li", "dd", "dt", "td", "div")
+# Operating parts are found by what they are, in whatever element holds
+# them, and removed only as a block holding nothing else: never a block
+# that carries an id'd claim, a heading, a table or rows (dl-demote).
+OPERATING_BLOCKS = ("p", "li", "dd", "dt", "td", "th", "div", "section", "blockquote",
+                    "h1", "h2", "h3", "h4", "h5", "h6")
+COMMIT_TYPES_ATTR_RE = re.compile(r"<([A-Za-z][\w-]*)\b[^>]*\sdata-commit-types\b[^>]*>", re.I)
+TOOLING_START_RE = re.compile(r"<(p|li|dd|dt|td|div)\b[^>]*>\s*(?:<strong>\s*)?Tooling\b", re.I)
+UNSAFE_IN_BLOCK_RE = re.compile(r"\sid\s*=|<(?:h[1-6]|table|tr)\b", re.I)
+
+
+def element_span(text, start, tag):
+    """(start, end) of the TAG element opening at START, nesting counted; a
+    list item without its closing tag ends at its next sibling or its list's
+    end. None when it never closes."""
+    tok = re.compile(rf"<(/?)({tag}|ul|ol)\b[^>]*>", re.I)
+    depth, lists = 0, 0
+    for m in tok.finditer(text, start):
+        closing, name = m[1], m[2].lower()
+        if name != tag.lower():
+            if tag.lower() == "li" and depth == 1:
+                if not closing:
+                    lists += 1
+                elif lists:
+                    lists -= 1
+                else:
+                    return start, m.start()          # the list ends: the item ends
+            continue
+        if not closing:
+            if tag.lower() == "li" and depth == 1 and not lists and m.start() > start:
+                return start, m.start()              # an unclosed item's next sibling
+            depth += 1
+        else:
+            depth -= 1
+            if depth == 0:
+                return start, m.end()
+    return None
+
+
+def own_block(text, lo, hi):
+    """The smallest block in OPERATING_BLOCKS enclosing [LO, HI), if it holds
+    nothing but that part (no id'd claim, heading, table or row besides);
+    else None."""
+    best = None
+    for tag in OPERATING_BLOCKS:
+        for m in re.finditer(rf"<{tag}\b[^>]*>", text[:lo + 1], re.I):
+            span = element_span(text, m.start(), tag)
+            if span and span[0] <= lo and hi <= span[1] and \
+                    (best is None or span[1] - span[0] < best[1] - best[0]):
+                best = span
+    if best is None:
+        return None
+    inner = text[best[0]:best[1]]
+    head_end = inner.find(">") + 1
+    if UNSAFE_IN_BLOCK_RE.search(inner[head_end:]) or re.search(r"\sid\s*=", inner[:head_end]):
+        return None
+    return best
 
 
 def commit_types_span(text):
-    """(start, end) of the innermost block element carrying or enclosing a
-    data-commit-types attribute in TEXT, or None. Closing tags are matched
-    with nesting counted, so an inner list item never ends an outer one."""
-    at = re.search(r"\bdata-commit-types\b", text)
-    if not at:
+    """(start, end) of the commit-type declaration: the tag carrying the
+    data-commit-types attribute (a mention in text is not one), widened to
+    its own block when that block holds nothing else; else the declaring
+    element alone. None when TEXT declares none."""
+    m = COMMIT_TYPES_ATTR_RE.search(text)
+    if not m:
         return None
-    best = None
-    for tag in COMMIT_TYPES_BLOCKS:
-        tok = re.compile(rf"<(/?){tag}\b[^>]*>", re.I)
-        stack = []
-        for m in tok.finditer(text):
-            if not m[1]:
-                stack.append(m.start())
-            elif stack:
-                o = stack.pop()
-                if o < at.start() < m.end() and (best is None or m.end() - o < best[1] - best[0]):
-                    best = (o, m.end())
-    return best
+    el = element_span(text, m.start(), m[1]) or (m.start(), m.end())
+    return own_block(text, el[0], el[1]) or el
+
+
+def tooling_span(text):
+    """(start, end) of the tooling instruction: a block opening with
+    Tooling, whatever element holds it, if it holds nothing else."""
+    m = TOOLING_START_RE.search(text)
+    if not m:
+        return None
+    span = element_span(text, m.start(), m[1])
+    if not span:
+        return None
+    inner = text[span[0]:span[1]]
+    return None if UNSAFE_IN_BLOCK_RE.search(inner) else span
 
 
 def operating_spans(text):
     """[(label, start, end)] of the operating parts TEXT carries, first in
     document order: the elements id'd status and conventions (any tag), the
-    paragraph declaring commit types, the tooling instruction."""
+    commit-type declaration, the tooling instruction."""
     spec = Spec("operating.html", text)
     out = [(f"#{eid}", *spec.elems[eid]) for eid in OPERATING_PARTS if eid in spec.elems]
-    found = [("the commit-type declaration", commit_types_span(text))]
-    m = TOOLING_RE.search(text)
-    found.append(("the tooling instruction", (m.start(), m.end()) if m else None))
-    for label, span in found:
+    for label, span in (("the commit-type declaration", commit_types_span(text)),
+                        ("the tooling instruction", tooling_span(text))):
         if span and not any(a <= span[0] < b for _, a, b in out):
             out.append((label, *span))
     return sorted(out, key=lambda x: x[1])

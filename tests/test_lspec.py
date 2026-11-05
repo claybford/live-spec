@@ -3802,7 +3802,7 @@ class Imports(unittest.TestCase):
 
 class ReviewFixes(unittest.TestCase):
     """Regressions for the 2026-11-04 review of the portability series
-    (portability.html watch-reusereview): each test names its finding."""
+    (portability.html diag-portgaps): each test names its finding."""
 
     melded_committed = Imports.melded_committed
 
@@ -4044,6 +4044,45 @@ class ReviewFixes(unittest.TestCase):
         rc, out = cli(d, "check")
         self.assertIn("main.html#open-reach opens imports/electrical/electrical.html#kp-reach but states nothing", out)
         self.assertIn("has no disposition", out)
+
+
+class AuditImportFixes(unittest.TestCase):
+    """Regressions for the 2026-11-05 audit (portability.html
+    diag-portgaps): each test names its finding."""
+
+    LI_DECL = UP_MAIN.replace(
+        '<p>Session: commit types <code data-commit-types>docs fix seed audit review</code>.</p>',
+        '<ul><li>Session: commit types <code data-commit-types>docs fix seed audit review</code>.</li></ul>')
+
+    def test_a_declaration_outside_a_paragraph_is_demoted(self):
+        with mock.patch.object(sys.modules[__name__], "UP_MAIN", self.LI_DECL):
+            u = upstream()
+        d = importer()
+        rc, out = do_import(d, u, "melded")
+        self.assertEqual(rc, 0, out)
+        txt = Path(d, "imports/electrical/electrical.html").read_text()
+        self.assertNotIn("data-commit-types", txt)
+        self.assertNotIn("Session: commit types", txt)
+        rc, out = cli(d, "check")
+        self.assertNotIn("[demote]", out)              # its orphan and slot are the importer's to settle
+
+    def test_a_declaration_restored_in_a_list_item_fails_the_check(self):
+        u, d = upstream(), importer()
+        rc, out = do_import(d, u, "melded"); self.assertEqual(rc, 0, out)
+        edit(d, "imports/electrical/electrical.html", '<h2 id="params">',
+             '<ul><li>Types <code data-commit-types>docs fix</code></li></ul>\n<h2 id="params">')
+        rc, out = cli(d, "check")
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("[demote] imports/electrical/electrical.html", out)
+
+    def test_start_lists_a_mirrored_seal_as_upstream_fyi(self):
+        u, d = upstream(), importer()
+        rc, out = do_import(d, u); self.assertEqual(rc, 0, out)
+        rc, out = cli(d, "start")
+        sealed = out[out.index("SEALED"):out.index("DEPENDS-ON EDGES")]
+        self.assertIn("SEALED (0): none", sealed)
+        self.assertIn("FYI upstream's, in mirrored imports (1):", sealed)
+        self.assertIn("imports/electrical/electrical.html#dl-bus", sealed)
 
 
 class Slots(unittest.TestCase):

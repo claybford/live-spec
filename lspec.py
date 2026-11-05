@@ -5064,12 +5064,19 @@ def cmd_start(args):
             print(f"  {rel(p)}")
             print(f"    {lines} lines; split from {rel(par[0])} ({par[1]})")
             print("    read it whole when work crosses into it")
-    sealed = [addr(p, eid) for p, spec in col.specs.items() for eid in spec.sealed]
+    # A mirrored import's seals are upstream's to protect, as its watches
+    # are: listed apart, as FYI, never as the importer's (dl-participation).
+    sealed = [addr(p, eid) for p, spec in col.specs.items() if not col.mirrored(p) for eid in spec.sealed]
+    upstream_sealed = [addr(p, eid) for p, spec in col.specs.items() if col.mirrored(p) for eid in spec.sealed]
     deps = list(col.depends_on_edges())
     print()
     print(f"{title('SEALED')} ({len(sealed)}):" + ("" if sealed else " none"))
     for a in sealed:
         print(f"  {a}")
+    if upstream_sealed:
+        print(f"  {title('FYI')} upstream's, in mirrored imports ({len(upstream_sealed)}):")
+        for a in upstream_sealed:
+            print(f"    {a}")
     print(f"{title('DEPENDS-ON EDGES')}: {len(deps)}")
     print()
     print(title("OBLIGATIONS"))
@@ -5607,7 +5614,30 @@ def demote_main(text):
 
 OPERATING_PARTS = ("status", "conventions")
 TOOLING_RE = re.compile(r'<p\b[^>]*>\s*(?:<strong>)?Tooling\b.*?</p>', re.S)
-COMMIT_TYPES_P_RE = re.compile(r'<p\b[^>]*>(?:(?!</p>).)*?data-commit-types.*?</p>', re.S)
+# The element declaring commit types, whatever block holds it: the
+# innermost p, li, dd, dt, td or div around the attribute (dl-demote).
+COMMIT_TYPES_BLOCKS = ("p", "li", "dd", "dt", "td", "div")
+
+
+def commit_types_span(text):
+    """(start, end) of the innermost block element carrying or enclosing a
+    data-commit-types attribute in TEXT, or None. Closing tags are matched
+    with nesting counted, so an inner list item never ends an outer one."""
+    at = re.search(r"\bdata-commit-types\b", text)
+    if not at:
+        return None
+    best = None
+    for tag in COMMIT_TYPES_BLOCKS:
+        tok = re.compile(rf"<(/?){tag}\b[^>]*>", re.I)
+        stack = []
+        for m in tok.finditer(text):
+            if not m[1]:
+                stack.append(m.start())
+            elif stack:
+                o = stack.pop()
+                if o < at.start() < m.end() and (best is None or m.end() - o < best[1] - best[0]):
+                    best = (o, m.end())
+    return best
 
 
 def operating_spans(text):
@@ -5616,10 +5646,12 @@ def operating_spans(text):
     paragraph declaring commit types, the tooling instruction."""
     spec = Spec("operating.html", text)
     out = [(f"#{eid}", *spec.elems[eid]) for eid in OPERATING_PARTS if eid in spec.elems]
-    for label, rx in (("the commit-type declaration", COMMIT_TYPES_P_RE), ("the tooling instruction", TOOLING_RE)):
-        m = rx.search(text)
-        if m and not any(a <= m.start() < b for _, a, b in out):
-            out.append((label, m.start(), m.end()))
+    found = [("the commit-type declaration", commit_types_span(text))]
+    m = TOOLING_RE.search(text)
+    found.append(("the tooling instruction", (m.start(), m.end()) if m else None))
+    for label, span in found:
+        if span and not any(a <= span[0] < b for _, a, b in out):
+            out.append((label, *span))
     return sorted(out, key=lambda x: x[1])
 
 

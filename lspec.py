@@ -3467,7 +3467,7 @@ def derived_item(ctx, head):
     # An imported main's status line is inert here (dl-operate): never a bootloader.
     status = [(p, s) for p, s in col.specs.items() if "status" in s.elems and not col.imported(p)]
     # What each status line links, resolved across files, in document order.
-    linked, linked_by = [], {}
+    linked, linked_by, whole_files = [], {}, {}
     for p, s in status:
         for l in s.links_in("status"):
             tp, fr = resolve(p, l["href"])
@@ -3475,8 +3475,15 @@ def derived_item(ctx, head):
             # A target outside the collection (a rel=external file) is not a
             # source this tool can read or compare; including it would report
             # it added on every commit.
-            if fr and (tp in col.specs or tp in ctx.head_specs) \
-                    and (tp, fr) not in linked_by:
+            if not (tp in col.specs or tp in ctx.head_specs):
+                continue
+            if not fr:
+                # A link to a whole file makes the file the source ("two open
+                # items in portability.html"): any claim in it that now says
+                # something else is a moved source (diag-viewsource).
+                if tp != p:
+                    whole_files.setdefault(tp, addr(p, "status"))
+            elif (tp, fr) not in linked_by:
                 linked_by[(tp, fr)] = addr(p, "status")
                 linked.append((tp, fr))
     # A linked source moved when its whole signature did, descendants
@@ -3490,6 +3497,12 @@ def derived_item(ctx, head):
         return "changed" if hs.sig(fr) != col.specs[tp].sig(fr) else None
     moved_sources = {(tp, fr): source_kind(tp, fr) for (tp, fr) in linked}
     moved_sources = {k: v for k, v in moved_sources.items() if v}
+    for (q, eid), kind in sorted(ctx.claim_changed.items()):
+        if q in whole_files and (q, eid) not in linked_by:
+            linked_by[(q, eid)] = whole_files[q]
+            moved_sources[(q, eid)] = kind
+            if kind != "removed":
+                linked.append((q, eid))
     sources, texts, cited = [], [], set()
     seen_changed = dict(ctx.changed)
     for k, v in moved_sources.items():

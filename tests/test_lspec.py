@@ -4791,6 +4791,48 @@ class ConsolidatedView(unittest.TestCase):
         self.assertIn('unaffected by this change', it['question'])
 
 
+class WholeFileSource(unittest.TestCase):
+    """diag-viewsource: a status-line link to a whole file ("open items in
+    motor.html") makes the file the source; a claim added, changed or removed
+    there asks the view item, which then refuses unaffected."""
+
+    def fixture(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        edit(d, "main.html", "Open: nothing.", 'Open: nothing in <a href="motor.html">motor.html</a>.')
+        commit(d, "docs: link the file"); ensure_request(d)
+        return d
+
+    def test_a_claim_added_in_a_linked_file_asks_the_view(self):
+        d = self.fixture()
+        edit(d, "motor.html", "</main>",
+             '<table><tr id="open-x"><td>open-x torque unknown</td><td>g</td><td>measure</td></tr></table>\n</main>')
+        sh("git", "add", "-A", cwd=d)
+        ctx, items, _ = evaluate_in(d)
+        it = next(i for i in items if i["kind"] == "derived")
+        self.assertIn("linked source motor.html#open-x (added)", it["excerpt"])
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            with self.assertRaisesRegex(ValueError, "unaffected"):
+                lspec.validate(it, given(["unaffected", "the", "line", "is", "fine"]), ctx, set())
+        finally:
+            os.chdir(cwd)
+
+    def test_a_claim_removed_from_a_linked_file_asks_the_view(self):
+        d = self.fixture()
+        edit(d, "motor.html", '<p id="power">', '<p>'); sh("git", "add", "-A", cwd=d)
+        it = next(i for i in evaluate_in(d)[1] if i["kind"] == "derived")
+        self.assertIn("motor.html#power (removed)", it["excerpt"])
+
+    def test_an_unlinked_file_asks_nothing(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        ensure_request(d)
+        edit(d, "motor.html", "</main>", '<p id="aside">An aside.</p>\n</main>')
+        sh("git", "add", "-A", cwd=d)
+        self.assertEqual([i for i in evaluate_in(d)[1] if i["kind"] == "derived"], [])
+
+
 class NestedChange(unittest.TestCase):
     """watch-ownchange: an edit inside an id'd descendant changes the claim
     that encloses it. ctx.changed answers which element was edited;

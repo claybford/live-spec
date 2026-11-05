@@ -789,6 +789,43 @@ class G(unittest.TestCase):
         self.assertIn('<tr id="dl-split-drive"><td><code>dl-split-drive</code>', m)
         self.assertNotIn('dl-split-motor', m)
 
+    def test_mv_anchor_renames_link_text_citing_the_id(self):
+        """watch-mvlabel: a reference cites the row id as its link text
+        (dl-rowname), in its own file and across files; mv renames that text
+        with the href, and leaves other link text alone."""
+        d = repo()
+        edit(d, "main.html", "<table>",
+             '<p id="cite">See <a href="#dl-split-motor">dl-split-motor</a> and '
+             '<a href="#dl-split-motor"><code>dl-split-motor</code></a> and '
+             '<a href="#dl-split-motor">the motor split</a>.</p>\n<table>')
+        edit(d, "motor.html", "120 kW",
+             '120 kW (<a href="main.html#dl-split-motor">dl-split-motor</a>)')
+        commit(d, "docs: cite the split")
+        rc, out = cli(d, "mv", "main.html#dl-split-motor", "main.html#dl-split-drive")
+        self.assertEqual(rc, 0, out)
+        m, mo = Path(d, "main.html").read_text(), Path(d, "motor.html").read_text()
+        self.assertIn('<a href="#dl-split-drive">dl-split-drive</a>', m)
+        self.assertIn('<a href="#dl-split-drive"><code>dl-split-drive</code></a>', m)
+        self.assertIn('<a href="#dl-split-drive">the motor split</a>', m)
+        self.assertIn('<a href="main.html#dl-split-drive">dl-split-drive</a>', mo)
+        self.assertNotIn("dl-split-motor", m + mo)
+        rc, out = cli(d, "check"); self.assertEqual(rc, 0, out)
+
+    def test_check_flags_link_text_naming_another_row(self):
+        """watch-mvlabel: a link whose text is a row id other than its
+        target's is a stale label; check fails it, across files too."""
+        d = repo()
+        edit(d, "main.html", "<table>",
+             '<p id="cite">See <a href="#dl-split-motor">dl-split-old</a>.</p>\n<table>')
+        rc, out = cli(d, "check")
+        self.assertNotEqual(rc, 0, out); self.assertIn("[linkid]", out)
+        self.assertIn("dl-split-old", out)
+        d = repo()
+        edit(d, "motor.html", "120 kW",
+             '120 kW (<a href="main.html#dl-split-motor">watch-gone</a>)')
+        rc, out = cli(d, "check")
+        self.assertNotEqual(rc, 0, out); self.assertIn("[linkid]", out)
+
     def test_mv_anchor_collision(self):
         d = repo(); rc, out = cli(d, "mv", "motor.html#power", "motor.html#top")
         self.assertEqual(rc, 2); self.assertIn("collision", out)

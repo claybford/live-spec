@@ -338,6 +338,7 @@ def sig_views(before, after):
 
 
 LABEL_RE = re.compile(r"^\s*<code>((?:dl|watch)-[^<]+)</code>")
+ROW_ID_TEXT = re.compile(r"(?:dl|watch)-[A-Za-z0-9_.:-]+")
 
 
 def row_label(cell):
@@ -1856,6 +1857,17 @@ def check_structure(col, specimens=True, markers=True):
                 fails.append(f"[label] {r}: {rid} first cell opens with "
                              f"{'<code>' + got + '</code>' if got else 'no label'}; "
                              f"a row shows its own id: <code>{rid}</code>")
+        # A reference cites the row's id as its link text (dl-rowname), so a
+        # link whose text is a row id names its own target: text naming
+        # another id is a stale label, typically left by a rename.
+        for link in s.links:
+            text = s.label(link).strip()
+            if ROW_ID_TEXT.fullmatch(text):
+                frag = link["href"].partition("#")[2]
+                if frag != text:
+                    fails.append(f"[linkid] {r}: a link reads {text} but points at "
+                                 f"{link['href']!r}; a reference cites its target's id "
+                                 f"as link text (dl-rowname)")
         n = volatile_ordinals(s, col.specs)
         if n:
             fails.append(f"[ordinal] {r}: {n} volatile section reference(s) "
@@ -5156,16 +5168,21 @@ def mv_anchor(col, old, new):
     if nfrag in col.specs[p].elems:
         print(f"lspec mv: id {nfrag!r} already exists in {rel(p)} (collision)",
               file=sys.stderr); return 2
+    # A reference cites the id as its link text (dl-rowname): link text equal
+    # to the old id, on a link now pointing at the new one, is renamed with it.
+    relabel = (rf'(<a\b[^>]*\bhref="[^"#]*#{re.escape(nfrag)}"[^>]*>(?:\s*<code>)?)'
+               rf'{re.escape(frag)}((?:</code>\s*)?</a>)', rf'\g<1>{nfrag}\g<2>')
     touched = {}
     touched[p] = rewrite(p, [(rf'(?<![-\w])id="{re.escape(frag)}"', f'id="{nfrag}"'),
                              (rf'href="#{re.escape(frag)}"', f'href="#{nfrag}"'),
-                             (rf'<code>{re.escape(frag)}</code>', f'<code>{nfrag}</code>')])
+                             (rf'<code>{re.escape(frag)}</code>', f'<code>{nfrag}</code>'),
+                             relabel])
     for q in col.specs:
         if q == p:
             continue
         r = posix(os.path.relpath(p, os.path.dirname(q)))
         n = rewrite(q, [(rf'href="(?:\./)?{re.escape(r)}#{re.escape(frag)}"',
-                         f'href="{r}#{nfrag}"')])
+                         f'href="{r}#{nfrag}"'), relabel])
         if n:
             touched[q] = n
     print(f"renamed {addr(p, frag)} -> {addr(p, nfrag)}")
@@ -6783,7 +6800,8 @@ not carry misstates its rules.""",
 
 "mv": """\
 Renames a file or an anchor and repairs references, a renamed row's label
-included; the rename and its repairs are staged, nothing committed. A renamed
+and link text citing its id included; the rename and its repairs are staged,
+nothing committed. A renamed
 dependency target owes a review: its edge's baseline is unknown until a
 review: commit names the dependent claim.""",
 

@@ -1,0 +1,4 @@
+# The hooks and the checker run as checked out: keep them LF on every
+# checkout, core.autocrlf included. A CR in a shebang stops git running a hook.
+lspec.py text eol=lf
+hooks/* text eol=lf

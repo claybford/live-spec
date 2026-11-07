@@ -245,6 +245,21 @@ class Units(unittest.TestCase):
         self.assertEqual(lspec.reviewed_claims('docs: review: not a type', ''), {})
         self.assertEqual(lspec.reviewed_claims('docs: x', 'review: a.html#x'), {})   # body never types
 
+    def test_checker_hash_ignores_line_endings(self):
+        # A Windows checkout or editor save leaves the working tool CRLF while
+        # the hook runs the LF staged blob: one checker, one hash (2026-11-06).
+        with tempfile.TemporaryDirectory() as d:
+            lf, crlf = Path(d, 'lf.py'), Path(d, 'crlf.py')
+            lf.write_bytes(b'a = 1\nb = 2\n'); crlf.write_bytes(b'a = 1\r\nb = 2\r\n')
+            hashes = []
+            for f in (lf, crlf):
+                with mock.patch.object(lspec, '__file__', str(f)):
+                    hashes.append(lspec.checker_sha256())
+            self.assertEqual(hashes[0], hashes[1])
+            lf.write_bytes(b'a = 1\nb = 3\n')
+            with mock.patch.object(lspec, '__file__', str(lf)):
+                self.assertNotEqual(lspec.checker_sha256(), hashes[1])     # content still binds
+
     def test_incomplete_history_is_one_line(self):
         shallow = [{'dependent': ('m', 'c'), 'target': ('t', 'p'), 'kind': 'unknown',
                     'note': 'shallow clone', 'incomplete': 'shallow clone'}]
@@ -463,6 +478,21 @@ class SharedLiterals(unittest.TestCase):
         col = self.col('</table><p id="a">Four cornerstones here.</p><p id="b">Rated 88 mm.</p><table>',
                        '<p id="c">4 cornerstones there.</p>')
         self.assertEqual(lspec.shared_literals(col), [])
+
+    def test_start_names_hooks_git_cannot_run(self):
+        # A CRLF hook's shebang names /bin/sh plus a carriage return: git
+        # reports "No such file or directory", so start names the cause.
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        hooks = Path(d, '.git', 'hooks')
+        src = Path(lspec.__file__).with_name('hooks')
+        for name in ('pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit'):
+            Path(hooks, name).write_bytes(Path(src, name).read_bytes())
+        self.assertNotIn('CRLF', cli(d, 'start')[1])
+        crlf = Path(hooks, 'pre-commit')
+        crlf.write_bytes(crlf.read_bytes().replace(b'\n', b'\r\n'))
+        out = cli(d, 'start')[1]
+        self.assertIn('CRLF line endings, so git cannot run them: pre-commit', out)
 
     def test_start_prints_the_advisory_and_stays_green(self):
         d = repo()

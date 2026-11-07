@@ -3989,6 +3989,13 @@ def file_sha256(path):
     return digest_.hexdigest()
 
 
+def checker_sha256():
+    """The checker's identity for the receipt: its bytes with CRLF read as LF,
+    so a Windows checkout or an editor's save matches the staged blob."""
+    with open(__file__, "rb") as f:
+        return hashlib.sha256(f.read().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def index_sha256():
     """The staged candidate: paths, modes, object ids and conflict stages of
     Git's selected index (stat-cache data excluded)."""
@@ -4292,7 +4299,7 @@ def issue_or_clear(col, ctx, items, state):
                         f"{request['adopt_reason']}")
     trailers += [it["trailer"] for it in answered if it["trailer"]]
     receipt = {"format": 3, "main": repo_rel(col.main), "head": head_sha(),
-               "index_sha256": index_sha256(), "checker_sha256": file_sha256(__file__),
+               "index_sha256": index_sha256(), "checker_sha256": checker_sha256(),
                "subject": ctx.subject, "body": state.get("body") or "",
                "trailers": trailers, "issued_at": now_iso(),
                "request_opened_at": (ctx.request or {}).get("opened_at")}
@@ -4320,7 +4327,7 @@ def receipt_problem():
             return "the staged state changed since reconcile"
     except (RuntimeError, OSError) as e:
         return f"cannot compare the candidate: {e}"
-    if receipt["checker_sha256"] != file_sha256(__file__):
+    if receipt["checker_sha256"] != checker_sha256():
         return "the checker being committed differs from the one that ran reconcile"
     return None
 
@@ -4981,6 +4988,21 @@ def missing_hooks():
     return out
 
 
+def crlf_hooks():
+    """Installed hooks whose lines end in CRLF: the shebang reads /bin/sh plus
+    a carriage return, and git cannot run them."""
+    hooks = git("rev-parse", "--path-format=absolute", "--git-path", "hooks").strip()
+    out = []
+    for name in GATE_HOOKS + ("post-commit",):
+        try:
+            with open(os.path.join(hooks, name), "rb") as f:
+                if b"\r\n" in f.read():
+                    out.append(name)
+        except OSError:
+            pass
+    return out
+
+
 def resume_diff(col, commit):
     """-> (printable lines, refusal or None) for start --resume."""
     if not require_commit(commit):
@@ -5180,6 +5202,12 @@ def cmd_start(args):
     if missing:
         print(f"{title('HOOKS')} — not installed, or from an older lspec: " + ", ".join(missing)
               + "; install: " + "; ".join(f"ln -sf ../../hooks/{h} .git/hooks/{h}" for h in missing))
+        print()
+    crlf = crlf_hooks() if in_git else []
+    if crlf:
+        print(f"{title('HOOKS')} — CRLF line endings, so git cannot run them: " + ", ".join(crlf)
+              + "; keep hooks/ LF (`hooks/* text eol=lf` in .gitattributes), then "
+              "`git rm --cached -r hooks && git checkout -- hooks`, or strip the carriage returns")
         print()
     print(f"{title('SESSION')} — per commit: edit, stage, " + cmd(command(col, "reconcile", "--subject",
           "type: one transition")) + ", work the checklist, `git commit --no-edit`. "

@@ -1,4 +1,6 @@
 #!/bin/sh
+# Part of lspec (github.com/claybford/live-spec). Copyright (c) 2026 Clayton Ford.
+# MIT License; the full notice heads lspec.py.
 # lspec prepare-commit-msg: write the reconciled subject, any body, and the
 # Reconciled: trailers from the receipt; other trailers you supply are kept.
 # Commit with `git commit --no-edit`. Install:

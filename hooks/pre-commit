@@ -1,4 +1,6 @@
 #!/bin/sh
+# Part of lspec (github.com/claybford/live-spec). Copyright (c) 2026 Clayton Ford.
+# MIT License; the full notice heads lspec.py.
 # lspec pre-commit: confirm the candidate matches the reconcile receipt —
 # HEAD, Git's selected index and the checker being committed. Every check
 # ran in reconcile, so a refusal means something changed after it.

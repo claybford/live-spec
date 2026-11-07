@@ -1,4 +1,6 @@
 #!/bin/sh
+# Part of lspec (github.com/claybford/live-spec). Copyright (c) 2026 Clayton Ford.
+# MIT License; the full notice heads lspec.py.
 # lspec post-commit: list files still uncommitted after this commit; print
 # nothing when there are none. The commit already succeeded. Uses the
 # committed checker, so working-tree edits to lspec.py cannot change it.

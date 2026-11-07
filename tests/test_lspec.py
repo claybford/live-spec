@@ -114,7 +114,8 @@ MAIN = """<html><body><main>
 <tr id="dl-split-motor"><td><code>dl-split-motor</code> <a href="motor.html">motor.html</a> holds the drive</td><td>keep in main</td><td>own clock.</td></tr>
 {extra}
 </table>
-</main></body></html>"""
+</main></body></html>
+<!-- github.com/claybford/live-spec @ 0123456. Clayton Ford, 2026. MIT. -->"""
 
 MOTOR = """<html><body><main>
 <h1 id="top">Motor</h1>
@@ -1719,7 +1720,7 @@ class L(unittest.TestCase):
         d = repo(); rc, out = cli(d, "start")
         self.assertEqual(rc, 0, out)
         self.assertNotIn('id="power"', out)                    # the agent reads the specs
-        self.assertIn("main.html (main)\n    14 lines, 50 words", out)
+        self.assertIn("main.html (main)\n    15 lines, 50 words", out)
         self.assertIn("motor.html\n    5 lines; split from main.html (dl-split-motor)\n    read it whole", out)
         self.assertLess(len(out.splitlines()), 25, out)        # short enough never to truncate
 
@@ -2254,11 +2255,28 @@ class RevisionRegressions(unittest.TestCase):
                     self.assertTrue(any('single-file specimens require' in f for f in failures), failures)
 
     def test_specimen_allows_internal_anchors_and_remote_urls(self):
-        fragment = '<p id="claim">Claim</p><a href="#claim">local</a><a href="https://example.org/evidence">source</a>'
+        fragment = ('<p id="claim">Claim</p><a href="#claim">local</a><a href="https://example.org/evidence">source</a>\n'
+                    '<!-- github.com/claybford/live-spec @ [ADAPT: a commit]. Clayton Ford, 2026. MIT. -->')
         outer = lspec.Spec('main.html', '<pre data-specimen="seed">' + html.escape(fragment) + '</pre>')
         col = argparse.Namespace(fails=[], specs={'main.html': outer})
         with mock.patch.object(lspec.os.path, 'exists', side_effect=AssertionError('specimen consulted filesystem')):
             self.assertEqual(lspec.check_structure(col), [])
+
+    def test_main_and_seed_carry_the_attribution(self):
+        # The footer travels with every copy; check fails a main or seed
+        # without it, or with another year or license than this revision states.
+        ok = '<p id="x">x</p>\n<!-- github.com/claybford/live-spec @ 1a2b3c4. Clayton Ford, 2026. MIT. -->'
+        source = '<p id="x">x</p>\n<!-- github.com/claybford/live-spec. Clayton Ford, 2026. MIT. -->'
+        for raw, fails in [(ok, False), (source, False), ('<p id="x">x</p>', True),
+                           (ok.replace('2026', '2025'), True), (ok.replace('MIT', 'GPL'), True),
+                           (ok + '\n<p>after the footer</p>', True)]:
+            col = argparse.Namespace(fails=[], specs={'main.html': lspec.Spec('main.html', raw)}, main='main.html')
+            got = [f for f in lspec.check_structure(col) if '[attribution]' in f]
+            self.assertEqual(bool(got), fails, raw)
+        seed = lspec.Spec('main.html', ok + '<pre data-specimen="seed">' + html.escape('<p id="y">y</p>') + '</pre>'
+                          + '\n<!-- github.com/claybford/live-spec. Clayton Ford, 2026. MIT. -->')
+        col = argparse.Namespace(fails=[], specs={'main.html': seed}, main='main.html')
+        self.assertTrue(any('[specimen seed] [attribution]' in f for f in lspec.check_structure(col)))
 
     def test_principle_anchors_enclose_rules(self):
         spec = lspec.Spec(str(Path(lspec.__file__).with_name('live-spec.html')))
@@ -3511,7 +3529,8 @@ UP_MAIN = """<!DOCTYPE html><html><body><main>
 <table><tr><th>I</th><th>G</th><th>R</th></tr>
 <tr id="watch-fuse" data-watch-until="2020-01-01"><td><code>watch-fuse</code> 2019-10-01 a fuse blew</td><td>the bus</td><td>no recurrence by the date</td></tr>
 </table>
-</main></body></html>"""
+</main></body></html>
+<!-- github.com/claybford/live-spec @ 0123456. Clayton Ford, 2026. MIT. -->"""
 UP_BATTERY = """<!DOCTYPE html><html><body><main><h1 id="top">Battery</h1>
 <p id="capacity">Capacity 100 Ah, sized for <a href="electrical.html#kp-bus">the bus</a>; see <a href="sizing.html">sizing</a>.</p>
 </main></body></html>"""
@@ -3523,7 +3542,8 @@ DOWN_MAIN = """<!DOCTYPE html><html><body><main>
 <table><tr><th>P</th><th>V</th><th>S</th></tr>{params}</table>
 <h2 id="log">Decision Log</h2>
 <table><tr><th>S</th><th>R</th><th>W</th></tr></table>
-</main></body></html>"""
+</main></body></html>
+<!-- github.com/claybford/live-spec @ 0123456. Clayton Ford, 2026. MIT. -->"""
 
 
 ANSWER_ROW = ('<tr id="kp-reach"><td>Reach</td><td>60 cm, answering <a rel="resolves" '

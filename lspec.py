@@ -1,4 +1,25 @@
 #!/usr/bin/env python3
+# MIT License
+#
+# Copyright (c) 2026 Clayton Ford
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 """lspec — maintenance automation for a Living Specification. Stdlib only.
 
 The active spec carries the session's operating rules. live-spec.html defines
@@ -1812,6 +1833,26 @@ def slots_report(col):
         print(f"  {addr(tp, fr)}: {how}")
 
 
+# The footer every main carries (portability.html version record): source,
+# then " @ COMMIT" in a copy, then attribution and license as this revision
+# states them. A year change here travels with the upgrade that brings it.
+ATTRIBUTION_SOURCE = "github.com/claybford/live-spec"
+ATTRIBUTION = "Clayton Ford, 2026. MIT."
+FOOTER_RE = re.compile(re.escape(ATTRIBUTION_SOURCE) + r"(?: @ (?:[0-9a-f]{7,40}|\[ADAPT:[^\]]*\]))?\. "
+                       + re.escape(ATTRIBUTION))
+
+
+def attribution_failure(path, raw):
+    """A main whose last line does not carry the attribution and license."""
+    foot = footer_comment(raw)
+    if foot and FOOTER_RE.search(foot):
+        return None
+    return (f"[attribution] {rel(path)}: main's last line must be the footer comment "
+            f"<!-- {ATTRIBUTION_SOURCE} @ COMMIT. {ATTRIBUTION} --> (COMMIT: the live-spec commit "
+            f"this copy came from; the source itself omits \" @ COMMIT\"); attribution and license "
+            f"travel with every copy (live-spec.html#dl-attribution)")
+
+
 def check_structure(col, specimens=True, markers=True):
     """Structural failures of the collection. A defect wholly inside a
     mirrored import is upstream's to fix: it goes to col.fyi, not the result
@@ -1820,6 +1861,9 @@ def check_structure(col, specimens=True, markers=True):
     mirrored = getattr(col, "mirrored", lambda p: False)
     imported = getattr(col, "imported", lambda p: False)
     commit_types(col, fails)
+    main = getattr(col, "main", None)
+    if main in col.specs and (failure := attribution_failure(main, col.specs[main].raw)):
+        fails.append(failure)
     if hasattr(col, "imports") and col.imports:
         fails += slot_failures(col)
     for p, s in col.specs.items():
@@ -1919,6 +1963,8 @@ def check_structure(col, specimens=True, markers=True):
         if specimens:
             for match in re.finditer(r'<pre\b[^>]*data-specimen="([^"]+)"[^>]*>(.*?)</pre>', s.raw, re.S):
                 specimen = Spec(p, html.unescape(match[2]))
+                if match[1] == "seed" and (failure := attribution_failure(p, specimen.raw)):
+                    fails.append(f"[specimen seed] {failure}")
                 local_links = [link for link in specimen.links
                                if link["href"].partition("#")[0]
                                and not is_external(link["href"])]

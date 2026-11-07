@@ -1955,6 +1955,14 @@ class RevisionRegressions(unittest.TestCase):
         out = reconcile_out(d, subject)
         return int('OPEN [review]' in out), out
 
+    def test_seed_closes_every_inline_element(self):
+        # A tag named in seed prose must reach the instance escaped: one left as
+        # markup opened a <code> that ran on to the next </code> (2026-11-06).
+        seed = self.seed()
+        for tag in ('code', 'a', 'em', 'strong'):
+            opened = len(re.findall(rf'<{tag}\b', seed))
+            self.assertEqual(opened, seed.count(f'</{tag}>'), f'unbalanced <{tag}> in the seed')
+
     def test_template_validation_is_explicit(self):
         with tempfile.TemporaryDirectory() as d:
             Path(d, 'main.html').write_text(self.seed(), encoding='utf-8')

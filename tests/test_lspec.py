@@ -30,6 +30,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import lspec
 from datetime import timedelta
 
+# start and post-commit warm find's passage cache when numpy is present; the
+# suite turns that off (it would load the model in every fixture repository)
+# and the Find tests that cover warming turn it back on.
+os.environ["LSPEC_NO_WARM"] = "1"
+
 # A fixture that must be "not yet expired" takes a date past any clock the suite
 # runs under, computed, so no literal silently crosses into the past (five
 # 2026-11-04 literals read as a time bomb until a moved-clock run showed none
@@ -6637,6 +6642,57 @@ class Find(unittest.TestCase):
         rc, out = self.find(d, "anything")              # no model, no numpy needed
         self.assertEqual(rc, 0, out)
         self.assertIn("main.html is the whole collection: no supporting spec to point to", out)
+
+    def git_collection(self):
+        d = self.collection()
+        subprocess.run(["git", "init", "-q", d], check=True)
+        return d
+
+    @needs_numpy
+    def test_warm_embeds_only_what_the_cache_lacks(self):
+        d = self.git_collection()
+        cwd = os.getcwd(); os.chdir(d)
+        self.addCleanup(os.chdir, cwd)
+        col = lspec.load(argparse.Namespace(main="main.html", fails=[]))
+        embedded, _ = lspec.warm_cache(col)
+        self.assertGreater(embedded, 0)
+        loads = []
+        real = lspec.Embedder
+        with mock.patch.object(lspec, "Embedder", lambda *a: loads.append(1) or real(*a)):
+            self.assertEqual(lspec.warm_cache(col)[0], 0)
+            self.assertEqual(loads, [])                       # nothing missing: the model is never loaded
+            Path(d, "fuses.html").write_text(FIND_FILES["fuses.html"].replace("25 A", "30 A"))
+            col = lspec.load(argparse.Namespace(main="main.html", fails=[]))
+            self.assertEqual(lspec.warm_cache(col)[0], 1)    # one passage changed, one embedded
+        with numpy.load(lspec.state_path("find-vectors.npz")) as z:
+            self.assertEqual(len(z.files), len({t for _, _, c in lspec.find_chunks(col).values() for _, t in c}))
+
+    @needs_numpy
+    def test_start_warms_and_then_stays_quiet(self):
+        d = self.git_collection()
+        with mock.patch.dict(os.environ, {"LSPEC_NO_WARM": ""}):
+            first = cli(d, "start")[1]
+            again = cli(d, "start")[1]
+        self.assertIn("passage cache current:", first)
+        self.assertNotIn("passage cache current:", again)
+
+    def test_without_numpy_it_runs_under_the_repos_venv(self):
+        d = self.git_collection()
+        venv = Path(d, ".venv", "bin", "python")
+        venv.parent.mkdir(parents=True); venv.write_text("#!/bin/sh\n"); venv.chmod(0o755)
+        cwd = os.getcwd(); os.chdir(d)
+        self.addCleanup(os.chdir, cwd)
+        with mock.patch.object(lspec, "import_numpy", lambda: None), \
+                mock.patch.object(lspec.subprocess, "call", return_value=0) as call:
+            self.assertEqual(lspec_cli("--main", "main.html", "find", "anything")[0], 0)
+        argv = call.call_args[0][0]
+        self.assertEqual(argv[0], str(venv))
+        self.assertEqual(argv[-4:], ["find", "anything", "--top", str(lspec.FIND_TOP)])
+
+    def test_post_commit_warms_detached(self):
+        hook = Path(lspec.__file__).with_name("hooks").joinpath("post-commit").read_text()
+        self.assertIn("python3 lspec.py find --warm >/dev/null 2>&1 &", hook)
+        self.assertIn('[ -z "$LSPEC_NO_WARM" ]', hook)
 
     def test_the_model_stays_behind_on_import(self):
         self.assertIn("models", lspec.TOOL_FILES)

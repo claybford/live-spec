@@ -59,7 +59,10 @@ To look before you leap: open `live-spec.html`, then `python3 lspec.py check`.
 setup is a virtual environment managed by [uv](https://docs.astral.sh/uv/):
 
     uv venv && uv pip install numpy
-    .venv/bin/python lspec.py find "QUESTION"     # Windows: .venv\Scripts\python
+
+With a `.venv` in the repository, `python3 lspec.py find` uses it on its own.
+`start` and the post-commit hook keep its passage index in `.git/lspec/`
+current, so a search answers without embedding the collection first.
 
 ## Working on this repo
 

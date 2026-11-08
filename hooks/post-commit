@@ -8,4 +8,10 @@ root=$(git rev-parse --show-toplevel) || exit 0
 cd "$root" || exit 0
 # Preserve Git's selected index, including linked-worktree/alternate indexes.
 python3 -c 'import subprocess, sys; source = subprocess.check_output(["git", "show", "HEAD:lspec.py"], text=True); sys.argv = ["lspec.py", "check", "--clean"]; exec(compile(source, "HEAD:lspec.py", "exec"), {"__name__": "__main__"})' || true
+# Embed the passages this commit changed, so lspec find answers at once
+# (live-spec.html#dl-find). Detached: the commit never waits on it. lspec.py
+# runs it under .venv when this python3 lacks numpy, and skips without one.
+if [ -z "$LSPEC_NO_WARM" ] && [ -f lspec.py ] && [ -d models ]; then
+  (python3 lspec.py find --warm >/dev/null 2>&1 &) || true
+fi
 exit 0

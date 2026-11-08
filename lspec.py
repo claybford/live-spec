@@ -119,6 +119,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -5260,6 +5261,14 @@ def cmd_start(args):
           "type: one transition")) + ", work the checklist, `git commit --no-edit`. "
           "Hand off with " + cmd(command(col, "finish")) + " on a clean tree. Content across "
           "repositories: " + cmd("python3 lspec.py import|export|graduate|copy --help") + ".")
+    if len(col.specs) > 1 and not os.environ.get("LSPEC_NO_WARM"):
+        done = warm_cache(col)
+        line = (f"passage cache current: {done[0]} passage(s) embedded in {done[1]:.1f}s" if done
+                else warm_elsewhere(args))
+        if done and done[0] == 0:
+            line = None                                   # nothing was missing: say nothing
+        if line:
+            print(f"{title('FIND')} — " + line.split(" — ", 1)[-1])
     if len(col.specs) > 1:
         print(f"{title('FIND')} — when the live question clearly needs more than {rel(col.main)} holds and "
               "it gives no direction, " + cmd(command(col, "find", "QUESTION")) + " matches the question "
@@ -5939,8 +5948,11 @@ def find_chunks(col):
 
 
 def cached_vectors(np, embedder, texts):
-    """Row vectors, memoized under .git/lspec by model and text (dl-state);
-    outside git, or on any cache trouble, computed afresh."""
+    """Passage vectors, memoized under .git/lspec by model and text (dl-state):
+    only a passage not already there is embedded, and EMBEDDER, a callable,
+    loads the model only then. The memo keeps exactly TEXTS, so it never grows
+    past the collection. Outside git, or on any cache trouble, computed afresh.
+    Returns (vectors, how many were embedded)."""
     key = lambda t: hashlib.sha256((MODEL_PINS["weights.npz"] + "\0" + t).encode()).hexdigest()[:32]
     path, memo = None, {}
     if repo_root() is not None:
@@ -5950,11 +5962,11 @@ def cached_vectors(np, embedder, texts):
                 memo = {k: z[k] for k in z.files}
         except (OSError, ValueError):
             memo = {}
-    missing = [t for t in texts if key(t) not in memo]
+    missing = list(dict.fromkeys(t for t in texts if key(t) not in memo))
     if missing:
-        memo.update(zip(map(key, missing), embedder.embed(missing)))
-    if path and missing:
-        keep = {key(t): memo[key(t)] for t in texts}
+        memo.update(zip(map(key, missing), embedder().embed(missing)))
+    keep = {key(t): memo[key(t)] for t in texts}
+    if path and (missing or len(keep) != len(memo)):
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".npz")
@@ -5963,7 +5975,55 @@ def cached_vectors(np, embedder, texts):
             os.replace(tmp, path)
         except OSError:
             pass
-    return np.stack([memo[key(t)] for t in texts])
+    vectors = np.stack([keep[key(t)] for t in texts]) if texts else np.zeros((0, 384), np.float32)
+    return vectors, len(missing)
+
+
+def venv_python():
+    """The repository's own virtual environment, the setup the README prefers
+    (uv venv): .venv/bin/python, or .venv\\Scripts\\python.exe on Windows."""
+    root = repo_root() or os.getcwd()
+    for rel_path in ((".venv", "bin", "python"), (".venv", "Scripts", "python.exe")):
+        path = os.path.join(root, *rel_path)
+        if os.path.isfile(path) and os.path.abspath(path) != os.path.abspath(sys.executable):
+            return path
+    return None
+
+
+def import_numpy():
+    try:
+        import numpy
+        return numpy
+    except ImportError:
+        return None
+
+
+def warm_cache(col):
+    """Embed every passage the cache lacks, so find answers at once. Returns
+    (passages embedded, seconds), or None when it cannot run here (no numpy,
+    a model this tool does not pin, nothing to embed)."""
+    files = find_chunks(col)
+    np = import_numpy()
+    if not files or np is None or model_problems(model_folder()):
+        return None
+    began = time.time()
+    _, embedded = cached_vectors(np, lambda: Embedder(np, model_folder()),
+                                 [text for _, _, chunks in files.values() for _, text in chunks])
+    return embedded, time.time() - began
+
+
+def warm_elsewhere(args):
+    """Run the warm step under the repository's .venv when this Python lacks
+    numpy: the hooks and a bare `python3` are usually not the venv."""
+    venv = venv_python()
+    if venv is None:
+        return None
+    argv = [venv, os.path.abspath(__file__)] + (["--main", args.main] if getattr(args, "main", None) else [])
+    try:
+        out = subprocess.run(argv + ["find", "--warm"], capture_output=True, text=True, timeout=1800)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip().splitlines()[-1] if out.returncode == 0 and out.stdout.strip() else None
 
 
 def copy_tool(root, dest):
@@ -5978,15 +6038,29 @@ def copy_tool(root, dest):
 
 
 def cmd_find(args):
+    if os.environ.get("LSPEC_NO_WARM") and args.warm:
+        return 0
+    if import_numpy() is None and venv_python():          # the README's uv setup: use it
+        argv = [venv_python(), os.path.abspath(__file__)] + (["--main", args.main] if args.main else [])
+        argv += ["find"] + (["--warm"] if args.warm else [args.question, "--top", str(args.top)])
+        return subprocess.call(argv)
     col = load(args)
+    if args.warm:
+        if args.question:
+            print("lspec find: --warm takes no QUESTION", file=sys.stderr); return 2
+        done = warm_cache(col)
+        if done and done[0]:
+            print(f"{title('FIND')} — passage cache current: {done[0]} passage(s) embedded in {done[1]:.1f}s")
+        return 0
+    if not args.question:
+        print("lspec find: QUESTION is required (or --warm)", file=sys.stderr); return 2
     print(stamp()[0])
     files = find_chunks(col)
     if not files:
         print(f"{title('FIND')} — {rel(col.main)} is the whole collection: no supporting spec to point to")
         return 0
-    try:
-        import numpy as np
-    except ImportError:
+    np = import_numpy()
+    if np is None:
         print(NUMPY_HINT, file=sys.stderr)
         return 2
     folder = model_folder()
@@ -5995,9 +6069,14 @@ def cmd_find(args):
         print(f"lspec find: the model in {folder} is not the one this lspec.py pins: " + "; ".join(problems)
               + ". Copy models/ from the live-spec revision the footer names, beside lspec.py", file=sys.stderr)
         return 2
-    embedder = Embedder(np, folder)
+    model = []
+    def embedder():                                       # loaded once, and only if needed
+        if not model:
+            model.append(Embedder(np, folder))
+        return model[0]
     flat = [(path, where, text) for path, (_, _, chunks) in files.items() for where, text in chunks]
-    scores = cached_vectors(np, embedder, [text for _, _, text in flat]) @ embedder.embed([args.question])[0]
+    vectors, _ = cached_vectors(np, embedder, [text for _, _, text in flat])
+    scores = vectors @ embedder().embed([args.question])[0]
     best = {}
     for (path, where, text), score in zip(flat, scores):
         best.setdefault(path, []).append((float(score), where, text))
@@ -7332,9 +7411,14 @@ together. find needs numpy; every other verb and the hooks need only the
 standard library. Preferred setup, a virtual environment managed by uv:
   uv venv && uv pip install numpy
   .venv/bin/python lspec.py find "QUESTION"        (Windows: .venv\\Scripts\\python)
-Passage vectors are memoized under .git/lspec (transaction state): the first
-run embeds every passage (about a second per thousand words), later runs only
-the passages that changed.
+If this Python lacks numpy and the repository has a .venv, find runs under it.
+
+Passage vectors are memoized in .git/lspec/find-vectors.npz (transaction state,
+never committed), keyed by the model and each passage's text. start embeds
+whatever is missing (about a second per thousand words, once), and the
+post-commit hook embeds the passages a commit changed, detached, so a commit
+never waits; find --warm does the same by hand. LSPEC_NO_WARM=1 turns warming
+off.
 """ % CHUNK_WORDS,
 "lspec": """\
 A session: start MAIN, read what it lists whole, edit and stage, reconcile
@@ -7723,7 +7807,9 @@ def main(argv):
     ex.add_argument("out", metavar="OUT.html"); ex.add_argument("ids", nargs="*", metavar="ID"); add_main(ex)
     fd = sub.add_parser("find", help="which supporting spec answers a question main gives no direction for",
                         formatter_class=raw, epilog=HELP["find"])
-    fd.add_argument("question", metavar="QUESTION", help="the live question, quoted, in the spec's own terms")
+    fd.add_argument("question", metavar="QUESTION", nargs="?", help="the live question, quoted, in the spec's own terms")
+    fd.add_argument("--warm", action="store_true",
+                    help="embed only the passages the cache lacks, and answer nothing (start and post-commit run it)")
     fd.add_argument("--top", type=int, default=FIND_TOP, metavar="N",
                     help=f"how many to list (default {FIND_TOP})"); add_main(fd)
     cp = sub.add_parser("copy", help="start a new project from a copy of this main",

@@ -6535,11 +6535,15 @@ FIND_MAIN = """<!DOCTYPE html><html><body><main>
 </main></body></html>
 """
 FIND_FILES = {
-    "motor.html": '<p id="m">motor</p>',
-    "wiring.html": '<p id="w">wiring</p><table><tr id="dl-split-fuses"><td><code>dl-split-fuses</code> '
-                   '<a href="fuses.html">fuses.html</a> holds overcurrent protection: fuse ratings, trip curves '
-                   'and which circuit each one guards</td><td>x</td><td>y</td></tr></table>',
-    "fuses.html": '<p id="f">fuses</p>',
+    "motor.html": '<h1 id="top">Drive motor</h1><p id="torque">Peak torque is 240 Nm at the wheel through a '
+                  'single reduction; the winding runs to 140 C before the controller derates it.</p>'
+                  '<p id="cooling">A glycol loop shared with the inverter carries the motor\'s heat to the front radiator.</p>',
+    "wiring.html": '<h1 id="top">Harness</h1><p id="gauge">Traction cables are 35 mm2; signal runs are 0.5 mm2 '
+                   'twisted pairs routed along the left rail.</p><table><tr id="dl-split-fuses"><td><code>dl-split-fuses</code> '
+                   '<a href="fuses.html">fuses.html</a> holds the protection devices of each circuit</td><td>x</td><td>y</td></tr></table>',
+    "fuses.html": '<h1 id="top">Protection</h1><p id="ratings">The cabin heater circuit has a 25 A slow-blow fuse; '
+                  'the pump circuit a 10 A fast one; both sit in the rear distribution box.</p>'
+                  '<p>Spares of each rating ride in the glovebox.</p>',
 }
 
 
@@ -6582,14 +6586,31 @@ class Find(unittest.TestCase):
 
     @needs_numpy
     def test_ranks_by_meaning_and_prints_the_route(self):
-        rc, out = self.find(self.collection(), "what size breaker protects each circuit", "--top", "2")
+        # The answer is in fuses.html's content, which its split row only summarizes.
+        rc, out = self.find(self.collection(), "how many amps can the heater draw before it trips", "--top", "2")
         self.assertEqual(rc, 0, out)
         first = out.split("  1. ")[1]
         self.assertTrue(first.startswith("fuses.html"), out)
         self.assertIn("route: main.html#dl-split-wiring → wiring.html#dl-split-fuses", first)
-        self.assertIn("holds: fuses.html holds overcurrent protection", first)
+        self.assertIn("holds: fuses.html holds the protection devices", first)
+        self.assertIn("match", first.split("\n")[3]); self.assertIn("fuses.html#ratings", first.split("\n")[3])
         self.assertNotIn("  3. ", out)
-        self.assertIn("A hit is a direction, not a load", out)
+        self.assertIn("A match is a direction, not a load", out)
+
+    def test_chunks_cover_every_word_and_carry_anchors(self):
+        raw = ('<html><head><title>T</title></head><body><h2 id="a">Alpha section heading here</h2>'
+               '<p>loose text one two three four five six seven</p><!-- a comment > with a bracket -->'
+               '<section id="s"><p id="inner">inner claim with enough words to keep</p> tail words of the section here now</section>'
+               '<p id="long">' + " ".join(f"w{i}" for i in range(300)) + '</p></body></html>')
+        chunks = lspec.spec_chunks(lspec.Spec("x.html", raw))
+        words = {w for _, text in chunks for w in text.split()}
+        for w in ["loose", "inner", "tail", "w0", "w150", "w299"]:
+            self.assertIn(w, words)
+        self.assertNotIn("comment", words); self.assertNotIn("T", words)       # comments and head are not content
+        anchors = {a for a, _ in chunks}
+        self.assertEqual(anchors, {"a", "inner", "s", "long"})                    # loose text sits under its heading
+        self.assertTrue(all(len(t.split()) <= lspec.CHUNK_WORDS for _, t in chunks))
+        self.assertEqual(sum(a == "long" for a, _ in chunks), 3)                  # 300 words, windows of 120 by 100
 
     @needs_numpy
     def test_refuses_a_model_this_tool_does_not_pin(self):

@@ -26,8 +26,9 @@ better.
   library only, except `find`): a validator, a commit gate that asks each commit
   the questions the protocol says to ask, git hooks that hold it to its answers,
   the verbs that move content between repositories (`import`, `export`,
-  `graduate`, `copy`), and `find`, which points a session to the supporting spec
-  that answers a question main gives no direction for. The spec reads and
+  `graduate`, `copy`), and `find`, which matches a question main gives no
+  direction for against the supporting specs' passages and points a session to
+  the file to read whole. The spec reads and
   operates without it. `python3 lspec.py --help` and `python3 lspec.py VERB
   --help` are its reference.
 - **`models/`** — the embedding model `find` runs: IBM's

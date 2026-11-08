@@ -1,8 +1,9 @@
 # granite-embedding-small-english-r2, int8 — the model `lspec find` runs
 
-`lspec find` ranks a collection's supporting specs against a question by
-meaning, with this embedding model. It runs on numpy alone, through code in
-`lspec.py`; nothing here is executed on its own.
+`lspec find` embeds a collection's supporting specs, passage by passage, and
+ranks the files by the passage that best matches a question, with this model.
+It runs on numpy alone, through code in `lspec.py`; nothing here is executed on
+its own.
 
 ## Source
 

@@ -5262,8 +5262,9 @@ def cmd_start(args):
           "repositories: " + cmd("python3 lspec.py import|export|graduate|copy --help") + ".")
     if len(col.specs) > 1:
         print(f"{title('FIND')} — when the live question clearly needs more than {rel(col.main)} holds and "
-              "it gives no direction, " + cmd(command(col, "find", "QUESTION")) + " ranks the supporting "
-              "specs by meaning; read the one it names whole before acting on it (needs numpy: "
+              "it gives no direction, " + cmd(command(col, "find", "QUESTION")) + " matches the question "
+              "against the supporting specs' passages; read the file it points to whole before acting on it "
+              "(needs numpy: "
               + cmd("python3 lspec.py find --help") + ").")
     return rc
 
@@ -5635,7 +5636,7 @@ MODEL_PINS = {   # sha256, CRLF read as LF, of each file the model folder carrie
     "weights.npz": "3f6cd1704d830e8700f14cec67d8ccb468b9d4f5b14780d75d9c219f682538be",
     "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
 }
-FIND_TOP = 10
+FIND_TOP = 5
 NUMPY_HINT = """\
 lspec find: needs numpy, which this Python lacks; every other verb and the hooks need only
 the standard library. The preferred setup is a virtual environment managed by uv:
@@ -5867,10 +5868,61 @@ def model_problems(folder):
     return out
 
 
-def find_candidates(col):
-    """Every supporting spec with its route from main and what its split row
-    says it holds: (path, [(parent, rid), ...] main first, holds, row text)."""
+CHUNK_WORDS, CHUNK_OVERLAP, CHUNK_MIN = 120, 20, 6
+
+
+def windows(text):
+    """TEXT in windows of CHUNK_WORDS words overlapping by CHUNK_OVERLAP;
+    nothing under CHUNK_MIN words (a bare heading carries no answer)."""
+    words = text.split()
+    if len(words) < CHUNK_MIN:
+        return []
+    step = CHUNK_WORDS - CHUNK_OVERLAP
+    return [" ".join(words[i:i + CHUNK_WORDS]) for i in range(0, max(len(words) - CHUNK_OVERLAP, 1), step)]
+
+
+def spec_chunks(spec):
+    """A spec's text as chunks, [(anchor id or None, text)]: each id'd
+    element's own text (its id'd descendants are chunks of their own), and the
+    text between id'd elements, each windowed. Every word lands in a chunk."""
+    # comments blanked to their own length, so the parser's element offsets still hold
+    raw = re.sub(r"<!--.*?-->", lambda m: " " * len(m.group()), spec.raw, flags=re.S)
+    spans = sorted(((s, e, eid) for eid, (s, e) in spec.elems.items() if e > s), key=lambda x: (x[0], -x[1]))
+    head = re.search(r"<head\b.*?</head>", raw, re.S | re.I)
+    skip = [(head.start(), head.end())] if head else []
     out = []
+
+    def own(s, e, inner):
+        parts, at = [], s
+        for cs, ce in inner:
+            parts.append(raw[at:cs]); at = ce
+        parts.append(raw[at:e])
+        return claim_text(" ".join(parts))
+
+    def children(s, e, pool):
+        kids, end = [], s
+        for cs, ce, cid in pool:
+            if cs >= end and ce <= e and (cs, ce) != (s, e):
+                kids.append((cs, ce, cid)); end = ce
+        return kids
+
+    for s, e, eid in spans:
+        out += [(eid, w) for w in windows(own(s, e, [(cs, ce) for cs, ce, _ in children(s, e, spans)]))]
+    # Text between top-level id'd elements, gap by gap, anchored to the element
+    # before it (most often the heading of the section it sits in).
+    at, anchor = (skip[0][1] if skip else 0), None
+    for s, e, eid in children(-1, len(raw), spans) + [(len(raw), len(raw), None)]:
+        if s > at:
+            out += [(anchor, w) for w in windows(claim_text(raw[at:s]))]
+        at, anchor = max(at, e), eid or anchor
+    return out
+
+
+def find_chunks(col):
+    """Every supporting spec's chunks, with its split row, which says what the
+    file holds, as one more: {path: (route [(parent, rid)...], holds, chunks)}.
+    Main is not chunked: it is read whole before find is asked anything."""
+    out = {}
     for child, (parent, rid) in col.parents.items():
         if parent is None:
             continue
@@ -5880,7 +5932,9 @@ def find_candidates(col):
         row = col.specs[parent].element(rid)
         cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S)
         holds = re.sub(r"^dl-split-\S+\s*", "", norm(cells[0]) if cells else "")
-        out.append((child, route, holds, norm(row)))
+        chunks = [(f"{rel(parent)}#{rid}", w) for w in windows(norm(row))]
+        chunks += [(f"{rel(child)}#{a}" if a else rel(child), w) for a, w in spec_chunks(col.specs[child])]
+        out[child] = (route, holds, chunks)
     return out
 
 
@@ -5926,8 +5980,8 @@ def copy_tool(root, dest):
 def cmd_find(args):
     col = load(args)
     print(stamp()[0])
-    candidates = find_candidates(col)
-    if not candidates:
+    files = find_chunks(col)
+    if not files:
         print(f"{title('FIND')} — {rel(col.main)} is the whole collection: no supporting spec to point to")
         return 0
     try:
@@ -5942,16 +5996,23 @@ def cmd_find(args):
               + ". Copy models/ from the live-spec revision the footer names, beside lspec.py", file=sys.stderr)
         return 2
     embedder = Embedder(np, folder)
-    rows = cached_vectors(np, embedder, [c[3] for c in candidates])
-    scores = rows @ embedder.embed([args.question])[0]
-    order = np.argsort(-scores)[:args.top]
-    print(f"{title('FIND')} — {len(candidates)} supporting spec(s) ranked by meaning against: {args.question}")
-    for n, i in enumerate(order, 1):
-        path, route, holds, _ = candidates[i]
-        hops = " → ".join(f"{rel(p)}#{r}" for p, r in route)
-        print(f"  {n}. {rel(path)}  ({scores[i]:.2f})\n     route: {hops}\n     holds: "
-              + (holds if len(holds) <= 300 else holds[:297].rstrip() + "..."))
-    print("A hit is a direction, not a load: read the file whole before acting on it "
+    flat = [(path, where, text) for path, (_, _, chunks) in files.items() for where, text in chunks]
+    scores = cached_vectors(np, embedder, [text for _, _, text in flat]) @ embedder.embed([args.question])[0]
+    best = {}
+    for (path, where, text), score in zip(flat, scores):
+        best.setdefault(path, []).append((float(score), where, text))
+    ranked = sorted(best, key=lambda p: -max(best[p])[0])[:args.top]
+    print(f"{title('FIND')} — {len(files)} supporting spec(s), {len(flat)} passage(s), ranked by the passage "
+          f"that best matches: {args.question}")
+    for n, path in enumerate(ranked, 1):
+        route, holds, _ = files[path]
+        hits = sorted(best[path], reverse=True)[:3]
+        print(f"  {n}. {rel(path)}  ({hits[0][0]:.2f})\n     route: " + " → ".join(f"{rel(p)}#{r}" for p, r in route)
+              + "\n     holds: " + (holds if len(holds) <= 200 else holds[:197].rstrip() + "..."))
+        for score, where, text in hits:
+            print(f"     match {score:.2f} {where}: " + (text if len(text) <= 110 else text[:107].rstrip() + "..."))
+    print("A match is a direction, not a load: if a file's matches answer the question, read that file whole "
+          "before acting on it; if none does, main already holds the answer or the collection does not "
           "(live-spec.html#dl-find).")
     return 0
 
@@ -7253,16 +7314,17 @@ def imports_report(col):
 HELP = {
 "find": """\
 Use it when answering the live question clearly needs more than main holds and
-main gives no direction: no split row or link says where to go. It ranks every
-supporting spec in the collection by how well its split row's account of what
-the file holds matches QUESTION, and prints, best first, the file, its route
-of split rows from main, and that account. Phrase the question in the spec's
-own terms; a vague question ranks vaguely.
+main gives no direction: no split row or link says where to go. It splits every
+supporting spec into passages — each id'd element's own text, the text between
+them, long ones in overlapping windows of %d words — embeds them, and ranks the
+files by the passage that best matches QUESTION. For each file it prints its
+route of split rows from main, what its split row says it holds, and its best
+matches as path#id with an excerpt. Phrase the question in the spec's own terms.
 
-A hit is a direction, not a load. Read the file it names whole before acting
-on it, as any file that governs the work (live-spec.html#dl-wholeload); a wrong
-direction costs one read, a skipped read costs a decision made on false state.
-When main does point somewhere, follow it: find does not replace the tree.
+A match is a direction, not a load. If a file's matches answer the question,
+read that file whole before acting on it (live-spec.html#dl-wholeload); if
+none does, main already holds the answer or the collection does not. Scores
+rank; they do not decide. When main does point somewhere, follow it.
 
 The model is IBM's granite-embedding-small-english-r2 (Apache-2.0), int8, in
 models/ beside lspec.py; this lspec.py pins its checksums and the two travel
@@ -7270,9 +7332,10 @@ together. find needs numpy; every other verb and the hooks need only the
 standard library. Preferred setup, a virtual environment managed by uv:
   uv venv && uv pip install numpy
   .venv/bin/python lspec.py find "QUESTION"        (Windows: .venv\\Scripts\\python)
-Row vectors are memoized under .git/lspec (transaction state); the first run
-over a large collection takes a few seconds.
-""",
+Passage vectors are memoized under .git/lspec (transaction state): the first
+run embeds every passage (about a second per thousand words), later runs only
+the passages that changed.
+""" % CHUNK_WORDS,
 "lspec": """\
 A session: start MAIN, read what it lists whole, edit and stage, reconcile
 --subject "type: one transition", answer the checklist (--next / --tick), commit

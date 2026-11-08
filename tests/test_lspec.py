@@ -1971,7 +1971,7 @@ class RevisionRegressions(unittest.TestCase):
                  'evidence confirmed(source) / provisional(source); commitment locked / open; review WATCH'),
                 ('[ADAPT: 40]', '40'),
                 ('[ADAPT: lspec]', 'lspec'),
-                ('[ADAPT: the commit this seed, lspec.py and hooks/ were copied from]', '0123456')]:
+                ('[ADAPT: the commit this seed, lspec.py, hooks/ and models/ were copied from]', '0123456')]:
             seed = seed.replace(marker, fill)
         return seed
 
@@ -4418,6 +4418,7 @@ class CopyMain(unittest.TestCase):
         self.assertIn(f"provisional(inherited from electrical.html @ {sha[:12]}; ", text)
         self.assertNotIn("data-sealed", text); self.assertIn("[ADAPT: forward design | live-system]", text)
         self.assertTrue(Path(n, "battery.html").exists())
+        self.assertEqual(lspec.model_problems(os.path.join(n, lspec.MODEL_DIR)), [])   # the model travels, intact
         # the seeding session: status, slot, the watch; keep dl-bus, delete dl-split-battery? no — keep it,
         # modify the watch's wording, reopen nothing, delete nothing
         text = re.sub(r"Status: \[ADAPT: forward design \| live-system\]\. Locked: \[ADAPT\]\.", "Status: forward design. Locked: nothing.", text)
@@ -6518,6 +6519,106 @@ class OldInstances(unittest.TestCase):
             rc, out = cli(d, *argv)
             self.assertEqual(rc, 1, out)
             self.assertIn('this hook comes from an older lspec', out)
+
+try:
+    import numpy
+except ImportError:
+    numpy = None
+needs_numpy = unittest.skipUnless(numpy, "lspec find needs numpy")
+REFERENCE = json.loads(Path(__file__).with_name("granite_reference.json").read_text(encoding="utf-8"))
+FIND_MAIN = """<!DOCTYPE html><html><body><main>
+<h1 id="top">Camper</h1>
+<table>
+<tr id="dl-split-motor"><td><code>dl-split-motor</code> <a href="motor.html">motor.html</a> holds the drive motor: torque, speed, winding temperature and how it is cooled</td><td>one file</td><td>a subject of its own</td></tr>
+<tr id="dl-split-wiring"><td><code>dl-split-wiring</code> <a href="wiring.html">wiring.html</a> holds the harness: wire gauges, connectors and routing through the chassis</td><td>one file</td><td>a subject of its own</td></tr>
+</table>
+</main></body></html>
+"""
+FIND_FILES = {
+    "motor.html": '<p id="m">motor</p>',
+    "wiring.html": '<p id="w">wiring</p><table><tr id="dl-split-fuses"><td><code>dl-split-fuses</code> '
+                   '<a href="fuses.html">fuses.html</a> holds overcurrent protection: fuse ratings, trip curves '
+                   'and which circuit each one guards</td><td>x</td><td>y</td></tr></table>',
+    "fuses.html": '<p id="f">fuses</p>',
+}
+
+
+class Find(unittest.TestCase):
+    """lspec find (live-spec.html dl-find): the tokenizer, the
+    numpy model against IBM's, ranking with routes, and its refusals."""
+
+    def collection(self, files=FIND_FILES):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        Path(d, "main.html").write_text(FIND_MAIN)
+        for name, text in files.items():
+            Path(d, name).write_text(text)
+        return d
+
+    def find(self, d, *argv):
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            return lspec_cli("--main", "main.html", "find", *argv)
+        finally:
+            os.chdir(cwd)
+
+    @needs_numpy
+    def test_tokenizer_matches_the_reference_library(self):
+        with numpy.load(os.path.join(lspec.model_folder(), "weights.npz")) as z:
+            tok = lspec.BPETokenizer({k: z[k] for k in z.files if k.startswith("tok:")})
+        for text, ids in REFERENCE["tokens"].items():
+            self.assertEqual(tok.encode(text), ids, text)
+
+    @needs_numpy
+    def test_embeddings_match_ibms_model(self):
+        # Reference: IBM's model at float32 in onnxruntime; int8 numpy holds 0.999.
+        embedder = lspec.Embedder(numpy, lspec.model_folder())
+        texts = list(REFERENCE["embeddings"])
+        got = embedder.embed(texts)
+        for text, vec in zip(texts, got):
+            self.assertGreater(float(vec @ numpy.array(REFERENCE["embeddings"][text])), 0.999, text)
+        one = embedder.embed(texts[:1])[0]
+        self.assertTrue(numpy.allclose(one, got[0], atol=1e-5))     # batching changes nothing
+
+    @needs_numpy
+    def test_ranks_by_meaning_and_prints_the_route(self):
+        rc, out = self.find(self.collection(), "what size breaker protects each circuit", "--top", "2")
+        self.assertEqual(rc, 0, out)
+        first = out.split("  1. ")[1]
+        self.assertTrue(first.startswith("fuses.html"), out)
+        self.assertIn("route: main.html#dl-split-wiring → wiring.html#dl-split-fuses", first)
+        self.assertIn("holds: fuses.html holds overcurrent protection", first)
+        self.assertNotIn("  3. ", out)
+        self.assertIn("A hit is a direction, not a load", out)
+
+    @needs_numpy
+    def test_refuses_a_model_this_tool_does_not_pin(self):
+        pins = dict(lspec.MODEL_PINS, LICENSE="0" * 64)
+        with mock.patch.object(lspec, "MODEL_PINS", pins):
+            rc, out = self.find(self.collection(), "anything")
+        self.assertEqual(rc, 2)
+        self.assertIn("LICENSE does not match the checksum this lspec.py pins", out)
+
+    def test_without_numpy_it_names_the_uv_setup(self):
+        real = __import__
+        def no_numpy(name, *a, **k):
+            if name == "numpy":
+                raise ImportError("no numpy")
+            return real(name, *a, **k)
+        with mock.patch("builtins.__import__", no_numpy):
+            rc, out = self.find(self.collection(), "anything")
+        self.assertEqual(rc, 2)
+        self.assertIn("uv venv && uv pip install numpy", out)
+
+    def test_main_alone_has_nothing_to_find(self):
+        d = self.collection(files={})
+        Path(d, "main.html").write_text('<html><body><main><h1 id="top">Camper</h1></main></body></html>')
+        rc, out = self.find(d, "anything")              # no model, no numpy needed
+        self.assertEqual(rc, 0, out)
+        self.assertIn("main.html is the whole collection: no supporting spec to point to", out)
+
+    def test_the_model_stays_behind_on_import(self):
+        self.assertIn("models", lspec.TOOL_FILES)
 
 
 if __name__ == "__main__":

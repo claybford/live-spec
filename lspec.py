@@ -119,6 +119,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from types import SimpleNamespace
@@ -5259,6 +5260,11 @@ def cmd_start(args):
           "type: one transition")) + ", work the checklist, `git commit --no-edit`. "
           "Hand off with " + cmd(command(col, "finish")) + " on a clean tree. Content across "
           "repositories: " + cmd("python3 lspec.py import|export|graduate|copy --help") + ".")
+    if len(col.specs) > 1:
+        print(f"{title('FIND')} — when the live question clearly needs more than {rel(col.main)} holds and "
+              "it gives no direction, " + cmd(command(col, "find", "QUESTION")) + " ranks the supporting "
+              "specs by meaning; read the one it names whole before acting on it (needs numpy: "
+              + cmd("python3 lspec.py find --help") + ").")
     return rc
 
 
@@ -5613,6 +5619,343 @@ def cmd_review(args):
     return 0
 
 
+# =============================================================== find
+# lspec find (live-spec.html dl-find): when the live question needs more than
+# main holds and main gives no direction, rank the collection's split rows
+# against the question by meaning and print the route to each file. A hit is
+# a direction, not a load: the file it names is read whole before anything is
+# done with it (dl-wholeload). The model travels with the tool under models/
+# (dl-rule-locality): IBM's granite-embedding-small-english-r2, int8, run by
+# the code below. numpy is its one dependency, imported by find alone, so every
+# other verb and the hooks stay standard-library.
+
+MODEL_NAME = "granite-embedding-small-english-r2"
+MODEL_DIR = os.path.join("models", MODEL_NAME)
+MODEL_PINS = {   # sha256, CRLF read as LF, of each file the model folder carries
+    "weights.npz": "3f6cd1704d830e8700f14cec67d8ccb468b9d4f5b14780d75d9c219f682538be",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+}
+FIND_TOP = 10
+NUMPY_HINT = """\
+lspec find: needs numpy, which this Python lacks; every other verb and the hooks need only
+the standard library. The preferred setup is a virtual environment managed by uv:
+  uv venv && uv pip install numpy
+  .venv/bin/python lspec.py find "QUESTION"        (Windows: .venv\\Scripts\\python)
+Without uv: python3 -m venv .venv, then .venv/bin/pip install numpy."""
+
+# Unicode White_Space, which the tokenizer's regex \s matches.
+_WS = frozenset("\t\n\x0b\x0c\r \x85\xa0       "
+                "         　")
+_CONTRACTIONS = ("'s", "'t", "'re", "'ve", "'m", "'ll", "'d")
+
+
+def _char_kind(ch):
+    """'L' letter, 'N' number, 'S' whitespace, 'P' anything else."""
+    if ch in _WS:
+        return "S"
+    cat = unicodedata.category(ch)[0]
+    return cat if cat in "LN" else "P"
+
+
+def pretokenize(text):
+    """The GPT-2 split, scanned by hand (Python's re has no \\p{L}):
+    's|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+"""
+    out, i, n = [], 0, len(text)
+    kinds = [_char_kind(c) for c in text]
+    while i < n:
+        hit = next((c for c in _CONTRACTIONS if text.startswith(c, i)), None)
+        if hit:
+            out.append(hit); i += len(hit); continue
+        j = i + 1 if text[i] == " " and i + 1 < n and kinds[i + 1] != "S" else i
+        if kinds[j] != "S":                     # ' ?L+', ' ?N+', ' ?[^\s L N]+'
+            k, end = kinds[j], j + 1
+            while end < n and kinds[end] == k:
+                end += 1
+            out.append(text[i:end]); i = end; continue
+        end = i + 1                             # a whitespace run
+        while end < n and kinds[end] == "S":
+            end += 1
+        if end < n and end - i > 1:             # \s+(?!\S): the last one starts the next token
+            end -= 1
+        out.append(text[i:end]); i = end
+    return out
+
+
+def _strings(blob, ends):
+    """The UTF-8 strings convert.py packed as one byte blob and end offsets."""
+    raw, start, out = blob.tobytes(), 0, []
+    for end in ends.tolist():
+        out.append(raw[start:end].decode("utf-8")); start = end
+    return out
+
+
+class BPETokenizer:
+    """The model's byte-level BPE (IBM's tokenizer.json, packed into weights.npz by
+    convert.py under "tok:"): added tokens matched leftmost-longest (raw-text
+    tokens, then NFC text tokens), GPT-2 pre-tokenization, byte-to-unicode,
+    merges, [CLS] ... [SEP]. TOK maps each "tok:" name to its numpy array."""
+
+    def __init__(self, tok):
+        tokens = _strings(tok["tok:vocab"], tok["tok:vocab_ends"])
+        self.vocab = {t: i for i, t in enumerate(tokens)}
+        self.ranks = {(tokens[a], tokens[b]): r for r, (a, b) in enumerate(tok["tok:merges"].tolist())}
+        added = list(zip(_strings(tok["tok:added"], tok["tok:added_ends"]), tok["tok:added_meta"].tolist()))
+        self.passes = [{content: (tid, bool(lstrip), bool(rstrip)) for content, (tid, lstrip, rstrip, norm) in added
+                        if bool(norm) == normalized} for normalized in (False, True)]
+        bs = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
+        cs, extra = bs[:], 0
+        for b in range(256):
+            if b not in bs:                     # unprintable bytes map past U+00FF, in order
+                bs.append(b); cs.append(256 + extra); extra += 1
+        self.byte_map = dict(zip(bs, map(chr, cs)))
+        self.cls, self.sep = self.passes[0]["[CLS]"][0], self.passes[0]["[SEP]"][0]
+        self.cache = {}
+
+    @staticmethod
+    def _split_pass(text, added):
+        out, i, start, n = [], 0, 0, len(text)
+        longest = max(map(len, added))
+        while i < n:
+            match = next((text[i:i + k] for k in range(min(longest, n - i), 0, -1)
+                          if text[i:i + k] in added), None)
+            if match is None:
+                i += 1; continue
+            tid, lstrip, rstrip = added[match]
+            left, right = i, i + len(match)
+            while lstrip and left > start and text[left - 1] in _WS:
+                left -= 1
+            while rstrip and right < n and text[right] in _WS:
+                right += 1
+            if left > start:
+                out.append((text[start:left], None))
+            out.append((match, tid))
+            i = start = right
+        if start < n:
+            out.append((text[start:], None))
+        return out
+
+    def _bpe(self, word):
+        if word not in self.cache:
+            parts = list(word)
+            while len(parts) > 1:
+                rank, k = min((self.ranks.get(pair, 1 << 30), k) for k, pair in enumerate(zip(parts, parts[1:])))
+                if rank == 1 << 30:
+                    break
+                a, b = parts[k], parts[k + 1]
+                merged, k = [], 0
+                while k < len(parts):           # every occurrence of the pair, left to right
+                    if k + 1 < len(parts) and parts[k] == a and parts[k + 1] == b:
+                        merged.append(a + b); k += 2
+                    else:
+                        merged.append(parts[k]); k += 1
+                parts = merged
+            self.cache[word] = [self.vocab[p] for p in parts]
+        return self.cache[word]
+
+    def encode(self, text):
+        pieces = [(text, None)]
+        for normalized, added in zip((False, True), self.passes):
+            if normalized:   # NFC applies to the text between raw-matched tokens
+                pieces = [(unicodedata.normalize("NFC", p) if t is None else p, t) for p, t in pieces]
+            pieces = [out for p, t in pieces for out in ([(p, t)] if t is not None else self._split_pass(p, added))]
+        ids = [self.cls]
+        for piece, tid in pieces:
+            if tid is not None:
+                ids.append(tid); continue
+            for word in pretokenize(piece):
+                ids.extend(self._bpe("".join(self.byte_map[b] for b in word.encode("utf-8"))))
+        ids.append(self.sep)
+        return ids
+
+
+class Embedder:
+    """granite-embedding-small-english-r2 (ModernBERT) in numpy: embedding and
+    LayerNorm; 12 pre-norm layers of rotary attention (global every third layer,
+    a 64-token window otherwise) and a GELU-gated MLP; final LayerNorm; the
+    [CLS] vector, L2-normalized. Matches IBM's model to cosine 0.9997 (int8)."""
+    HEADS, HEAD_DIM, LAYERS, WINDOW = 12, 32, 12, 64
+    THETA = {"global": 80000.0, "local": 10000.0}
+
+    def __init__(self, np, folder):
+        self.np = np
+        f32 = np.float32
+        with np.load(os.path.join(folder, "weights.npz"), allow_pickle=False) as z:
+            raw = {k: z[k] for k in z.files}
+        self.tokenizer = BPETokenizer(raw)
+        self.w = {k: v for k, v in raw.items() if ":" not in k}
+        for k, v in raw.items():
+            if k.startswith("q8:"):
+                self.w[k[3:]] = v.astype(f32) * raw["scale:" + k[3:]]
+        self.eps, self.scale, self.root_half = f32(1e-5), f32(self.HEAD_DIM ** -0.5), f32(0.5 ** 0.5)
+        self.erf = tuple(f32(c) for c in (0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429, 0.3275911))
+
+    def _norm(self, x, w):
+        mu = x.mean(-1, keepdims=True)
+        var = ((x - mu) ** 2).mean(-1, keepdims=True)
+        return (x - mu) / self.np.sqrt(var + self.eps) * w
+
+    def _gelu(self, x):
+        """Exact (erf) GELU in float32; numpy has no erf: Abramowitz & Stegun
+        7.1.26 (|error| < 1.5e-7) on |x|, the sign restored by erf's oddness."""
+        np, (a1, a2, a3, a4, a5, p), one = self.np, self.erf, self.np.float32(1)
+        z = np.abs(x) * self.root_half
+        t = one / (one + p * z)
+        erf_abs = one - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * np.exp(-z * z)
+        return np.float32(0.5) * x * (one + np.copysign(erf_abs, x))
+
+    def _rope(self, n, theta):
+        np = self.np
+        inv = 1.0 / theta ** (np.arange(0, self.HEAD_DIM, 2, dtype=np.float32) / self.HEAD_DIM)
+        f = np.outer(np.arange(n, dtype=np.float32), inv)
+        emb = np.concatenate([f, f], -1)
+        return np.cos(emb)[:, None, :], np.sin(emb)[:, None, :]
+
+    def _rotate(self, x, cos, sin):
+        half = self.HEAD_DIM // 2
+        return x * cos + self.np.concatenate([-x[..., half:], x[..., :half]], -1) * sin
+
+    def embed(self, texts):
+        """One unit vector per text. Every step but attention works token by
+        token, so all texts' tokens run as one matrix; attention runs per text."""
+        np, w, H, D = self.np, self.w, self.HEADS, self.HEAD_DIM
+        batch = [self.tokenizer.encode(t) for t in texts]
+        lengths = [len(ids) for ids in batch]
+        starts = np.cumsum([0] + lengths)
+        x = self._norm(w["embed"][np.concatenate([np.asarray(ids) for ids in batch])], w["embed_norm"])
+        tables = {k: self._rope(max(lengths), t) for k, t in self.THETA.items()}
+        pos = np.arange(max(lengths))
+        far = np.abs(pos[:, None] - pos[None, :]) > self.WINDOW
+        for l in range(self.LAYERS):
+            kind = "global" if l % 3 == 0 else "local"
+            h = x if l == 0 else self._norm(x, w[f"{l}.attn_norm"])
+            q, k, v = (h @ w[f"{l}.{p}"] for p in "qkv")
+            cos, sin = tables[kind]
+            out = np.empty_like(q)
+            for s, n in zip(starts, lengths):
+                qi, ki, vi = (a[s:s + n].reshape(n, H, D) for a in (q, k, v))
+                qi, ki = self._rotate(qi, cos[:n], sin[:n]), self._rotate(ki, cos[:n], sin[:n])
+                scores = (qi.transpose(1, 0, 2) @ ki.transpose(1, 2, 0)) * self.scale
+                if kind == "local":
+                    scores = np.where(far[:n, :n], -np.inf, scores)
+                scores = np.exp(scores - scores.max(-1, keepdims=True))
+                scores /= scores.sum(-1, keepdims=True)
+                out[s:s + n] = (scores @ vi.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(n, H * D)
+            x = x + out @ w[f"{l}.o"]
+            h = self._norm(x, w[f"{l}.mlp_norm"])
+            x = x + (self._gelu(h @ w[f"{l}.gate"]) * (h @ w[f"{l}.up"])) @ w[f"{l}.down"]
+        cls = self._norm(x, w["final_norm"])[starts[:-1]]
+        return cls / np.linalg.norm(cls, axis=1, keepdims=True)
+
+
+def model_folder():
+    """The model beside this lspec.py: the tool and its model share a revision."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), MODEL_DIR)
+
+
+def model_problems(folder):
+    """Pinned files missing or changed; [] when the folder is this revision's."""
+    out = []
+    for name, pin in MODEL_PINS.items():
+        path = os.path.join(folder, name)
+        try:
+            with open(path, "rb") as f:   # a CRLF checkout of the text files is the same file
+                digest = hashlib.sha256(f.read().replace(b"\r\n", b"\n")).hexdigest()
+        except OSError:
+            out.append(f"{name} is missing"); continue
+        if digest != pin:
+            out.append(f"{name} does not match the checksum this lspec.py pins")
+    return out
+
+
+def find_candidates(col):
+    """Every supporting spec with its route from main and what its split row
+    says it holds: (path, [(parent, rid), ...] main first, holds, row text)."""
+    out = []
+    for child, (parent, rid) in col.parents.items():
+        if parent is None:
+            continue
+        route, p, r = [], parent, rid
+        while p is not None:
+            route.insert(0, (p, r)); p, r = col.parents[p]
+        row = col.specs[parent].element(rid)
+        cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S)
+        holds = re.sub(r"^dl-split-\S+\s*", "", norm(cells[0]) if cells else "")
+        out.append((child, route, holds, norm(row)))
+    return out
+
+
+def cached_vectors(np, embedder, texts):
+    """Row vectors, memoized under .git/lspec by model and text (dl-state);
+    outside git, or on any cache trouble, computed afresh."""
+    key = lambda t: hashlib.sha256((MODEL_PINS["weights.npz"] + "\0" + t).encode()).hexdigest()[:32]
+    path, memo = None, {}
+    if repo_root() is not None:
+        path = state_path("find-vectors.npz")
+        try:
+            with np.load(path, allow_pickle=False) as z:
+                memo = {k: z[k] for k in z.files}
+        except (OSError, ValueError):
+            memo = {}
+    missing = [t for t in texts if key(t) not in memo]
+    if missing:
+        memo.update(zip(map(key, missing), embedder.embed(missing)))
+    if path and missing:
+        keep = {key(t): memo[key(t)] for t in texts}
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".npz")
+            with os.fdopen(fd, "wb") as f:
+                np.savez(f, **keep)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+    return np.stack([memo[key(t)] for t in texts])
+
+
+def copy_tool(root, dest):
+    """The tool a new repository carries: this lspec.py, ROOT's hooks, and the
+    model beside this lspec.py, so tool and model share one revision."""
+    shutil.copy(__file__, os.path.join(dest, "lspec.py"))
+    hooks = os.path.join(root, "hooks")
+    if os.path.isdir(hooks):
+        shutil.copytree(hooks, os.path.join(dest, "hooks"))
+    if os.path.isdir(model_folder()):
+        shutil.copytree(model_folder(), os.path.join(dest, MODEL_DIR))
+
+
+def cmd_find(args):
+    col = load(args)
+    print(stamp()[0])
+    candidates = find_candidates(col)
+    if not candidates:
+        print(f"{title('FIND')} — {rel(col.main)} is the whole collection: no supporting spec to point to")
+        return 0
+    try:
+        import numpy as np
+    except ImportError:
+        print(NUMPY_HINT, file=sys.stderr)
+        return 2
+    folder = model_folder()
+    problems = model_problems(folder)
+    if problems:
+        print(f"lspec find: the model in {folder} is not the one this lspec.py pins: " + "; ".join(problems)
+              + ". Copy models/ from the live-spec revision the footer names, beside lspec.py", file=sys.stderr)
+        return 2
+    embedder = Embedder(np, folder)
+    rows = cached_vectors(np, embedder, [c[3] for c in candidates])
+    scores = rows @ embedder.embed([args.question])[0]
+    order = np.argsort(-scores)[:args.top]
+    print(f"{title('FIND')} — {len(candidates)} supporting spec(s) ranked by meaning against: {args.question}")
+    for n, i in enumerate(order, 1):
+        path, route, holds, _ = candidates[i]
+        hops = " → ".join(f"{rel(p)}#{r}" for p, r in route)
+        print(f"  {n}. {rel(path)}  ({scores[i]:.2f})\n     route: {hops}\n     holds: "
+              + (holds if len(holds) <= 300 else holds[:297].rstrip() + "..."))
+    print("A hit is a direction, not a load: read the file whole before acting on it "
+          "(live-spec.html#dl-find).")
+    return 0
+
+
 # =============================================================== imports
 # lspec import: copy-based transport between repositories (portability.html
 # dl-transport). The unit — one entry file, what its split rows reach, and
@@ -5622,7 +5965,7 @@ def cmd_review(args):
 # declaration (<code data-import>); the fetched blob ids go to the manifest
 # (lspec/imports.json) the gate's mirror item checks. Nothing here commits.
 
-TOOL_FILES = ("lspec.py", "hooks")   # upstream's tool copy stays behind (dl-selection)
+TOOL_FILES = ("lspec.py", "hooks", "models")   # upstream's tool copy stays behind (dl-selection)
 
 
 class ImportRefused(Exception):
@@ -5753,7 +6096,7 @@ def select_unit(tmp, sha, entry):
             if tgt and tgt in files and tgt not in specs:
                 linked.add(tgt)
     linked -= set(specs)
-    tool = {q for q in specs + sorted(linked) if q in TOOL_FILES or q.startswith("hooks/")}
+    tool = {q for q in specs + sorted(linked) if q in TOOL_FILES or q.startswith(("hooks/", "models/"))}
     if tool:
         notes.append("left behind, upstream's tool copy: " + ", ".join(sorted(tool)))
     specs = [q for q in specs if q not in tool]
@@ -6373,10 +6716,7 @@ def graduate_prepare(col, args):
     target = os.path.join(dest, os.path.basename(path))
     with open(target, "w", encoding="utf-8") as fh:
         fh.write(text)
-    shutil.copy(__file__, os.path.join(dest, "lspec.py"))
-    hooks = os.path.join(root, "hooks")
-    if os.path.isdir(hooks):
-        shutil.copytree(hooks, os.path.join(dest, "hooks"))
+    copy_tool(root, dest)
     with open(os.path.join(dest, "AGENTS.md"), "w", encoding="utf-8") as fh:
         fh.write("READ THIS FIRST, BEFORE ANYTHING ELSE, DO NOT SKIP:\n"
                  f"run `python3 lspec.py start {os.path.basename(path)}` and follow its output. Read every spec "
@@ -6387,7 +6727,7 @@ def graduate_prepare(col, args):
     sha = commit_sha(at, root)
     source = args.remote or posix(dest)
     print(f"graduated {rel(path)} as committed at {sha[:12]} into {args.to}/{os.path.basename(path)}, "
-          f"converted to a main; lspec.py, hooks/ and AGENTS.md copied; staged, nothing committed")
+          f"converted to a main; lspec.py, hooks/, models/ and AGENTS.md copied; staged, nothing committed")
     for n in notes:
         print(f"  {status('note')}: {n}")
     print("next, in the new repository: install the hooks (lspec hook --help), fill the status line's "
@@ -6754,17 +7094,15 @@ def copy_main(col, args):
         for href in resource_refs(spec.raw):
             tgt, _ = resolve(p, href)
             if tgt and tgt not in col.specs and os.path.isfile(tgt) and tgt.startswith(root + os.sep) \
-                    and os.path.basename(tgt) not in TOOL_FILES and not tgt.startswith(os.path.join(root, "hooks") + os.sep):
+                    and os.path.basename(tgt) not in TOOL_FILES \
+                    and not tgt.startswith(tuple(os.path.join(root, d) + os.sep for d in ("hooks", "models"))):
                 linked.add(tgt)
     for q in sorted(linked):
         relq = posix(os.path.relpath(q, os.path.dirname(col.main)))
         target = os.path.join(dest, *relq.split("/"))
         os.makedirs(os.path.dirname(target), exist_ok=True)
         shutil.copy(q, target)
-    shutil.copy(__file__, os.path.join(dest, "lspec.py"))
-    hooks = os.path.join(root, "hooks")
-    if os.path.isdir(hooks):
-        shutil.copytree(hooks, os.path.join(dest, "hooks"))
+    copy_tool(root, dest)
     main_name = os.path.basename(col.main)
     with open(os.path.join(dest, "AGENTS.md"), "w", encoding="utf-8") as fh:
         fh.write("READ THIS FIRST, BEFORE ANYTHING ELSE, DO NOT SKIP:\n"
@@ -6913,6 +7251,28 @@ def imports_report(col):
 # is no reference document to go stale beside them.
 
 HELP = {
+"find": """\
+Use it when answering the live question clearly needs more than main holds and
+main gives no direction: no split row or link says where to go. It ranks every
+supporting spec in the collection by how well its split row's account of what
+the file holds matches QUESTION, and prints, best first, the file, its route
+of split rows from main, and that account. Phrase the question in the spec's
+own terms; a vague question ranks vaguely.
+
+A hit is a direction, not a load. Read the file it names whole before acting
+on it, as any file that governs the work (live-spec.html#dl-wholeload); a wrong
+direction costs one read, a skipped read costs a decision made on false state.
+When main does point somewhere, follow it: find does not replace the tree.
+
+The model is IBM's granite-embedding-small-english-r2 (Apache-2.0), int8, in
+models/ beside lspec.py; this lspec.py pins its checksums and the two travel
+together. find needs numpy; every other verb and the hooks need only the
+standard library. Preferred setup, a virtual environment managed by uv:
+  uv venv && uv pip install numpy
+  .venv/bin/python lspec.py find "QUESTION"        (Windows: .venv\\Scripts\\python)
+Row vectors are memoized under .git/lspec (transaction state); the first run
+over a large collection takes a few seconds.
+""",
 "lspec": """\
 A session: start MAIN, read what it lists whole, edit and stage, reconcile
 --subject "type: one transition", answer the checklist (--next / --tick), commit
@@ -7086,8 +7446,8 @@ trailers, keeps other trailers you pass, and refuses --amend, -c and -C;
 commit-msg refuses a message whose subject or trailers differ from the receipt;
 post-commit lists files still uncommitted and prints nothing when there are
 none. Sources must keep executable modes. Upgrading an instance is one move
-from one live-spec commit, rules and tool together: copy that commit's lspec.py
-and hooks/ and install them; bring every paragraph the instance took from the
+from one live-spec commit, rules and tool together: copy that commit's lspec.py,
+hooks/ and models/ and install the hooks; bring every paragraph the instance took from the
 seed (status-line instruction, conventions, decisions, session, dependencies,
 tooling, open items, record) to that commit's seed text, keeping the
 instance's own [ADAPT] answers; set the footer line to that commit with the
@@ -7121,7 +7481,7 @@ import (the methodology's portability.html). copy --to DIR seeds a new repositor
 from this collection's owned files as committed at HEAD: every confirmed(...)
 token becomes provisional(inherited from MAIN @ COMMIT; ...), every data-sealed
 is lifted (seals are reassessed at the seed), the status line is reset to
-[ADAPT] slots to re-derive whole, lspec.py, hooks/ and AGENTS.md ride along;
+[ADAPT] slots to re-derive whole, lspec.py, hooks/, models/ and AGENTS.md ride along;
 all staged, nothing committed. The first commit is seed: and its gate asks one
 judgment per inherited decision row, watch entry, open item, diagnostic row,
 fence and directive, against the staged file:
@@ -7145,7 +7505,7 @@ is recorded as the source when given, else DIR's path). FILE as committed in
 this parent at COMMIT (default HEAD) is converted to a main — the parent's
 conventions, session and tooling paragraphs inserted after its heading, a
 status line of [ADAPT] slots for the seeding session to fill, the parent's
-footer carried — with lspec.py, hooks/ and AGENTS.md beside it, all staged.
+footer carried — with lspec.py, hooks/, models/ and AGENTS.md beside it, all staged.
 Its first commit is a seed: (fresh history: the parent's commits name another
 main's gate), whose body names the source: graduated from <repo> @ <commit>.
 
@@ -7163,8 +7523,8 @@ Adopts another repository's subject-shaped content (the methodology's
 portability.html). SOURCE is a git URL or local path, ENTRY the unit's entry file in
 it; --at REV picks a commit, tag or branch (default: upstream HEAD). The unit
 is ENTRY, everything its split rows reach (upstream's own imports included) and
-every other upstream file those specs link; upstream's lspec.py and hooks/ stay
-behind. It is listed, then written under imports/NAME/ with upstream's layout,
+every other upstream file those specs link; upstream's lspec.py, hooks/ and
+models/ stay behind. It is listed, then written under imports/NAME/ with upstream's layout,
 and a split row dl-split-NAME is added to MAIN's decision log carrying the
 settings in one declaration: <code data-import>SOURCE @ SHA EDITS VERSION</code>.
 Both settings are explicit:
@@ -7298,6 +7658,11 @@ def main(argv):
     ex = sub.add_parser("export", help="a one-off, spec-shaped export of named claims and rows",
                         formatter_class=raw, epilog=HELP["export"])
     ex.add_argument("out", metavar="OUT.html"); ex.add_argument("ids", nargs="*", metavar="ID"); add_main(ex)
+    fd = sub.add_parser("find", help="which supporting spec answers a question main gives no direction for",
+                        formatter_class=raw, epilog=HELP["find"])
+    fd.add_argument("question", metavar="QUESTION", help="the live question, quoted, in the spec's own terms")
+    fd.add_argument("--top", type=int, default=FIND_TOP, metavar="N",
+                    help=f"how many to list (default {FIND_TOP})"); add_main(fd)
     cp = sub.add_parser("copy", help="start a new project from a copy of this main",
                         formatter_class=raw, epilog=HELP["copy"])
     cp.add_argument("--to", metavar="DIR", help="the new repository's directory"); add_main(cp)
@@ -7320,8 +7685,8 @@ def main(argv):
               "check": cmd_check, "show": cmd_show, "neighbors": cmd_neighbors,
               "impact": cmd_impact, "mv": cmd_mv, "review": cmd_review,
               "hook": cmd_hook, "import": cmd_import, "graduate": cmd_graduate,
-              "export": cmd_export, "copy": cmd_copy}[args.verb](args)
-        if args.verb in ("check", "show", "neighbors", "impact") and not (
+              "export": cmd_export, "copy": cmd_copy, "find": cmd_find}[args.verb](args)
+        if args.verb in ("check", "show", "neighbors", "impact", "find") and not (
                 getattr(args, "clean", False) or getattr(args, "staged", False)):
             unfinished_notice()
         sys.stdout.flush()   # surface EPIPE here, not at interpreter shutdown

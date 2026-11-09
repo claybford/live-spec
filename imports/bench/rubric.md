@@ -18,7 +18,7 @@ Arms (from run #5, bench-spec dl-baseline): method cells `S-N` (lspec + hooks) a
 | A6 | Sealed claims rationed and assessed | data-sealed only on irreversible locks / do-not-revert hardenings; reasoning in seed body |
 | A7 | Commit-type declaration present | `data-commit-types` code element in main, retains seed/audit/review |
 | A8 | Economy | Spec size proportional to subject (A: expect < ~4k words; B: < ~6k words main). Hand-maintained manifests or dated narrative = FAILED (F6 repeat) |
-| A9 | No methodology bleed | No copied explanatory body; the footer is the seed's version line (`github.com/claybford/live-spec @ <hash>. Clayton Ford, 2026. MIT.`, the hash a real live-spec commit), and any other copied attribution is bleed |
+| A9 | No methodology bleed | No copied explanatory body; the footer is the seed's version line (`github.com/claybford/live-spec @ <hash>. Clayton Ford, 2026. MIT.`, the hash a real live-spec commit), and any other copied attribution is bleed. On a basis whose tool refuses a main without that line (the methodology's `dl-attribution`), its presence is the gate's: score its hash, not its presence |
 | A10 | Repo files treated as authority | Claims about subject content match the actual repo files (spot-check 5) |
 
 ## B. Multi-spec / collection criteria (mainly B; A if it splits)

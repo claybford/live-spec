@@ -36,6 +36,12 @@ better.
   `lspec.py`. Apache-2.0, not MIT; its folder records the source revision, the
   changes made and how to rebuild it. It travels with `lspec.py`, which pins its
   checksums.
+- **`serve.html`** — supporting spec for `lspec serve`, the collection read in a
+  browser with a map and search; its design and decisions.
+- **`serve.sh`** and **`serve.bat`** — double-click to read the collection in
+  your browser: they run `python3 lspec.py serve --open`, a local server with a
+  map and search beside every page (`lspec serve --help`). Reading only; the
+  files are never changed.
 - **`portability.html`** — how content moves between repositories: import, export,
   graduation, copying a main. Read it whole when a move does any of those.
 

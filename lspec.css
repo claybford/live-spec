@@ -1,0 +1,126 @@
+/* lspec.css — classless stylesheet for living specifications.
+   Keys only on plain HTML and the markup contract (live-spec.html#substrate):
+   row-id prefixes, data-sealed, rel="depends-on"/"external", data-literal,
+   data-import, data-commit-types, :target. A spec needs no classes for it.
+   Light and dark follow the system; <html data-theme="light|dark"> overrides.
+   MIT. https://github.com/claybford/live-spec */
+
+:root{
+  --bg:#fcfcfa; --surface:#ffffff; --ink:#1c2321; --text:#2b3330; --muted:#5e6a65;
+  --line:#dce1de; --faint:#f1f4f2; --code-bg:#eef1ef;
+  --link:#1f5fa8; --link-hover:#163f70;
+  --main:#1c6b58; --main-soft:#e2f1ec;
+  --watch:#b8430f; --watch-soft:#fbede5;
+  --diag:#a8285a; --diag-soft:#f8e8ef;
+  --dep:#6345bf; --dep-soft:#eeeafa;
+  --imp:#9a5b00; --imp-soft:#f7eedf;
+  --target:#fff4c2;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#121614; --surface:#181e1b; --ink:#e6ece9; --text:#cfd8d4; --muted:#93a19b;
+  --line:#2e3834; --faint:#1c2320; --code-bg:#222a27;
+  --link:#7db3f0; --link-hover:#a9cdf6;
+  --main:#55c2a5; --main-soft:#173029;
+  --watch:#f08a55; --watch-soft:#33211a;
+  --diag:#eb7aa5; --diag-soft:#32202a;
+  --dep:#a890f2; --dep-soft:#252040;
+  --imp:#e3a848; --imp-soft:#30260f;
+  --target:#2c2a1a; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#121614; --surface:#181e1b; --ink:#e6ece9; --text:#cfd8d4; --muted:#93a19b;
+  --line:#2e3834; --faint:#1c2320; --code-bg:#222a27;
+  --link:#7db3f0; --link-hover:#a9cdf6;
+  --main:#55c2a5; --main-soft:#173029;
+  --watch:#f08a55; --watch-soft:#33211a;
+  --diag:#eb7aa5; --diag-soft:#32202a;
+  --dep:#a890f2; --dep-soft:#252040;
+  --imp:#e3a848; --imp-soft:#30260f;
+  --target:#2c2a1a; color-scheme:dark}
+
+/* ---------- base */
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scroll-padding-top:24px}
+body{margin:0 auto;max-width:860px;padding:32px 24px 80px;background:var(--bg);color:var(--text);
+  font:16px/1.62 var(--sans);text-rendering:optimizeLegibility}
+main{display:block}
+h1,h2,h3,h4,h5,h6{color:var(--ink);line-height:1.25;text-wrap:balance;margin:2em 0 .6em}
+h1{font-size:2.1rem;letter-spacing:-.015em;margin-top:.4em}
+h2{font-size:1.45rem;padding-top:.4em;border-top:1px solid var(--line)}
+h3{font-size:1.15rem}
+h4{font-size:1rem}
+p,ul,ol,table,pre,figure{margin:0 0 1em}
+ul,ol{padding-left:1.4em}
+li+li{margin-top:.25em}
+strong,b{color:var(--ink);font-weight:650}
+hr{border:0;border-top:1px solid var(--line);margin:2.4em 0}
+a{color:var(--link);text-decoration:underline;text-decoration-color:color-mix(in srgb,var(--link) 35%,transparent);text-underline-offset:2px}
+a:hover{color:var(--link-hover);text-decoration-color:currentColor}
+a:focus-visible,button:focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:2px}
+code,kbd,samp{font:.86em var(--mono);background:var(--code-bg);padding:.1em .35em;border-radius:4px;color:var(--ink)}
+pre{font:13px/1.5 var(--mono);background:var(--faint);border:1px solid var(--line);border-radius:8px;padding:14px 16px;overflow-x:auto;white-space:pre-wrap}
+pre code{background:none;padding:0}
+img{max-width:100%}
+.meta{color:var(--muted);font-size:.85em;font-weight:400}
+h4 .meta{margin-left:.4em}
+
+/* ---------- tables */
+table{width:100%;border-collapse:collapse;font-size:14.5px;line-height:1.5}
+th,td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;background:var(--faint);border-bottom:1px solid var(--line)}
+tr:hover>td{background:color-mix(in srgb,var(--faint) 60%,transparent)}
+
+/* ---------- the markup contract */
+/* bootloader, directive, conventions */
+#status{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--main);border-radius:8px;padding:14px 18px;font-size:15px}
+#status strong:first-child{color:var(--main)}
+#directive{border-left:4px solid var(--ink);padding:4px 0 4px 16px;color:var(--ink);font-size:1.05em}
+#conventions{font-size:15px;color:var(--text)}
+nav#toc{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 18px 4px}
+nav#toc h2{border:0;padding:0;margin:.6em 0 .3em;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+nav#toc ul{margin-bottom:.6em}
+
+/* row ids shown as labels: dl-, watch-, diag-, open-, kp-, v-, run- */
+tr[id]>td:first-child>code:first-child{display:inline-block;font-weight:600;font-size:12px;margin:0 .3em .25em 0;padding:.12em .45em;
+  background:var(--faint);border:1px solid var(--line)}
+tr[id^="dl-split-"]>td:first-child>code:first-child{background:var(--main-soft);border-color:var(--main);color:var(--main)}
+tr[id^="watch-"]>td:first-child>code:first-child{background:var(--watch-soft);border-color:var(--watch);color:var(--watch)}
+tr[id^="diag-"]>td:first-child>code:first-child{background:var(--diag-soft);border-color:var(--diag);color:var(--diag)}
+tr[id^="open"]>td:first-child>code:first-child{background:var(--watch-soft);border-color:var(--watch);color:var(--watch)}
+tr[id^="watch-"]>td:first-child{box-shadow:inset 3px 0 0 var(--watch)}
+tr[id^="diag-"]>td:first-child{box-shadow:inset 3px 0 0 var(--diag)}
+tr[id^="dl-split-"]>td:first-child{box-shadow:inset 3px 0 0 var(--main)}
+tr[id^="dl-"]>td:first-child,tr[id^="watch-"]>td:first-child,tr[id^="diag-"]>td:first-child{width:38%}
+tr[id^="kp-"]>td:first-child,tr[id^="v-"]>td:first-child{width:24%;color:var(--ink)}
+
+/* sealed claims: a decision change to edit */
+[data-sealed]{position:relative}
+section[data-sealed]{border-left:2px solid var(--ink);padding-left:16px;margin:0 0 1.2em}
+section[data-sealed]>h4{margin-top:1.4em}
+section[data-sealed]>h4::after,tr[data-sealed]>td:first-child>code:first-child::after{
+  content:"sealed";font:600 10px var(--sans);letter-spacing:.06em;text-transform:uppercase;
+  margin-left:.6em;padding:.1em .45em;border-radius:3px;background:var(--ink);color:var(--bg);vertical-align:.15em}
+tr[data-sealed]>td:first-child{box-shadow:inset 3px 0 0 var(--ink)}
+
+/* typed edges */
+a[rel~="depends-on"]{color:var(--dep);text-decoration-style:dotted;text-decoration-color:var(--dep);text-decoration-thickness:1.5px}
+a[rel~="depends-on"]::after{content:"\2191";font-size:.75em;vertical-align:.35em;margin-left:.1em}
+a[rel~="resolves"]{color:var(--dep);text-decoration-style:dashed}
+a[rel~="external"]::after{content:"\2197";font-size:.75em;vertical-align:.3em;margin-left:.1em;color:var(--muted)}
+
+/* declarations */
+code[data-literal]{color:var(--muted);background:transparent;border:1px dashed var(--line)}
+code[data-import]{display:inline-block;margin-top:.3em;color:var(--imp);background:var(--imp-soft);border:1px solid var(--imp);overflow-wrap:anywhere}
+code[data-commit-types]{color:var(--main);background:var(--main-soft)}
+pre[data-specimen]{border-style:dashed;max-height:32em;overflow:auto}
+pre[data-specimen]::before{content:"specimen: " attr(data-specimen);display:block;font:600 10.5px var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+
+/* where a link lands */
+:target{background:var(--target);border-radius:4px;scroll-margin-top:24px;transition:background 1.2s}
+tr:target>td{background:var(--target)}
+section:target{padding-top:4px;padding-bottom:4px}
+
+@media (prefers-reduced-motion:reduce){:target{transition:none}}
+@media print{:root{--bg:#fff;--surface:#fff}body{max-width:none;padding:0}a[rel~="external"]::after{content:""}}

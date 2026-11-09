@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -919,6 +920,117 @@ class G(unittest.TestCase):
         rc, out = cli(d, "show", "--graph", "main.html")
         self.assertIn("motor.html  <- main.html (dl-split-motor)", out)
         self.assertIn("main.html#claim -> motor.html#power", out)
+
+
+class ServeMap(unittest.TestCase):
+    """lspec serve: the map is the Collection's verdicts as data; the page on
+    disk is never changed; dotfiles and paths outside the instance are refused."""
+
+    def setUp(self):
+        self.d = os.path.realpath(tempfile.mkdtemp())
+        Path(self.d, "main.html").write_text(MAIN.format(extra=""))
+        Path(self.d, "motor.html").write_text(MOTOR.format(extra=""))
+        Path(self.d, "stray.html").write_text("<html><body><main><p id=\"x\">x</p></main></body></html>")
+        self.cwd = os.getcwd(); os.chdir(self.d)
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+
+    def test_map_carries_the_collection(self):
+        col = lspec.Collection("main.html")
+        data = lspec.serve_map(col, os.path.join(self.d, "motor.html"), self.d)
+        tree = {n["path"]: (n["parent"], n["row"], n["role"]) for n in data["nodes"]}
+        self.assertEqual(tree["main.html"], (None, None, "main"))
+        self.assertEqual(tree["motor.html"], ("/main.html", "dl-split-motor", "supporting"))
+        self.assertEqual(data["disconnected"], ["/stray.html"])
+        self.assertEqual([(e["fromFile"], e["toFile"]) for e in data["deps"]], [("/main.html", "/motor.html")])
+        self.assertEqual(data["deps"][0]["from"], "claim")
+        kinds = {c["id"]: c["k"] for s in lspec.serve_map(col, os.path.join(self.d, "main.html"), self.d)["sections"]
+                 for c in s["claims"]}
+        self.assertEqual(kinds["dl-split-motor"], "split")
+        self.assertEqual(kinds["status"], "top")
+        sections = lspec.serve_map(col, os.path.join(self.d, "main.html"), self.d)["sections"]
+        self.assertEqual(sections[0]["role"], "header")
+        self.assertEqual([s["role"] for s in sections if s["counts"].get("dl-")], ["decisions"])
+        row = next(c for s in sections for c in s["claims"] if c["id"] == "dl-split-motor")
+        self.assertEqual([t for _, t in row["cells"]], ["motor.html holds the drive", "keep in main", "own clock."])
+
+    def test_page_on_disk_unchanged_and_map_added(self):
+        raw = Path(self.d, "main.html").read_text()
+        page = lspec.serve_page(raw, {"nodes": []}, self.d)
+        self.assertIn('id="lsm-data"', page)
+        self.assertIn('"nodes": []', page)
+        self.assertEqual(Path(self.d, "main.html").read_text(), raw)
+        self.assertNotIn("__LSPEC_MAP__", page)
+
+    def test_instance_stylesheet_replaces_the_link(self):
+        Path(self.d, "lspec.css").write_text("body{}")
+        raw = '<html><head><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css"></head><body></body></html>'
+        page = lspec.serve_page(raw, {}, self.d)
+        self.assertIn(lspec.SERVE_CSS, page)
+        self.assertNotIn("water.css", page)
+
+    def test_exact_search_spans_the_collection(self):
+        col = lspec.Collection("main.html")
+        results, total = lspec.search_exact(col, "120 KW", self.d)
+        self.assertEqual(total, 1)
+        self.assertEqual([(r["file"], r["where"], r["hit"]) for r in results], [("motor.html", "power", "120 kW")])
+        self.assertEqual(results[0]["url"], "/motor.html#power")
+        results, _ = lspec.search_exact(col, "motor power", self.d)
+        self.assertEqual([r["where"] for r in results], ["claim"])        # main is searched too
+        self.assertEqual(lspec.search_exact(col, "   ", self.d), ([], 0))
+
+    def test_owned_memo_does_not_prune_the_borrowed_one(self):
+        np = lspec.import_numpy()
+        if np is None:
+            self.skipTest("needs numpy")
+        sh("git", "init", "-q", cwd=self.d)
+        fake = lambda: type("E", (), {"embed": lambda self, ts: np.ones((len(ts), 384), np.float32)})()
+        lspec.cached_vectors(np, fake, ["a", "b"])                                    # find's memo
+        _, made = lspec.cached_vectors(np, fake, ["b", "c"], name="serve-vectors.npz", borrow=("find-vectors.npz",))
+        self.assertEqual(made, 1)                                                     # only "c" is new
+        with np.load(lspec.state_path("find-vectors.npz")) as z:
+            self.assertEqual(len(z.files), 2)                                         # find's memo untouched
+
+    def test_main_from_agents_md(self):
+        self.assertIsNone(lspec.agents_main(self.d))
+        Path(self.d, "AGENTS.md").write_text("READ THIS FIRST:\nrun `python3 lspec.py start main.html` and follow its output.\n")
+        self.assertEqual(lspec.agents_main(self.d), "main.html")
+        Path(self.d, "AGENTS.md").write_text("run `python3 lspec.py start gone.html`\n")
+        self.assertIsNone(lspec.agents_main(self.d))                     # a named file that is absent
+
+    def test_version_and_tracking_record(self):
+        self.assertEqual(lspec.carried_version("<p>x</p>\n<!-- github.com/claybford/live-spec @ bded533. MIT. -->\n"), "bded533")
+        self.assertEqual(lspec.carried_version("<!-- github.com/claybford/live-spec. MIT. -->"), "source")
+        self.assertIsNone(lspec.carried_version("<p>no footer</p>"))
+        sh("git", "init", "-q", cwd=self.d)
+        rec = {"name": "bench", "rev": "a" * 40}
+        self.assertIsNone(lspec.serve_tracking(rec))
+        lspec.write_state("tracking.json", {"bench": {"checked": int(time.time()) - 90, "rev": "a" * 40, "behind": 4, "error": None}})
+        t = lspec.serve_tracking(rec)
+        self.assertEqual((t["behind"], t["ago"] >= 90), (4, True))
+        self.assertIsNone(lspec.serve_tracking({"name": "bench", "rev": "b" * 40}))   # checked before an update
+
+    def test_version_relation_counts_commits(self):
+        sh("git", "init", "-q", cwd=self.d)
+        revs = []
+        for n in range(3):
+            Path(self.d, "n.txt").write_text(str(n))
+            sh("git", "add", "n.txt", cwd=self.d)
+            sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", f"c{n}", "--no-verify", cwd=self.d)
+            revs.append(sh("git", "rev-parse", "HEAD", cwd=self.d).strip())
+        self.assertEqual(lspec.version_relation(revs[0][:7], "source"), {"rel": "older", "n": 2})
+        self.assertEqual(lspec.version_relation(revs[2][:7], revs[0][:7]), {"rel": "newer", "n": 2})
+        self.assertEqual(lspec.version_relation(revs[1][:7], revs[1][:7]), {"rel": "same", "n": 0})
+        self.assertEqual(lspec.version_relation("abcdef1", "source")["rel"], "unknown")
+        self.assertIsNone(lspec.version_relation(None, "source"))
+
+    def test_refuses_dotfiles_and_escapes(self):
+        os.makedirs(os.path.join(self.d, ".git"))
+        for path in ("/.git/config", "/.gitattributes", "/sub/.env", "/%2e%2e/etc/passwd", "/../etc/passwd"):
+            self.assertTrue(lspec.serve_refused(path, self.d), path)
+        for path in ("/main.html", "/motor.html#power", "/imports/bench/bench-spec.html"):
+            self.assertFalse(lspec.serve_refused(path, self.d), path)
 
 
 class Normalization(unittest.TestCase):

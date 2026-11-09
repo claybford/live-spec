@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<!-- Serve: the collection read in a browser, with a map and search beside every page. A supporting spec of live-spec.html by its split row (dl-split-serve). -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Living Specification - serve</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css">
+</head>
+<body>
+
+<main>
+
+<h1 id="top">The Living Specification &mdash; Serve</h1>
+<p id="about">A <a href="live-spec.html#v-supporting">supporting spec</a> of <a href="live-spec.html#top">live-spec.html</a>, which is the entry point and holds the state; this file exists by its split row there (<a href="live-spec.html#dl-split-serve">dl-split-serve</a>). It holds the design of <code>lspec serve</code>: the collection read by people in a browser, with a map and search beside every page. Read it whole when a change touches <code>serve</code>, its sidebar or its launchers; a session maintaining main does not load it. Nothing here is part of operating a spec: seeing the map or a search result is not a read (<a href="live-spec.html#dl-wholeload">dl-wholeload</a>). Decisions establish the required behavior stated here; the tool establishes actual behavior, and where they differ the gap is an open item here (<a href="live-spec.html#p7">P7</a>).</p>
+
+<hr>
+<h2 id="serving">What is served</h2>
+<p id="serve-files"><code>lspec serve</code> answers on 127.0.0.1 only and builds each page as it is requested: the file from disk, unchanged, with the sidebar added to the response (<a href="#dl-serve">dl-serve</a>). Every verdict in the sidebar comes from the same <code>Collection</code> the other verbs use, rebuilt per request, so an edit shows on reload and nothing is stored (<a href="live-spec.html#dl-graphderived">dl-graphderived</a>). Dotfiles and dot-directories (<code>.git</code> and kin) and any path outside the instance are refused.</p>
+<p id="serve-style">When the instance carries <code>lspec.css</code>, it is served in place of the page's stylesheet, so a reader is offline and themed; a light, dark or system choice is remembered in the browser and applied before the page first paints (<a href="live-spec.html#dl-substrate">dl-substrate</a>).</p>
+<p id="serve-launch"><code>serve.sh</code> and <code>serve.bat</code>, beside <code>lspec.py</code>, run <code>lspec serve --open</code> on a double-click, preferring the repository's <code>.venv</code>. Without a named main, <code>serve</code> takes the one <code>AGENTS.md</code> names; a taken port falls back to a free one.</p>
+
+<hr>
+<h2 id="sidebar">The sidebar</h2>
+<p id="map-header">The header names the collection by its main, with its file count, and the file being read, beside the theme choice; search follows. A drawer at the sidebar&rsquo;s foot, folded until opened, holds the links outside the collection and the live-spec revision main&rsquo;s footer records (&ldquo;source&rdquo; in live-spec itself) and the basis commit being served.</p>
+<p id="map-tree">The collection tree shows main, each file its split rows reach and the row that reaches it, then orphans, files outside the collection and collection problems. An import shows one summary line: its settings and, when tracking, how far behind upstream it was at the last check. Its details open on demand: source and revision, when <code>start</code> last checked upstream, and the live-spec revision it carries counted against this instance&rsquo;s: the same, or so many commits older or newer (<a href="#dl-serveimports">dl-serveimports</a>). The tree folds and unfolds by a labelled button on its heading.</p>
+<p id="map-sections">This file&rsquo;s sections are compact blocks, each stating its words, colored by their role: header, store, registers, decisions, rules or prose, the role being what most of a section&rsquo;s claims are. The section being read lists its claims by id and opening words, each marked in its own role&rsquo;s color, outlined when sealed, so one key covers blocks, claims and the edges below; hovering a claim shows it whole, a table row cell by cell under its column headings; hovering another section&rsquo;s block lists its claims without moving the page (<a href="#dl-serveblocks">dl-serveblocks</a>). The blocks scroll on their own beneath the header, search, tree and the file&rsquo;s name, gliding to keep the current claim in view (<a href="#dl-servepane">dl-servepane</a>).</p>
+<p id="map-edges">Each <a href="live-spec.html#dl-dependson">depends-on</a> edge touching this file is a line in a gutter left of the blocks: a hollow dot on the dependent, a filled one on what it depends on. An end sits at its claim&rsquo;s row when that section is open, else at the section&rsquo;s block; an end in another file reaches that file in the tree, or, with the tree folded, stops in an arrow at the top of this file&rsquo;s blocks (<a href="#dl-serverail">dl-serverail</a>).</p>
+<p id="map-current">&ldquo;Current&rdquo; is the claim under a line just below the top of the window, where a jump lands its target; a claim or section clicked, or a page opened at an anchor, stays current until the reader scrolls (<a href="#watch-highlight">watch-highlight</a>).</p>
+<p id="map-search">Search covers every file of the collection, main included: exact (literal, any case, every word including short claims), which searches as you type, or semantic (ranked with <code>find</code>&rsquo;s model), which searches on Enter (<a href="#dl-servesearch">dl-servesearch</a>). A result jumps to its claim, carrying the query to the next page. A clear button in the box, or Esc, empties it and closes the results.</p>
+
+<hr>
+<h2 id="decisions">Decisions and scope (this file)</h2>
+
+<h4>Open items</h4>
+<table>
+<thead><tr><th>Item</th><th>Gates</th><th>Resolves when</th></tr></thead>
+<tbody>
+<tr id="watch-highlight"><td><code>watch-highlight</code> 2026-11-08, using <code>lspec serve</code>: clicking an id or a section in the map often highlighted a neighbor, 9 of 18 clicks in a scripted run. Diagnosis: &ldquo;current&rdquo; was the last claim above a line a quarter down the window, while a jump lands its target at the top, and at the page&rsquo;s end the target cannot reach the top. Fix: the claim under a line just below the top edge, and a clicked target stays current until the reader scrolls; the same run hits 18 of 18. Same day: scrolling into a section with no claims left the last section open; such a section now closes it</td><td>The map&rsquo;s showing where the reader is (<a href="#map-current">map-current</a>)</td><td>A scripted run over every id of a collection of ten or more files highlights each clicked claim; a recurrence promotes this to a diagnostic row</td></tr>
+</tbody>
+</table>
+
+<h4>Locked selections</h4>
+<table>
+<thead><tr><th>Selection</th><th>Rejected / Replaced</th><th>Key reason</th></tr></thead>
+<tbody>
+<tr id="dl-serve"><td><code>dl-serve</code> <code>lspec serve</code> serves the collection at 127.0.0.1, files unchanged, each page built per request beside a sidebar of the Collection&rsquo;s verdicts; neither map nor search is a read (<a href="live-spec.html#dl-wholeload">dl-wholeload</a>)</td><td>A script in the seed or each spec; a bookmarklet; a rendered sidecar file; membership rules in the browser</td><td>A file opened from disk cannot reach its siblings; a seed script copies code into every instance. Served, rules stay in the tool and nothing new is tracked (<a href="live-spec.html#dl-graphderived">dl-graphderived</a>).</td></tr>
+<tr id="dl-servesearch"><td><code>dl-servesearch</code> Search covers every collection file, main included: exact, or semantic with <a href="live-spec.html#dl-find">find</a>&rsquo;s model, vectors memoized apart and seeded from find&rsquo;s memo</td><td>Search over find&rsquo;s supporting specs only; writing into find&rsquo;s memo; semantic search as you type</td><td>A person, unlike a session, has not read main. Find&rsquo;s memo keeps exactly its own passages, so writing main&rsquo;s there would be pruned at the next <code>start</code>. Each query embeds once, so it runs when asked.</td></tr>
+<tr id="dl-serveblocks"><td><code>dl-serveblocks</code> Sections as compact blocks stating their words, colored by role; the section read lists its claims by id and opening words, marked in the same role colors; hovering another block peeks at its claims</td><td>A positional strip of claim ticks; bare ids; expanding sections in place; a second palette for claim kinds; block height drawn from words</td><td>A tick strip has no room for labels; ids address claims (<a href="live-spec.html#p3">P3</a>), opening words say which; a peek keeps the page still; one key reads blocks and claims; drawn height spends space the stated count gives.</td></tr>
+<tr id="dl-serverail"><td><code>dl-serverail</code> Depends-on edges are lines in one gutter beside the blocks, dependent hollow, target filled, each end at the nearest thing shown: row, block, tree entry, or the folded tree&rsquo;s edge</td><td>A depends-on list panel; arrows or words (needs, feeds, cites) beside ids; a gutter inside the open section</td><td>A list repeats ids without their place; arrows and words misstate the relation; a gutter inside one section drops every edge that leaves it.</td></tr>
+<tr id="dl-servepane"><td><code>dl-servepane</code> The header, search, tree and this file&rsquo;s name hold still; its blocks scroll beneath them, gliding to the current claim, above a folded drawer; lines to other files are drawn over both</td><td>The whole sidebar scrolling as one; jumping to the current claim</td><td>One scroll carried the tree and search away while a long file was read, and a jump at each new section read as a glitch.</td></tr>
+<tr id="dl-serveimports"><td><code>dl-serveimports</code> An import&rsquo;s tree entry is one summary line, with source, revision, last upstream check and its live-spec revision relative to this instance&rsquo;s on demand; <code>start</code>&rsquo;s check is kept as transaction state</td><td>Every detail always shown; a bare live-spec sha; serve checking upstream itself</td><td>The tree is for finding files; a sha means nothing until compared; reading <code>start</code>&rsquo;s last check keeps serve offline and fast.</td></tr>
+</tbody>
+</table>
+
+<h4>Out of scope (this file)</h4>
+<p>Editing through the browser, live reload, and serving beyond this machine are out of scope: the server shows the files and the tool&rsquo;s verdicts, and every change still goes through the session protocol and its gate (<a href="live-spec.html#protocol">the session protocol</a>).</p>
+
+<p class="meta"><a href="live-spec.html#top">&uarr; main spec</a></p>
+
+</main>
+</body>
+</html>
+
+<!-- Clayton Ford, 2026. MIT. https://github.com/claybford/live-spec -->

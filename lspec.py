@@ -5880,17 +5880,17 @@ def model_problems(folder):
 CHUNK_WORDS, CHUNK_OVERLAP, CHUNK_MIN = 120, 20, 6
 
 
-def windows(text):
+def windows(text, least=CHUNK_MIN):
     """TEXT in windows of CHUNK_WORDS words overlapping by CHUNK_OVERLAP;
-    nothing under CHUNK_MIN words (a bare heading carries no answer)."""
+    nothing under LEAST words (for find, a bare heading carries no answer)."""
     words = text.split()
-    if len(words) < CHUNK_MIN:
+    if len(words) < max(least, 1):
         return []
     step = CHUNK_WORDS - CHUNK_OVERLAP
     return [" ".join(words[i:i + CHUNK_WORDS]) for i in range(0, max(len(words) - CHUNK_OVERLAP, 1), step)]
 
 
-def spec_chunks(spec):
+def spec_chunks(spec, least=CHUNK_MIN):
     """A spec's text as chunks, [(anchor id or None, text)]: each id'd
     element's own text (its id'd descendants are chunks of their own), and the
     text between id'd elements, each windowed. Every word lands in a chunk."""
@@ -5916,13 +5916,13 @@ def spec_chunks(spec):
         return kids
 
     for s, e, eid in spans:
-        out += [(eid, w) for w in windows(own(s, e, [(cs, ce) for cs, ce, _ in children(s, e, spans)]))]
+        out += [(eid, w) for w in windows(own(s, e, [(cs, ce) for cs, ce, _ in children(s, e, spans)]), least)]
     # Text between top-level id'd elements, gap by gap, anchored to the element
     # before it (most often the heading of the section it sits in).
     at, anchor = (skip[0][1] if skip else 0), None
     for s, e, eid in children(-1, len(raw), spans) + [(len(raw), len(raw), None)]:
         if s > at:
-            out += [(anchor, w) for w in windows(claim_text(raw[at:s]))]
+            out += [(anchor, w) for w in windows(claim_text(raw[at:s]), least)]
         at, anchor = max(at, e), eid or anchor
     return out
 
@@ -5947,26 +5947,30 @@ def find_chunks(col):
     return out
 
 
-def cached_vectors(np, embedder, texts):
+def cached_vectors(np, embedder, texts, name="find-vectors.npz", borrow=()):
     """Passage vectors, memoized under .git/lspec by model and text (dl-state):
     only a passage not already there is embedded, and EMBEDDER, a callable,
     loads the model only then. The memo keeps exactly TEXTS, so it never grows
     past the collection. Outside git, or on any cache trouble, computed afresh.
-    Returns (vectors, how many were embedded)."""
+    NAME is the memo this caller owns; BORROW names memos read, never pruned
+    (serve reads find's). Returns (vectors, how many were embedded)."""
     key = lambda t: hashlib.sha256((MODEL_PINS["weights.npz"] + "\0" + t).encode()).hexdigest()[:32]
-    path, memo = None, {}
+    path, memo, owned = None, {}, set()
     if repo_root() is not None:
-        path = state_path("find-vectors.npz")
-        try:
-            with np.load(path, allow_pickle=False) as z:
-                memo = {k: z[k] for k in z.files}
-        except (OSError, ValueError):
-            memo = {}
+        path = state_path(name)
+        for other in (*borrow, name):
+            try:
+                with np.load(state_path(other), allow_pickle=False) as z:
+                    memo.update({k: z[k] for k in z.files})
+                    if other == name:
+                        owned = set(z.files)
+            except (OSError, ValueError):
+                pass
     missing = list(dict.fromkeys(t for t in texts if key(t) not in memo))
     if missing:
         memo.update(zip(map(key, missing), embedder().embed(missing)))
     keep = {key(t): memo[key(t)] for t in texts}
-    if path and (missing or len(keep) != len(memo)):
+    if path and (missing or set(keep) != owned):
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".npz")
@@ -7333,24 +7337,32 @@ TRACK_TIMEOUT = 30   # seconds per network step of a tracking check at start
 
 def tracking_notices(col):
     """One line per tracking import: behind by N commits, up to date, or
-    unreachable; never a block, never a write (portability.html dl-tracking)."""
-    out = []
+    unreachable; never a block, never a write to the collection
+    (portability.html dl-tracking). Each check is kept in lspec/tracking.json,
+    transaction state, so serve can say when upstream was last looked at."""
+    out, seen = [], read_state("tracking.json") or {}
     for key, rec in sorted(col.imports.items()):
         if rec["nested"] or rec["version"] != "tracking":
             continue
+        note = {"checked": int(time.time()), "rev": rec["rev"], "upstream": None, "behind": None, "error": None}
+        seen[rec["name"]] = note
         try:
             tmp, sha = fetch_upstream(rec["source"], batch=True, timeout=TRACK_TIMEOUT)
         except ImportRefused as e:
+            note["error"] = str(e)
             out.append(f"{rec['name']}: upstream unreachable ({e})")
             continue
+        note["upstream"] = sha
         try:
             if sha == rec["rev"]:
+                note["behind"] = 0
                 out.append(f"{rec['name']}: up to date at {sha[:12]}")
                 continue
             try:
                 git_net("fetch", "-q", local_source(rec["source"]), rec["rev"], cwd=tmp,
                         batch=True, timeout=TRACK_TIMEOUT)
                 n = git("rev-list", "--count", f"{rec['rev']}..{sha}", cwd=tmp).strip()
+                note["behind"] = int(n)
                 out.append(f"{rec['name']}: upstream has {n} new commit(s) since {rec['rev'][:12]}; "
                            + command(col, "import", "--update", rec["name"]))
             except RuntimeError:
@@ -7358,6 +7370,11 @@ def tracking_notices(col):
                            + command(col, "import", "--update", rec["name"]))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+    if seen and repo_root() is not None:
+        try:
+            write_state("tracking.json", seen)
+        except OSError:
+            pass
     return out
 
 
@@ -7713,7 +7730,894 @@ markers until they are resolved. The gate's mirror item refuses any staged chang
 to mirrored content that an import or update did not write: the manifest in
 lspec/imports.json (transaction state, deletable: an update rewrites it) holds
 the fetched blob ids.""",
+    "serve": """\
+For people reading the spec: serves the collection at http://127.0.0.1:PORT/
+(default %d; this machine only) with a map beside every page, until Ctrl-C.
+--open opens main in the default browser; serve.sh and serve.bat beside lspec.py
+do that on a double-click, preferring the repository's .venv. Without MAIN, the
+main AGENTS.md names is served.
+The files are never changed; each page is built as it is requested, so an edit
+shows on reload. The map is drawn from the Collection the other verbs use: the
+tree of split rows with each import's settings, orphans, files outside the
+collection, collection problems, the depends-on edges touching the page, its
+external links, and the page's sections with every id'd claim at its place.
+When the instance carries lspec.css it is served in place of the page's
+stylesheet, offline; a light/dark choice is remembered in the browser. Dotfiles
+(.git and kin) and paths outside the instance are refused.
+
+Seeing the map is not a read: a session acts on a spec only after reading the
+file whole (live-spec.html#dl-wholeload). Nothing an agent needs is here that
+check, show and neighbors do not already print.""",
 }
+
+
+# ---- serve: the collection over http://127.0.0.1 with a map beside each page
+
+SERVE_PORT = 8765
+SERVE_ASSET = r"""
+<!-- lspec serve: added at serve time; not part of the file on disk -->
+<style>
+#lsm,#lsm *,#lsm-card,#lsm-card *{box-sizing:border-box}
+#lsm{--ink:#1c2321;--muted:#5e6a65;--line:#dce1de;--faint:#eef2ef;--paper:#fbfcfb;--main:#1c6b58;--main-soft:#e2f1ec;--imp:#9a5b00;--imp-soft:#f7eedf;--warn-soft:#fbede5;
+  --k-top:#1c2321;--k-term:#2c77ad;--k-principle:#6345bf;--k-decision:#8a968f;--k-split:#1c6b58;--k-watch:#c2410c;--k-open:#c2410c;--k-diag:#b4235a;--k-param:#857414;--k-run:#4e5c7a;--k-rule:#b9c2bd;
+  position:fixed;top:0;right:0;bottom:0;width:340px;z-index:50;display:flex;flex-direction:column;
+  background:var(--paper);color:var(--ink);border-left:1px solid var(--line);
+  font:12.5px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+#lsm > *{flex:none}#lsm .drawer{border-top:1px solid var(--line);padding:6px 14px}#lsm .drawer .dfold{margin:0}#lsm .drawer.folded .dbody{display:none}
+#lsm .dbody{max-height:38vh;overflow-y:auto;margin:4px -14px -6px}#lsm .dbody > .sec{border-bottom:0;border-top:1px solid var(--line)}#lsm .dbody .foot{border-top:1px solid var(--line)}
+#lsm .fhead{padding:10px 14px 4px}#lsm .fhead h6{margin:0}#lsm .pane > .sec.file{padding-top:6px}#lsm > .pane{flex:1 1 auto;min-height:0;overflow-y:auto;position:relative}
+#lsm .tree{max-height:32vh;overflow-y:auto}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) #lsm{--ink:#e6ece9;--muted:#93a19b;--line:#2e3834;--faint:#1f2724;--paper:#181e1b;--main:#55c2a5;--main-soft:#173029;--imp:#e3a848;--imp-soft:#30260f;--warn-soft:#33211a;
+  --k-top:#e6ece9;--k-term:#6bb3e6;--k-principle:#a890f2;--k-decision:#7f8d87;--k-split:#55c2a5;--k-watch:#f08a55;--k-open:#f08a55;--k-diag:#eb7aa5;--k-param:#cdbb4a;--k-run:#9daaca;--k-rule:#4a5652}}
+:root[data-theme="dark"] #lsm{--ink:#e6ece9;--muted:#93a19b;--line:#2e3834;--faint:#1f2724;--paper:#181e1b;--main:#55c2a5;--main-soft:#173029;--imp:#e3a848;--imp-soft:#30260f;--warn-soft:#33211a;
+  --k-top:#e6ece9;--k-term:#6bb3e6;--k-principle:#a890f2;--k-decision:#7f8d87;--k-split:#55c2a5;--k-watch:#f08a55;--k-open:#f08a55;--k-diag:#eb7aa5;--k-param:#cdbb4a;--k-run:#9daaca;--k-rule:#4a5652}
+#lsm a{color:inherit;text-decoration:none}
+#lsm a::after{content:none!important}
+#lsm .hd{padding:12px 14px 10px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:2px}
+#lsm .row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+#lsm .hd b{font:700 14px system-ui,sans-serif}
+#lsm .kv{display:grid;grid-template-columns:auto 1fr;gap:1px 10px;margin:6px 0 2px;font:12px system-ui,sans-serif;align-items:baseline}
+#lsm .kv dt{color:var(--muted);margin:0}#lsm .kv dd{margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#lsm .kv a{color:var(--ink);text-decoration:none}#lsm .kv a:hover{text-decoration:underline}
+#lsm .foot{padding:10px 14px 14px}#lsm .foot .kv{font-size:11px;margin:0;color:var(--muted)}#lsm .foot .kv dd{color:var(--muted)}
+#lsm .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px}
+#lsm .muted{color:var(--muted)}
+#lsm .theme{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+#lsm .theme button{background:none;border:0;margin:0;padding:3px 8px;font:500 11px system-ui,sans-serif;color:var(--muted);cursor:pointer;border-radius:0}
+#lsm .theme button+button{border-left:1px solid var(--line)}
+#lsm .theme button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
+#lsm .sec{padding:10px 14px;border-bottom:1px solid var(--line)}
+#lsm h6{margin:0 0 6px;font:600 10.5px system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+#lsm h6.fname{text-transform:none;letter-spacing:0;font:600 12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--ink)}
+#lsm h6.fname span{font:400 11px system-ui,sans-serif;color:var(--muted)}
+#lsm .tree{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+#lsm .tree ul{list-style:none;margin:2px 0 0;padding:0 0 0 14px;border-left:1.5px solid var(--main);display:flex;flex-direction:column;gap:2px}
+#lsm .n{display:block;padding:4px 7px;border-radius:6px;border:1px solid transparent}
+#lsm .n:hover{background:var(--faint)}
+#lsm .n.cur{background:var(--main-soft);border-color:var(--main)}
+#lsm .n.imp.cur{background:var(--imp-soft);border-color:var(--imp)}
+#lsm .n .f{font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+#lsm .n .via{display:block;font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--main)}
+#lsm .n.imp .via{color:var(--imp)}
+#lsm .n .cnt{display:block;font-size:11px;color:var(--muted)}
+#lsm .n .cnt.behind,#lsm .det .cnt.behind{color:var(--imp);font-weight:600}
+#lsm .n .via.behind{color:var(--imp);font-weight:600}
+#lsm .nw{position:relative}
+#lsm .nw .n{padding-right:86px}
+#lsm .more{all:unset;position:absolute;top:4px;right:4px;padding:3px 9px;border:1px solid var(--line);border-radius:5px;cursor:pointer;color:var(--muted);font:500 11px system-ui,sans-serif;white-space:nowrap;background:var(--paper)}
+#lsm .more:hover{background:var(--faint);color:var(--ink)}#lsm .more:focus-visible{outline:2px solid var(--main)}
+#lsm .det{display:flex;flex-direction:column;padding:2px 7px 6px 8px;margin-left:7px;border-left:1.5px solid var(--imp)}
+#lsm .det .cnt{display:block;font-size:11px;color:var(--muted)}
+#lsm [hidden]{display:none!important}
+#lsm .tag{display:inline-block;font:600 9.5px system-ui,sans-serif;letter-spacing:.06em;text-transform:uppercase;padding:1px 5px;border-radius:4px;margin-left:5px;vertical-align:1px;background:var(--main);color:var(--paper)}
+#lsm .tag.imp{background:var(--imp)}
+#lsm .tag.sup{background:var(--faint);color:var(--muted)}
+#lsm .warn{margin-top:6px;padding:6px 8px;border-radius:6px;background:var(--warn-soft);font-size:11.5px;overflow-wrap:anywhere}
+#lsm .warn.imp{background:var(--imp-soft)}
+#lsm .warn ul{margin:4px 0 0;padding-left:16px}
+#lsm .file{padding-bottom:12px}
+#lsm .file h6 span{font-weight:500;letter-spacing:.04em}
+#lsm{--r-header:#2c77ad;--r-store:#7c8983;--r-registers:#b7791f;--r-decisions:#2f855a;--r-rules:#6345bf;--r-prose:#b9c2bd}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) #lsm{--r-header:#4a90c8;--r-store:#7f8d87;--r-registers:#c9952f;--r-decisions:#3f9e6e;--r-rules:#8f78e6;--r-prose:#4a5652}}
+:root[data-theme="dark"] #lsm{--r-header:#4a90c8;--r-store:#7f8d87;--r-registers:#c9952f;--r-decisions:#3f9e6e;--r-rules:#8f78e6;--r-prose:#4a5652}
+#lsm .blocks{display:flex;flex-direction:column;gap:5px;position:relative}
+#lsm .blocks.gut{padding-left:var(--gw)}
+#lsm .blk{all:unset;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;gap:2px;padding:6px 9px;border-radius:6px;cursor:pointer;overflow:hidden;
+  background:color-mix(in srgb,var(--rc) 20%,var(--paper));border:1px solid color-mix(in srgb,var(--rc) 45%,transparent);color:var(--ink);position:relative}
+#lsm .blk.prose{background:var(--faint);border-color:var(--line)}
+#lsm .blk:hover{background:color-mix(in srgb,var(--rc) 30%,var(--paper))}
+#lsm .blk:focus-visible{outline:2px solid var(--ink);outline-offset:1px}
+#lsm .blk.on{border-color:var(--ink);box-shadow:inset 3px 0 0 var(--ink)}
+#lsm .claims{display:none}
+#lsm .blk.open .claims.idlist{display:flex;flex-direction:column;gap:1px;margin:5px -4px 0;position:relative}
+#lsm .claims.idlist.gut{padding-left:var(--gw)}
+#lsm .ogutter{z-index:5}
+#lsm .gutter{position:absolute;left:0;top:0;width:100%;height:100%;overflow:visible;pointer-events:none;z-index:1}
+#lsm .gutter path{fill:none;stroke:var(--k-principle);stroke-width:1.4;opacity:.75}
+#lsm .gutter .hot path,#lsm .gutter path.hot{stroke-width:2.4;opacity:1}
+#lsm .gutter circle{stroke:var(--k-principle);stroke-width:1.4}
+#lsm .gutter path.tip{fill:var(--k-principle);stroke:none;opacity:1}#lsm .gutter circle.need{fill:var(--paper)}#lsm .gutter circle.give{fill:var(--k-principle)}
+#lsm .stub{position:relative;font:10.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--k-principle);padding:1px 4px 1px var(--gw);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#lsm .ci{display:grid;grid-template-columns:8px max-content minmax(0,1fr);gap:6px;align-items:center;padding:2px 4px;border-radius:3px;color:var(--ink);text-decoration:none}
+#lsm .ci:hover{background:color-mix(in srgb,var(--ink) 8%,transparent)}
+#lsm .ci i{width:8px;height:8px;border-radius:2px;display:block}
+#lsm .ci.sealed i{outline:1.5px solid var(--ink);outline-offset:0}
+#lsm .ci b{font:500 11px ui-monospace,SFMono-Regular,Menlo,monospace!important;white-space:nowrap}
+#lsm .ci em{font:11px system-ui,sans-serif;font-style:normal;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#lsm .ci.cur{background:color-mix(in srgb,var(--ink) 14%,transparent)}
+#lsm .ci.cur b{font-weight:700!important}
+#lsm-card{position:fixed;right:352px;z-index:60;width:min(380px,calc(100vw - 380px));padding:10px 12px;border-radius:8px;pointer-events:none;
+  background:var(--paper);color:var(--ink);border:1px solid var(--line);box-shadow:0 8px 28px rgba(0,0,0,.18);font:12.5px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+#lsm-card .h{display:flex;align-items:center;gap:7px;margin-bottom:4px;font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace}
+#lsm-card .h i{width:9px;height:9px;border-radius:2px;display:block}
+#lsm-card .h span{margin-left:auto;font:500 10px system-ui,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+#lsm-card .h span.seal{color:var(--paper);background:var(--ink);padding:1px 5px;border-radius:3px;margin-left:4px}
+#lsm-card p{margin:0;color:var(--ink)}
+#lsm-card .pk{display:grid;grid-template-columns:8px max-content minmax(0,1fr);gap:6px;align-items:center;padding:1px 0}
+#lsm-card .pk i{width:8px;height:8px;border-radius:2px;display:block}
+#lsm-card .pk.sealed i{outline:1.5px solid var(--ink)}
+#lsm-card .pk b{font:500 11px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
+#lsm-card .pk em{font:11px system-ui,sans-serif;font-style:normal;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#lsm-card .more{margin-top:4px;font-size:11px;color:var(--muted)}
+#lsm-card p+p{margin-top:6px}
+#lsm-card p small{display:block;font:600 9.5px system-ui,sans-serif;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);margin-bottom:1px}
+#lsm .blk b{font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#lsm .blk span{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#lsm .keys{display:flex;flex-wrap:wrap;gap:3px 10px;margin-top:8px;font-size:10.5px;color:var(--muted)}
+#lsm .keys span{display:inline-flex;align-items:center;gap:4px}
+#lsm .ekeys{margin-top:4px}#lsm .mk svg{overflow:visible}
+#lsm .mk line{stroke:var(--k-principle);stroke-width:1.4}#lsm .mk circle{stroke:var(--k-principle);stroke-width:1.4}
+#lsm .mk circle.need{fill:var(--paper)}#lsm .mk circle.give{fill:var(--k-principle)}#lsm .mk path.tip{fill:var(--k-principle)}
+#lsm .keys s{width:9px;height:9px;border-radius:2px;display:inline-block;text-decoration:none}
+#lsm .list{display:flex;flex-direction:column;gap:3px;max-height:76px;overflow-y:auto}
+#lsm .list a{display:grid;grid-template-columns:14px 1fr auto;gap:4px;font:11px ui-monospace,Menlo,monospace;padding:2px 4px;border-radius:4px;overflow-wrap:anywhere}
+#lsm .list a:hover{background:var(--faint)}
+#lsm .list b{color:var(--k-principle);font-weight:600}
+html{padding-right:340px}
+#lsm .search{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:6px}
+#lsm .qrow{display:flex;gap:6px}#lsm .qbox{position:relative;flex:1;min-width:0;display:flex}#lsm .qbox input[type=search]{padding-right:9px}#lsm .qbox.has input[type=search]{padding-right:62px}
+#lsm input[type=search]::-webkit-search-cancel-button{display:none}
+#lsm .qx{all:unset;display:none;position:absolute;right:4px;top:50%;transform:translateY(-50%);padding:2px 7px;border:1px solid var(--line);border-radius:5px;background:var(--paper);color:var(--muted);font:500 11px system-ui,sans-serif;cursor:pointer;white-space:nowrap}
+#lsm .qbox.has .qx{display:block}#lsm .qx:hover{background:var(--faint);color:var(--ink)}#lsm .qx:focus-visible{outline:2px solid var(--main)}
+#lsm input[type=search]{flex:1;min-width:0;margin:0;padding:6px 9px;border:1px solid var(--line);border-radius:6px;background:var(--faint);color:var(--ink);font:13px system-ui,sans-serif;outline:none}
+#lsm input[type=search]:focus{border-color:var(--main);background:var(--paper)}
+#lsm .modes{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;flex:none}
+#lsm .modes button{background:none;border:0;margin:0;padding:3px 9px;font:500 11.5px system-ui,sans-serif;color:var(--muted);cursor:pointer;border-radius:0}
+#lsm .modes button+button{border-left:1px solid var(--line)}
+#lsm .modes button[aria-pressed="true"]{background:var(--main);color:var(--paper)}
+#lsm .qmeta{font-size:11px;color:var(--muted)}#lsm .qmeta:empty{display:none}
+#lsm .results{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;max-height:34vh;overflow-y:auto}
+#lsm .fold{all:unset;box-sizing:border-box;cursor:pointer;display:flex;justify-content:space-between;align-items:center;width:100%;min-height:26px;font:600 10.5px system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+#lsm .fold:focus-visible{outline:2px solid var(--main);outline-offset:2px}
+#lsm .fold::after{content:"\2212  collapse";white-space:pre;padding:3px 9px;border:1px solid var(--line);border-radius:5px;background:var(--paper);
+  font:500 11px system-ui,sans-serif;letter-spacing:0;text-transform:none;color:var(--muted)}
+#lsm .folded .fold::after{content:"+  expand"}
+#lsm .fold:hover{color:var(--ink)}#lsm .fold:hover::after{background:var(--faint);color:var(--ink)}
+#lsm .folded .tree,#lsm .folded .fold~.cur-only{display:none}#lsm .cur-only{display:none}#lsm .folded .cur-line{display:block}
+#lsm .cur-line{display:none;font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace}
+#lsm .results:empty{display:none}
+#lsm .results a{display:block;padding:5px 7px;border-radius:6px;border:1px solid transparent}
+#lsm .results a:hover,#lsm .results a:focus-visible{background:var(--faint);border-color:var(--line);outline:none}
+#lsm .results .w{display:flex;justify-content:space-between;gap:6px;font:600 11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--main);overflow-wrap:anywhere}
+#lsm .results .w span{color:var(--muted);font-weight:400}
+#lsm .results .s{display:block;font-size:11.5px;line-height:1.4;color:var(--muted);margin-top:2px;overflow-wrap:anywhere}
+#lsm .results mark{background:color-mix(in srgb,var(--k-param) 30%,transparent);color:var(--ink);border-radius:2px;padding:0 1px}
+</style>
+<aside id="lsm" aria-label="Collection map and search (navigation)"></aside>
+<div id="lsm-card" hidden role="tooltip"></div>
+<script id="lsm-data" type="application/json">__LSPEC_MAP__</script>
+<script>
+(function(){
+"use strict";
+var A=document.getElementById("lsm");
+function el(t,c,txt){var e=document.createElement(t);if(c)e.className=c;if(txt!=null)e.textContent=txt;return e;}
+function base(u){return u.split("/").pop();}
+function ago(s){return s<60?s+"s":s<3600?Math.round(s/60)+"m":s<86400?Math.round(s/3600)+"h":Math.round(s/86400)+"d";}
+var D;try{D=JSON.parse(document.getElementById("lsm-data").textContent);}catch(e){D={error:"the map data could not be read ("+e.message+")"};}
+var draw=null;
+
+// header: title, basis, theme
+var hd=el("div","hd"),r1=el("div","row"),ttl=el("b",null,"Spec navigator");
+ttl.title="Navigation only: seeing the map or a search result is not a read of any file.";r1.appendChild(ttl);
+var tg=el("span","theme"),saved;try{saved=localStorage.getItem("lspec-theme");}catch(e){}saved=saved||"system";tg.setAttribute("aria-label","Theme");
+["system","light","dark"].forEach(function(m){var b=el("button",null,m.charAt(0).toUpperCase()+m.slice(1));b.type="button";b.dataset.m=m;b.setAttribute("aria-pressed",String(m===saved));
+  b.addEventListener("click",function(){if(m==="system")delete document.documentElement.dataset.theme;else document.documentElement.dataset.theme=m;
+    try{m==="system"?localStorage.removeItem("lspec-theme"):localStorage.setItem("lspec-theme",m);}catch(e){}
+    [].forEach.call(tg.children,function(c){c.setAttribute("aria-pressed",String(c.dataset.m===m));});});tg.appendChild(b);});
+r1.appendChild(tg);hd.appendChild(r1);
+var kv=el("dl","kv"),pair=function(k,v){kv.appendChild(el("dt",null,k));var d=el("dd");d.appendChild(v);kv.appendChild(d);};
+var mn=(D.nodes||[]).filter(function(n){return n.role==="main";})[0];
+if(mn){var ma=el("a","mono",base(mn.path));ma.href=mn.url;var mc=el("span");mc.appendChild(ma);
+  mc.appendChild(el("span","muted"," \u00b7 "+D.nodes.length+" file"+(D.nodes.length===1?"":"s")));pair("Collection",mc);}
+if(D.current)pair("Reading",el("span","mono",base(D.current)));
+hd.appendChild(kv);
+A.appendChild(hd);
+
+// search: exact text, or semantic through find's model, across the whole collection
+var sr=el("div","search"),qr=el("div","qrow"),qi=el("input");qi.type="search";qi.id="lsm-q";qi.placeholder="Search the collection  ( / )";qi.setAttribute("aria-label","Search the collection");
+var modes=el("span","modes"),mode;try{mode=sessionStorage.getItem("lspec-mode")||localStorage.getItem("lspec-mode");}catch(e){}mode=mode==="semantic"?"semantic":"exact";
+[["exact","Exact"],["semantic","Semantic"]].forEach(function(m){var b=el("button",null,m[1]);b.type="button";b.dataset.m=m[0];b.setAttribute("aria-pressed",String(m[0]===mode));
+  b.title=m[0]==="exact"?"literal text, any case":"semantic: ranked with the embedding model lspec find uses";
+  b.addEventListener("click",function(){mode=m[0];try{localStorage.setItem("lspec-mode",mode);}catch(e){}[].forEach.call(modes.children,function(c){c.setAttribute("aria-pressed",String(c.dataset.m===mode));});run(0);qi.focus();});modes.appendChild(b);});
+var qb=el("span","qbox"),qx=el("button","qx","\u00d7 clear");qx.type="button";qx.title="Clear the search (Esc)";qx.setAttribute("aria-label","Clear the search");
+qb.appendChild(qi);qb.appendChild(qx);qr.appendChild(modes);qr.appendChild(qb);sr.appendChild(qr);   /* mode first, so clear sits on the right edge with the fold buttons */
+function qxSync(){qb.classList.toggle("has",!!qi.value);}   /* the clear button shows while there is a term */
+qx.addEventListener("click",function(){qi.value="";run(0);qxSync();qi.focus();});
+var qm=el("div","qmeta"),res=el("ul","results");sr.appendChild(qm);sr.appendChild(res);A.appendChild(sr);
+var seq=0,tmr=null;
+function here(u){return u.split("#")[0]===location.pathname;}
+function render(d,q){res.textContent="";
+  if(d.error){qm.textContent=d.error;return;}
+  var files={};d.results.forEach(function(r){files[r.file]=1;});
+  qm.textContent=!q.trim()?"":d.results.length===0?"no match":
+    d.mode==="exact"?(d.total+" match"+(d.total===1?"":"es")+" in "+d.results.length+" claim"+(d.results.length===1?"":"s")+", "+Object.keys(files).length+" file"+(Object.keys(files).length===1?"":"s")+(d.results.length>=40?" (first 40)":"")):
+    "closest "+d.results.length+", semantic \u00b7 "+d.ms+" ms";
+  d.results.forEach(function(r){var li=el("li"),a=el("a");a.href=r.url;
+    var w=el("span","w",(here(r.url)?"":base(r.file)+" ")+(r.where?"#"+r.where:"(top)"));if(r.score!=null)w.appendChild(el("span",null,r.score.toFixed(2)));a.appendChild(w);
+    var sn=el("span","s");if(r.hit!=null){sn.appendChild(document.createTextNode(r.pre));sn.appendChild(el("mark",null,r.hit));sn.appendChild(document.createTextNode(r.post));}else sn.textContent=r.text;
+    a.appendChild(sn);a.addEventListener("click",function(ev){if(here(r.url)&&r.where){ev.preventDefault();location.hash="";location.hash=r.where;}});
+    li.appendChild(a);res.appendChild(li);});}
+function run(delay){clearTimeout(tmr);var q=qi.value,my=++seq;try{sessionStorage.setItem("lspec-q",q);sessionStorage.setItem("lspec-mode",mode);}catch(e){}
+  if(!q.trim()){res.textContent="";qm.textContent="";return;}
+  tmr=setTimeout(function(){if(mode==="semantic")qm.textContent="semantic search\u2026";
+    fetch("/__lspec/search?mode="+mode+"&q="+encodeURIComponent(q)).then(function(r){return r.json();}).then(function(d){if(my===seq)render(d,q);})
+      .catch(function(e){if(my===seq)qm.textContent="search unavailable: "+e.message;});},delay);}
+qi.addEventListener("input",function(){qxSync();
+  if(mode==="exact"){run(150);return;}            /* exact is cheap: as you type */
+  clearTimeout(tmr);seq++;                         /* semantic embeds the query: only on Enter */
+  try{sessionStorage.setItem("lspec-q",qi.value);}catch(e){}   /* an emptied box stays empty on the next page */
+  if(!qi.value.trim()){res.textContent="";qm.textContent="";return;}
+  qm.textContent="press Enter to search semantically";});
+qi.addEventListener("keydown",function(ev){if(ev.key==="Enter"){run(0);}if(ev.key==="Escape"){qi.value="";run(0);qxSync();qi.blur();}
+  if(ev.key==="ArrowDown"){var f=res.querySelector("a");if(f){ev.preventDefault();f.focus();}}});
+res.addEventListener("keydown",function(ev){var a=document.activeElement;if(!a||!res.contains(a))return;var li=a.parentNode;
+  if(ev.key==="ArrowDown"&&li.nextSibling){ev.preventDefault();li.nextSibling.firstChild.focus();}
+  if(ev.key==="ArrowUp"){ev.preventDefault();li.previousSibling?li.previousSibling.firstChild.focus():qi.focus();}});
+document.addEventListener("keydown",function(ev){if(ev.key==="/"&&document.activeElement!==qi&&!/input|textarea|select/i.test(document.activeElement.tagName)){ev.preventDefault();qi.focus();qi.select();}});
+try{var prev=sessionStorage.getItem("lspec-q");if(prev){qi.value=prev;run(0);}qxSync();}catch(e){}
+if(D.error){var es=el("div","sec");es.appendChild(el("div","warn","Map unavailable: "+D.error));A.appendChild(es);return;}
+
+// collection tree
+var sec=el("div","sec"),fold=el("button","fold","Collection");fold.type="button";sec.appendChild(fold);
+var folded;try{folded=localStorage.getItem("lspec-tree")==="folded";}catch(e){}
+function setFold(f){sec.classList.toggle("folded",f);fold.setAttribute("aria-expanded",String(!f));try{localStorage.setItem("lspec-tree",f?"folded":"open");}catch(e){}if(draw)setTimeout(draw,0);}
+fold.addEventListener("click",function(){setFold(!sec.classList.contains("folded"));});
+var kids={};D.nodes.forEach(function(n){(kids[n.parent||""]=kids[n.parent||""]||[]).push(n);});
+function node(n){var a=el("a","n"+(n.role==="import"?" imp":"")+(n.url===D.current?" cur":""));a.href=n.url;
+  a.appendChild(el("span","f",base(n.path)));a.appendChild(el("span","tag"+(n.role==="import"?" imp":n.role==="supporting"?" sup":""),n.role));
+  if(n.row)a.appendChild(el("span","via","via "+n.row));
+  var det=null;
+  if(n.import){var t=n.import.track,behind=t&&!t.error&&t.behind?t.behind:0;
+    var sum=n.import.edits+" \u00b7 "+n.import.version+(n.import.version==="tracking"?(!t?" \u00b7 not checked":t.error?" \u00b7 unreachable":behind?" \u00b7 "+behind+" behind":" \u00b7 up to date"):"");
+    a.appendChild(el("span","via"+(behind?" behind":""),sum));
+    det=el("div","det");var line=function(txt,cls){det.appendChild(el("span","cnt"+(cls?" "+cls:""),txt));};
+    line("from "+n.import.source);line("at "+n.import.rev+(n.import.version==="pinned"?", pinned: never checked upstream":""));
+    if(n.import.version==="tracking")line(!t?"upstream not checked since this revision; start checks it":
+      t.error?"upstream unreachable "+ago(t.ago)+" ago":"upstream checked "+ago(t.ago)+" ago: "+(behind?behind+" commit"+(behind===1?"":"s")+" behind":"up to date"),behind?"behind":"");
+    var r=n.relation,mine=D.version==="source"?"this live-spec":"this instance's live-spec";
+    if(r)line(r.rel==="same"?"same live-spec as "+mine:r.rel==="older"?"live-spec "+r.n+" commit"+(r.n===1?"":"s")+" older than "+mine:
+      r.rel==="newer"?"live-spec "+r.n+" commit"+(r.n===1?"":"s")+" newer than "+mine:r.rel==="diverged"?"live-spec diverged from "+mine:
+      "live-spec @ "+n.carries+", not in this history",r.rel==="older"||r.rel==="diverged"?"behind":"");}
+  var bits=[n.words.toLocaleString()+" words"];if(n.dl)bits.push(n.dl+" decision"+(n.dl===1?"":"s"));if(n.watch)bits.push(n.watch+" watch"+(n.watch===1?"":"es"));if(n.sealed)bits.push(n.sealed+" sealed");
+  if(det)det.appendChild(el("span","cnt",bits.join(" \u00b7 ")));else a.appendChild(el("span","cnt",bits.join(" \u00b7 ")));
+  if(n.url===D.current)a.setAttribute("aria-current","page");
+  if(!det)return a;
+  var w=el("div","nw"),tg_=el("button","more","+ details");tg_.type="button";tg_.setAttribute("aria-expanded","false");
+  var key="lspec-imp-"+n.path,openD=false;try{openD=sessionStorage.getItem(key)==="1";}catch(e){}
+  function setD(o){det.hidden=!o;tg_.textContent=o?"\u2212 details":"+ details";tg_.setAttribute("aria-expanded",String(o));try{sessionStorage.setItem(key,o?"1":"0");}catch(e){}if(draw)setTimeout(draw,0);}
+  tg_.addEventListener("click",function(){setD(det.hidden);});setD(openD);
+  w.appendChild(a);w.appendChild(tg_);w.appendChild(det);return w;}
+function tree(p){var ul=el("ul",p===""?"tree":null);(kids[p]||[]).forEach(function(n){var li=el("li");li.appendChild(node(n));if(kids[n.url])li.appendChild(tree(n.url));ul.appendChild(li);});return ul;}
+sec.appendChild(tree(""));
+setFold(!!folded);
+function warn(label,items,cls){if(!items.length)return;var w=el("div","warn"+(cls?" "+cls:""));w.appendChild(el("strong",null,label));var ul=el("ul");items.forEach(function(t){ul.appendChild(el("li",null,t));});w.appendChild(ul);sec.appendChild(w);}
+warn("Collection problems",D.problems);
+warn("Orphans: linked, no split row",D.orphans.map(base));
+warn("Not in the collection",D.disconnected.map(base));
+if(!D.member)sec.appendChild(el("div","warn","This file is not in the collection."));
+else if(D.mirrored)sec.appendChild(el("div","warn imp","Mirrored import: never edited here. Its watches and open items are upstream's."));
+A.appendChild(sec);
+
+// this file: one block per section, sized by its words, colored by its role
+var ROLES=[["header","header"],["store","store"],["registers","registers"],["decisions","decisions"],["rules","rules"],["prose","prose"]];
+var total=D.sections.reduce(function(n,s){return n+s.words;},0);
+var fs=el("div","sec file"),fh=el("h6","fname",base(D.current)+" ");fh.appendChild(el("span",null,"\u00b7 "+total.toLocaleString()+" words"));fs.appendChild(fh);
+var blocks=el("div","blocks");fs.appendChild(blocks);
+var keys=el("div","keys");ROLES.forEach(function(r){var s=el("span"),sw=el("s");sw.style.background="var(--r-"+r[0]+")";if(r[0]==="prose")sw.style.background="var(--faint)",sw.style.border="1px solid var(--line)";s.appendChild(sw);s.appendChild(document.createTextNode(r[1]));keys.appendChild(s);});
+var ks=el("span"),kq=el("s");kq.style.background="var(--faint)";kq.style.outline="1.5px solid var(--ink)";ks.appendChild(kq);ks.appendChild(document.createTextNode("sealed"));keys.appendChild(ks);
+var mk=function(svg,label,t){var sp=el("span","mk");sp.innerHTML='<svg width="12" height="10" viewBox="0 0 12 10" aria-hidden="true">'+svg+'</svg>';sp.appendChild(document.createTextNode(label));if(t)sp.title=t;return sp;};
+var ek=el("div","keys ekeys");
+ek.appendChild(mk('<line x1="0" y1="5" x2="12" y2="5"/><circle class="need" cx="6" cy="5" r="2.8"/>',"depends","the claim whose review a change to its target owes"));
+ek.appendChild(mk('<line x1="0" y1="5" x2="12" y2="5"/><circle class="give" cx="6" cy="5" r="2.8"/>',"depended on","the claim depended on"));
+ek.appendChild(mk('<line x1="6" y1="10" x2="6" y2="3"/><path class="tip" d="M2.5 5.5 L6 0.5 L9.5 5.5 Z"/>',"other file","the edge continues into another file of the folded tree"));
+
+fs.appendChild(keys);fs.appendChild(ek);A.appendChild(fs);
+
+function list(title,rows){if(!rows.length)return;var s=el("div","sec");s.appendChild(el("h6",null,title));var box=el("div","list");rows.forEach(function(r){var a=el("a");a.href=r.href;if(r.ext){a.target="_blank";a.rel="noopener";}
+  a.appendChild(el("b",null,r.mark));a.appendChild(el("span",null,r.text));a.appendChild(el("span","muted",r.n||""));if(r.title)a.title=r.title;box.appendChild(a);});s.appendChild(box);A.appendChild(s);return s;}
+var outSec=list("Outside this collection",D.externals.map(function(x){return {href:x[0],ext:true,mark:"↗",text:(function(u){var m=u.replace(/^https?:\/\//,"").split("/");return m.length>3?m[0]+"/"+m[1]+"/"+m[2]+"/\u2026/"+m[m.length-1]:m.join("/");})(x[0]),title:x[0],n:x[1]>1?"×"+x[1]:""};}));
+var ft=el("div","foot"),fkv=el("dl","kv");   /* where this view came from: the live-spec revision and the commit served */
+var fpair=function(k,v){fkv.appendChild(el("dt",null,k));var d=el("dd");d.appendChild(v);fkv.appendChild(d);};
+if(D.version){var vv=el("span","mono",D.version==="source"?"source (this repository)":D.version);
+  vv.title=D.version==="source"?"this repository is live-spec itself":"the live-spec revision this instance's rules and tool were copied from (main's footer)";fpair("live-spec",vv);}
+if(D.basis)fpair("Basis",el("span","mono",D.basis));
+ft.appendChild(fkv);if(fkv.children.length)A.appendChild(ft);
+
+// sections from the server; scroll position from the page
+function pageY(n){return n.getBoundingClientRect().top+window.scrollY;}
+var heads=[].slice.call(document.querySelectorAll("main h2, main h4")).filter(function(h){return !h.closest("pre")&&!A.contains(h)&&(h.tagName==="H2"||!h.closest("section"));});
+var P=el("div","pane");while(sec.nextSibling)P.appendChild(sec.nextSibling);A.appendChild(P);
+/* links outside the collection and where this view came from: a drawer at the foot, folded by default */
+var dr=el("div","drawer"),db=el("div","dbody"),dt=el("button","fold dfold");dt.type="button";
+var nOut=(D.externals||[]).reduce(function(n,x){return n+1;},0);
+dt.appendChild(el("span",null,(nOut?"Outside links ("+nOut+") \u00b7 ":"")+"version"));
+if(outSec)db.appendChild(outSec);if(ft.parentNode)db.appendChild(ft);dr.appendChild(dt);dr.appendChild(db);A.appendChild(dr);
+function setDr(o){dr.classList.toggle("folded",!o);dt.setAttribute("aria-expanded",String(o));try{localStorage.setItem("lspec-drawer",o?"open":"folded");}catch(e){}if(draw)setTimeout(draw,0);}
+dt.addEventListener("click",function(){setDr(dr.classList.contains("folded"));});
+var drS;try{drS=localStorage.getItem("lspec-drawer");}catch(e){}setDr(drS==="open");
+var fhw=el("div","fhead");fhw.appendChild(fh);A.insertBefore(fhw,P);   /* the file's name stays above its scrolling map */   /* header, search and tree stay; this file's map scrolls */
+var CARD=document.getElementById("lsm-card");A.appendChild(CARD);var KINDNAME={top:"header",term:"term",principle:"principle",decision:"decision",split:"split row",watch:"watch",open:"open item",diag:"diagnostic",param:"parameter",run:"run",rule:"rule"};
+function card(c,anchor){CARD.textContent="";var h=el("div","h"),sq=el("i");sq.style.background="var(--r-"+c.r+")";h.appendChild(sq);h.appendChild(document.createTextNode(c.id));
+  h.appendChild(el("span",null,KINDNAME[c.k]||c.k));if(c.sealed)h.appendChild(el("span","seal","sealed"));CARD.appendChild(h);
+  if(c.cells&&c.cells.length>1)c.cells.forEach(function(x){if(!x[1])return;var p=el("p");if(x[0])p.appendChild(el("small",null,x[0]));p.appendChild(document.createTextNode(x[1]));CARD.appendChild(p);});
+  else CARD.appendChild(el("p",null,c.t||c.s));
+  CARD.hidden=false;var r=anchor.getBoundingClientRect(),ch=CARD.offsetHeight;CARD.style.top=Math.max(8,Math.min(window.innerHeight-ch-8,r.top+r.height/2-ch/2))+"px";}
+function uncard(){CARD.hidden=true;}
+var PEEK=18;
+function peek(z){var s=z.s;CARD.textContent="";var h=el("div","h"),sq=el("i");sq.style.background="var(--r-"+s.role+")";h.appendChild(sq);
+  h.appendChild(document.createTextNode(s.t.replace(/\s+[\u2014\u2013]\s.*$/,"")));h.appendChild(el("span",null,s.role+" \u00b7 "+s.words.toLocaleString()+" w"));CARD.appendChild(h);
+  s.claims.slice(0,PEEK).forEach(function(c){var r=el("div","pk"+(c.sealed?" sealed":"")),q=el("i");q.style.background="var(--r-"+c.r+")";
+    r.appendChild(q);r.appendChild(el("b",null,c.id));r.appendChild(el("em",null,c.s.replace(/^P\d+ \u00b7 /,"")));CARD.appendChild(r);});
+  if(s.claims.length>PEEK)CARD.appendChild(el("div","more","+ "+(s.claims.length-PEEK)+" more \u00b7 click to open"));
+  CARD.hidden=false;var r=z.b.getBoundingClientRect(),ch=CARD.offsetHeight;CARD.style.top=Math.max(8,Math.min(window.innerHeight-ch-8,r.top))+"px";}
+window.addEventListener("scroll",uncard,{passive:true});
+var zones=[],hi=0;
+D.sections.forEach(function(s){var h=s.heads?(heads[hi]||null):null;hi+=s.heads||0;
+  var b=el("div","blk "+s.role);b.tabIndex=0;b.setAttribute("role","button");b.style.setProperty("--rc","var(--r-"+s.role+")");
+  b.appendChild(el("b",null,s.t));b.title=s.t;
+  var bits=[];if(s.words>=150||Object.keys(s.counts).length||s.sealed)bits.push(s.words.toLocaleString()+" w");
+  Object.keys(s.counts).forEach(function(k){bits.push(s.counts[k]+" "+k);});if(s.sealed)bits.push(s.sealed+" sealed");
+  if(bits.length)b.appendChild(el("span",null,bits.join(" \u00b7 ")));
+  var cl=el("div","claims idlist"),items=[];
+  s.claims.forEach(function(c){var it=el("a","ci"+(c.sealed?" sealed":""));var sq=el("i");sq.style.background="var(--r-"+c.r+")";
+    it.appendChild(sq);it.appendChild(el("b",null,c.id));it.appendChild(el("em",null,c.s.replace(/^P\d+ \u00b7 /,"")));it.href="#"+c.id;
+    it.addEventListener("click",function(ev){ev.stopPropagation();pinTo(c.id);});
+    it.addEventListener("mouseenter",function(){card(c,it);});it.addEventListener("mouseleave",uncard);
+    it.addEventListener("focus",function(){card(c,it);});it.addEventListener("blur",uncard);
+    cl.appendChild(it);items.push({c:c,a:it});});
+  if(items.length)b.appendChild(cl);
+  var z={s:s,node:h,b:b,items:items};
+  b.addEventListener("click",function(){if(!b.classList.contains("open")&&items.length){openZone(z);}pin={zone:z};if(h)h.scrollIntoView({block:"start"});else window.scrollTo(0,0);sync();});
+  b.addEventListener("keydown",function(ev){if(ev.key==="Enter"||ev.key===" "){ev.preventDefault();b.click();}});
+  b.addEventListener("mouseenter",function(){if(!b.classList.contains("open")&&items.length)peek(z);});
+  b.addEventListener("mouseleave",uncard);
+  blocks.appendChild(b);zones.push(z);});
+var opened=null;function openZone(z){if(opened&&opened!==z)opened.b.classList.remove("open");opened=z;z.b.classList.add("open");rail();}
+// The connection gutter: a line from each claim to the claim it depends on.
+// Hollow dot = the claim that relies; filled dot = the claim relied on.
+var SVGNS="http://www.w3.org/2000/svg";
+function zoneOf(id){for(var k=0;k<zones.length;k++)for(var m=0;m<zones[k].items.length;m++)if(zones[k].items[m].c.id===id)return zones[k];return null;}
+var outs=[];
+function hotAll(id){[].forEach.call(A.querySelectorAll(".gutter g"),function(g){g.classList.toggle("hot",!!id&&g.dataset.k.indexOf(" "+id+" ")>=0);});}
+function railEnd(id,ids,zoneBy){var z=zoneBy[id],open=z.b.classList.contains("open"),n=open?ids[id].a:z.b.querySelector("b"),r=n.getBoundingClientRect();
+  return {y:r.top+r.height/2,x:open?r.left:z.b.getBoundingClientRect().left,row:open};}
+function rail(){[].slice.call(blocks.querySelectorAll(":scope > .gutter")).forEach(function(n){n.remove();});
+  var here=location.pathname,ids={},zoneBy={},all=[];
+  zones.forEach(function(z){z.items.forEach(function(it){ids[it.c.id]=it;zoneBy[it.c.id]=z;all.push(it);});});
+  var edges=(D.deps||[]).filter(function(e){return e.fromFile===here&&e.toFile===here&&ids[e.from]&&ids[e.to];});
+  outs=(D.deps||[]).filter(function(e){return (e.fromFile===here)!==(e.toFile===here)&&ids[e.fromFile===here?e.from:e.to];})
+    .map(function(e){return {e:e,id:e.fromFile===here?e.from:e.to,file:e.fromFile===here?e.toFile:e.fromFile,mine:e.fromFile===here?"need":"give"};});
+  all.forEach(function(it){it.a.onmouseover=function(){hotAll(it.c.id);};it.a.onmouseout=function(){hotAll(null);};});
+  outs.ids=ids;outs.zoneBy=zoneBy;
+  if(!edges.length){blocks.classList.remove("gut");drawOut();return;}
+  blocks.style.setProperty("--gw",(10+Math.min(edges.length,6)*6)+"px");blocks.classList.add("gut");
+  /* where a line ends: the row when its section is open, else the section's block, at its title */
+  var segs=[],box=blocks.getBoundingClientRect(),end=function(id){var q=railEnd(id,ids,zoneBy);q.y-=box.top;q.x-=box.left;return q;};
+  edges.forEach(function(e){var a1=end(e.from),a2=end(e.to);if(!a1.row&&!a2.row&&zoneBy[e.from]===zoneBy[e.to])return;segs.push({e:e,a:a1,b:a2});});
+  var lanes=[],laneOf=function(lo,hi){for(var L=0;;L++){var ok=(lanes[L]||[]).every(function(s){return hi<s[0]-4||lo>s[1]+4;});if(ok){(lanes[L]=lanes[L]||[]).push([lo,hi]);return L;}}};
+  segs.sort(function(p,q){return Math.abs(p.a.y-p.b.y)-Math.abs(q.a.y-q.b.y);});
+  segs.forEach(function(sg){sg.L=laneOf(Math.min(sg.a.y,sg.b.y),Math.max(sg.a.y,sg.b.y));});
+  var gw=10+lanes.length*6;blocks.style.setProperty("--gw",gw+"px");
+  box=blocks.getBoundingClientRect();segs.forEach(function(sg){sg.a=end(sg.e.from);sg.b=end(sg.e.to);});   /* re-measure at the final padding */
+  var svg=document.createElementNS(SVGNS,"svg");svg.setAttribute("class","gutter");blocks.insertBefore(svg,blocks.firstChild);
+  segs.forEach(function(sg){var X=gw-6-sg.L*6;svg.appendChild(railLine(sg.e,sg.a.x-2,sg.a.y,X,sg.b.x-2,sg.b.y,"need","give"));});
+  drawOut();}
+function railLine(e,x1,y1,X,x2,y2,k1,k2){var g=document.createElementNS(SVGNS,"g");g.dataset.k=" "+e.from+" "+e.to+" ";
+  var p=document.createElementNS(SVGNS,"path");p.setAttribute("d","M"+x1+" "+y1+" H"+X+" V"+y2+" H"+x2);g.appendChild(p);
+  [[x1,y1,k1],[x2,y2,k2]].forEach(function(d){if(!d[2])return;
+    if(d[2]==="tip"){var t=document.createElementNS(SVGNS,"path");   /* continues up, into the folded tree */
+      t.setAttribute("d","M"+(d[0]-3.5)+" "+(d[1]+4.5)+" L"+d[0]+" "+(d[1]-1.5)+" L"+(d[0]+3.5)+" "+(d[1]+4.5)+" Z");t.setAttribute("class","tip");g.appendChild(t);return;}
+    var c=document.createElementNS(SVGNS,"circle");c.setAttribute("cx",d[0]);c.setAttribute("cy",d[1]);c.setAttribute("r",2.6);c.setAttribute("class",d[2]);g.appendChild(c);});
+  return g;}
+/* a line to another file leaves the scrolling pane for the tree above it: its end in this file
+   is held inside the pane's visible span, its other end is the file's line in the tree, or,
+   the tree folded, an arrow at the pane's top */
+function drawOut(){var old=A.querySelector(":scope > .ogutter");if(old)old.remove();if(!outs.length)return;
+  var ab=A.getBoundingClientRect(),pb=P.getBoundingClientRect(),bb=blocks.getBoundingClientRect(),folded=sec.classList.contains("folded");
+  var svg=document.createElementNS(SVGNS,"svg");svg.setAttribute("class","gutter ogutter");A.appendChild(svg);
+  var lo=pb.top-ab.top+3,hi=pb.bottom-ab.top-3;
+  outs.forEach(function(o,i){var q=railEnd(o.id,outs.ids,outs.zoneBy),y=Math.min(hi,Math.max(lo,q.y-ab.top)),X=bb.left-ab.left-9-i*4;
+    var mk=q.y-ab.top===y?o.mine:null,other=o.mine==="need"?"give":"need",tx,ty,tk;
+    if(folded){tx=X;ty=lo+5;tk="tip";}
+    else{var t=A.querySelector('.tree a.n[href="'+o.file+'"] .f'),tr=t?t.getBoundingClientRect():fold.getBoundingClientRect(),tb=A.querySelector(".tree");
+      var tbr=tb?tb.getBoundingClientRect():tr;ty=Math.min(Math.max(tr.top+tr.height/2,tbr.top+2),tbr.bottom-2)-ab.top;tx=tr.left-ab.left-4;tk=other;}
+    svg.appendChild(railLine(o.e,q.x-ab.left-2,y,X,tx,ty,mk,tk));});}
+var outRaf=0;function outSoon(){if(!outRaf)outRaf=requestAnimationFrame(function(){outRaf=0;drawOut();});}
+P.addEventListener("scroll",outSoon,{passive:true});var tbx=A.querySelector(".tree");if(tbx)tbx.addEventListener("scroll",outSoon,{passive:true});
+draw=function(){rail();sync();};                     /* blocks take their content's height: the words are stated, not drawn */
+// What is "current": the claim under a line just below the top edge, which is
+// where a jump lands it; after a click, the clicked thing, until the reader scrolls.
+var LINE=48,pin=null;
+function pinTo(id){pin={id:id};setTimeout(sync,0);}
+function release(){if(pin){pin=null;sync();}}
+["wheel","touchstart"].forEach(function(t){window.addEventListener(t,release,{passive:true});});
+window.addEventListener("keydown",function(ev){if(/^(Arrow(Up|Down)|Page(Up|Down)|Home|End| )$/.test(ev.key)&&!/input|textarea/i.test(ev.target.tagName))release();});
+window.addEventListener("hashchange",function(){if(location.hash.length>1)pinTo(decodeURIComponent(location.hash.slice(1)));});
+function under(list,top,bottom,ref){var hit=null,last=null;list.forEach(function(x){var t=top(x),b=bottom(x);if(t<=ref){last=x;if(b>ref)hit=x;}});return hit||last;}
+// Near the end the page cannot scroll its last sections up to LINE, so over
+// the final screenful the line slides down to the window's bottom edge.
+function refY(){var vh=window.innerHeight,left=document.documentElement.scrollHeight-vh-window.scrollY,
+  slide=left<vh?1-Math.max(0,left)/vh:0;return window.scrollY+LINE+slide*(vh-LINE-12);}
+function sync(){var ref=refY(),on=null,cur=null;
+  if(pin&&pin.id){zones.forEach(function(z){z.items.forEach(function(it){if(it.c.id===pin.id){on=z;cur=it;}});
+      if(!on&&z.node&&z.node.id===pin.id)on=z;});}
+  if(pin&&pin.zone)on=pin.zone;
+  if(!on)on=under(zones,function(z){return z.node?pageY(z.node):0;},function(){return Infinity;},ref+2);
+  zones.forEach(function(z){z.b.classList.toggle("on",z===on);});
+  if(on&&on.items.length&&on!==opened)openZone(on);
+  if(on&&!on.items.length&&opened){opened.b.classList.remove("open");opened=null;rail();}   /* a section with no claims to list closes the last one */
+  if(on&&!cur&&on.items.length){var el_=function(it){return document.getElementById(it.c.id);};
+    cur=under(on.items.filter(el_),function(it){return pageY(el_(it));},function(it){var n=el_(it);return pageY(n)+n.offsetHeight;},ref)||on.items[0];}
+  zones.forEach(function(z){z.items.forEach(function(it){it.a.classList.toggle("cur",it===cur);});});
+  var pr=P.getBoundingClientRect(),glide=function(dy){P.scrollTo({top:P.scrollTop+dy,behavior:REDUCE?"auto":"smooth"});};
+  if(on&&on!==shown){shown=on;var r=on.b.getBoundingClientRect();
+    if(r.top<pr.top+8||r.top>pr.bottom-60)glide(r.top-pr.top-P.clientHeight/4);}
+  if(cur&&cur!==shownC){shownC=cur;var ar=cur.a.getBoundingClientRect();
+    if(ar.top<pr.top+8||ar.bottom>pr.bottom-8)glide(ar.top-pr.top-P.clientHeight/3);}}
+var REDUCE=window.matchMedia&&matchMedia("(prefers-reduced-motion: reduce)").matches;
+var shown=null,shownC=null;
+window.addEventListener("scroll",sync,{passive:true});
+var rt;window.addEventListener("resize",function(){clearTimeout(rt);rt=setTimeout(draw,80);});
+if(location.hash.length>1)pin={id:decodeURIComponent(location.hash.slice(1))};
+if(document.readyState==="complete")draw();else window.addEventListener("load",draw);
+})();
+</script>
+"""
+SERVE_CSS = "/__lspec/lspec.css"
+SERVE_SEARCH = "/__lspec/search"
+SERVE_KINDS = (("dl-split-", "split"), ("dl-", "decision"), ("watch-", "watch"), ("diag-", "diag"),
+               ("kp-", "param"), ("v-", "term"), ("run-", "run"), ("open", "open"))
+SERVE_TOP = ("status", "directive", "conventions", "about")
+
+
+def serve_kind(eid):
+    """A claim's role in the map, from the id conventions of the markup contract."""
+    if eid in SERVE_TOP:
+        return "top"
+    if re.fullmatch(r"p\d+", eid):
+        return "principle"
+    for prefix, kind in SERVE_KINDS:
+        if eid.startswith(prefix):
+            return kind
+    return "rule"
+
+
+SERVE_ROLES = (("header", "header"), ("store", "store"), ("registers", "registers"),
+               ("decisions", "decisions"), ("rules", "rules"), ("prose", "prose"))
+
+
+SERVE_KIND_ROLE = {"top": "header", "param": "store", "term": "store", "run": "store",
+                   "watch": "registers", "open": "registers", "diag": "registers",
+                   "decision": "decisions", "split": "decisions", "principle": "rules", "rule": "rules"}
+
+
+def serve_role(first, claims):
+    """What a section is for, by the claims it holds: the opening section is the
+    header; otherwise the kind most of its claims are."""
+    if first:
+        return "header"
+    tally = {}
+    for c in claims:
+        role = SERVE_KIND_ROLE.get(c["k"]) if c["k"] != "top" else None
+        if role:
+            tally[role] = tally.get(role, 0) + 1
+    rank = ("rules", "store", "decisions", "registers")      # a tie goes to the more specific role
+    return max(tally, key=lambda r: (tally[r], rank.index(r))) if tally else "prose"
+
+
+def serve_cells(raw, eid, start, end):
+    """A table row as [(column heading or "", cell text)], the headings taken
+    from the <th> row of the table it sits in; each cell clipped for a card."""
+    cells = [claim_text(c) for c in re.findall(r"<td\b[^>]*>(.*?)</td>", raw[start:end], re.S | re.I)]
+    if cells:
+        cells[0] = re.sub(r"^" + re.escape(eid) + r"\s*", "", cells[0])
+    table = raw.rfind("<table", 0, start)
+    heads = [norm(h) for h in re.findall(r"<th\b[^>]*>(.*?)</th>", raw[table:start], re.S | re.I)] if table >= 0 else []
+    heads = heads[:len(cells)] if len(heads) >= len(cells) else [""] * len(cells)
+    clip = lambda t: t if len(t) <= 240 else t[:237].rstrip() + "\u2026"
+    return [[h, clip(c)] for h, c in zip(heads, cells)]
+
+
+def serve_sections(spec):
+    """The file cut at each <h2> and at each <h4> outside a <section> (the
+    registers: open items, decision log, fence), in document order, each with
+    its words and its id'd claims. <pre> specimens hold no headings or claims."""
+    raw = spec.raw
+    pre = [(m.start(), m.end()) for m in re.finditer(r"<pre\b.*?</pre>", raw, re.S | re.I)]
+    sect = [(s, e) for eid, (s, e) in spec.elems.items() if spec.tags.get(eid) == "section"]
+    sect += [(m.start(), m.end()) for m in re.finditer(r"<section\b(?![^>]*\bid=).*?</section>", raw, re.S | re.I)]
+    inside = lambda off, spans: any(s <= off < e for s, e in spans)
+    heads = []
+    for m in re.finditer(r"<(h2|h4)\b[^>]*>(.*?)</\1>", raw, re.S | re.I):
+        if inside(m.start(), pre) or (m.group(1).lower() == "h4" and inside(m.start(), sect)):
+            continue
+        heads.append((m.start(), norm(m.group(2))))
+    start = raw.find("<main")
+    start = start if start >= 0 else 0
+    cuts = [(start, "Top matter", False)] + [(o, t, True) for o, t in heads]
+    end = raw.rfind("</main>")
+    end = end if end >= 0 else len(raw)
+    claims = sorted((s, eid) for eid, (s, e) in spec.elems.items()
+                    if spec.tags.get(eid) in ("tr", "section", "li", "p") and not inside(s, pre))
+    sealed = set(spec.sealed)
+    out = []
+    for i, (a, title_, heading) in enumerate(cuts):
+        b = cuts[i + 1][0] if i + 1 < len(cuts) else end
+        chunk = re.sub(r"<pre\b.*?</pre>", " ", raw[a:b], flags=re.S | re.I)
+        own = []
+        for s, eid in claims:
+            text = spec.text(eid) if a <= s < b else None
+            if text:
+                text = re.sub(r"^" + re.escape(eid) + r"\s*", "", text)
+                claim = {"id": eid, "k": serve_kind(eid), "r": SERVE_KIND_ROLE.get(serve_kind(eid), "prose"), "sealed": eid in sealed,
+                         "s": text if len(text) <= 90 else text[:88].rstrip() + "\u2026",
+                         "t": text if len(text) <= 420 else text[:417].rstrip() + "\u2026"}
+                if spec.tags.get(eid) == "tr":
+                    claim["cells"] = serve_cells(raw, eid, *spec.elems[eid])
+                    joined = " \u2014 ".join(t for _, t in claim["cells"] if t)
+                    if joined:
+                        claim["s"] = joined if len(joined) <= 90 else joined[:88].rstrip() + "\u2026"
+                own.append(claim)
+        counts = {}
+        for c in own:
+            label = {"principle": "P", "rule": "\u00b6", "top": None}.get(
+                c["k"], next((pre for pre in ("dl-", "watch-", "diag-", "open-", "kp-", "v-", "run-")
+                              if c["id"].startswith(pre)), None))
+            if label:
+                counts[label] = counts.get(label, 0) + 1
+        out.append({"t": title_, "heading": heading, "words": len(norm(chunk).split()), "claims": own,
+                    "role": serve_role(i == 0, own), "counts": counts,
+                    "sealed": sum(c["sealed"] for c in own)})
+    if len(out) > 1 and not out[0]["claims"] and out[0]["words"] == 0:
+        out.pop(0)
+    # A heading with almost nothing under it (a container like "Decisions and
+    # scope") folds into the section after it; the block keeps its heading.
+    merged = []
+    for sec in out:
+        sec["heads"] = 1 if sec["heading"] else 0
+        if merged and merged[-1]["heading"] and not merged[-1]["claims"] and merged[-1]["words"] < 80 and sec["heading"]:
+            lead = merged.pop()
+            sec = {**sec, "words": sec["words"] + lead["words"], "heads": sec["heads"] + lead["heads"]}
+        merged.append(sec)
+    return merged
+
+
+def carried_version(raw):
+    """What a file's footer records of live-spec: its sha, "source" for
+    live-spec's own files (attribution without a revision), or None."""
+    foot = footer_comment(raw) or ""
+    m = re.search(re.escape(ATTRIBUTION_SOURCE) + r"(?: @ ([0-9a-f]{7,40}))?\.", foot)
+    return (m.group(1) or "source") if m else None
+
+
+def version_relation(carried, mine):
+    """Where a file's live-spec revision CARRIED stands against the instance's
+    own (MINE: a sha, or "source" in live-spec itself, compared with HEAD):
+    {rel: same|older|newer|diverged|unknown, n: commits apart or None}."""
+    if not carried or carried == "source" or not mine:
+        return None
+    ref = "HEAD" if mine == "source" else mine
+    if mine != "source" and (carried.startswith(mine) or mine.startswith(carried)):
+        return {"rel": "same", "n": 0}
+    try:
+        for rev in (carried, ref):
+            git("cat-file", "-e", rev + "^{commit}")
+        a, b = git("rev-parse", carried).strip(), git("rev-parse", ref).strip()
+        if a == b:
+            return {"rel": "same", "n": 0}
+        within = lambda x, y: subprocess.run(["git", "merge-base", "--is-ancestor", x, y],
+                                             capture_output=True).returncode == 0
+        if within(a, b):
+            return {"rel": "older", "n": int(git("rev-list", "--count", f"{a}..{b}").strip())}
+        if within(b, a):
+            return {"rel": "newer", "n": int(git("rev-list", "--count", f"{b}..{a}").strip())}
+        return {"rel": "diverged", "n": None}
+    except (RuntimeError, OSError, ValueError):
+        return {"rel": "unknown", "n": None}
+
+
+def serve_tracking(rec):
+    """The last upstream check start made for a tracking import, if it was of
+    the revision the import holds now: {ago, behind, error} or None."""
+    note = (read_state("tracking.json") or {}).get(rec["name"]) if repo_root() is not None else None
+    if not note or note.get("rev") != rec["rev"]:
+        return None
+    return {"ago": max(0, int(time.time()) - int(note.get("checked", 0))),
+            "behind": note.get("behind"), "error": note.get("error")}
+
+
+def serve_map(col, current, root):
+    """Everything the page's map draws, as plain data. Membership, parents,
+    imports, orphans, edges and problems are the Collection's own verdicts."""
+    url = lambda p: "/" + os.path.relpath(p, root).replace(os.sep, "/")
+    cur = canon(current)
+    nodes = []
+    for p, s in col.specs.items():
+        parent, rid = col.parents.get(p, (None, "main"))
+        chain = col.import_chain(p)
+        rec = chain[-1] if chain else None
+        nodes.append({"url": url(p), "path": rel(p), "parent": url(parent) if parent else None,
+                      "row": rid if parent else None,
+                      "role": "main" if p == col.main else ("import" if rec else "supporting"),
+                      "import": ({"edits": rec["edits"], "version": rec["version"], "rev": rec["rev"][:7],
+                                  "source": re.sub(r"^(https?://|git@)|\.git$", "", rec["source"]),
+                                  "track": serve_tracking(rec) if rec["version"] == "tracking" else None}
+                                 if rec and rec["entry"] == p else None),
+                      "carries": carried_version(s.raw) if rec and rec["entry"] == p else None,
+                      "relation": (version_relation(carried_version(s.raw), carried_version(col.specs[col.main].raw))
+                                   if rec and rec["entry"] == p else None),
+                      "mirrored": col.mirrored(p), "words": spec_words(s),
+                      "dl": len(s.rows("dl-")), "watch": len(s.rows("watch-")), "sealed": len(s.sealed)})
+    deps = [{"from": l["src"], "fromFile": url(fp), "to": fr, "toFile": url(tp)}
+            for fp, l, tp, fr in col.depends_on_edges() if cur in (fp, tp) and l["src"]]
+    spec = col.specs.get(cur)
+    externals = {}
+    if spec is not None:
+        for l in spec.links:
+            path = l["href"].partition("#")[0]
+            if is_external(path):
+                externals[path] = externals.get(path, 0) + 1
+    basis, dirty = stamp()
+    return {"version": carried_version(col.specs[col.main].raw), "basis": basis.replace("basis ", "").replace(" + uncommitted changes", " \u00b7 uncommitted"), "dirty": dirty, "current": url(cur),
+            "member": spec is not None, "mirrored": spec is not None and col.mirrored(cur),
+            "nodes": nodes, "deps": deps,
+            "orphans": [url(p) for p in sorted(col.orphans)],
+            "disconnected": [url(p) for p in col.disconnected],
+            "externals": sorted(externals.items(), key=lambda kv: (-kv[1], kv[0])),
+            "problems": [f for f in col.fails], "fyi": len(col.fyi),
+            "sections": serve_sections(spec) if spec is not None else []}
+
+
+def serve_page(raw, data, root):
+    """The page as served: the instance's own lspec.css when it carries one,
+    the theme applied before first paint, the map before </body>."""
+    boot = ('<script>try{var t=localStorage.getItem("lspec-theme");'
+            'if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;}catch(e){}</script>')
+    if os.path.isfile(os.path.join(root, "lspec.css")):
+        sheet = re.compile(r'<link\b[^>]*rel="stylesheet"[^>]*href="[^"]*(?:water\.css|lspec\.css)[^"]*"[^>]*>', re.I)
+        raw, n = sheet.subn(f'<link rel="stylesheet" href="{SERVE_CSS}">' + boot, raw, count=1)
+        if not n:
+            boot = f'<link rel="stylesheet" href="{SERVE_CSS}">' + boot
+        else:
+            boot = ""
+    if boot:
+        h = raw.lower().find("</head>")
+        raw = raw[:h] + boot + raw[h:] if h >= 0 else boot + raw
+    payload = json.dumps(data).replace("</", "<\\/")
+    asset = SERVE_ASSET.replace("__LSPEC_MAP__", payload)
+    i = raw.lower().rfind("</body>")
+    return raw[:i] + asset + raw[i:] if i >= 0 else raw + asset
+
+
+def serve_refused(path, root):
+    """403 for a dotfile or dot-directory anywhere on the path (.git, .venv,
+    .gitattributes) and for anything that resolves outside the instance."""
+    from urllib.parse import unquote, urlsplit
+    parts = [p for p in unquote(urlsplit(path).path).split("/") if p]
+    if any(p.startswith(".") for p in parts):
+        return True
+    target = os.path.realpath(os.path.join(root, *parts)) if parts else root
+    return not (target == root or target.startswith(root + os.sep))
+
+
+SEARCH_EXACT_MAX, SEARCH_SEMANTIC_TOP = 40, 15
+
+
+def serve_passages(col, least=CHUNK_MIN):
+    """Every passage of every collection file, main included, in collection and
+    document order: [(path, anchor or None, text)]: the chunks find embeds, or
+    with LEAST=1 every word, short claims included (exact search)."""
+    return [(p, a, t) for p, s in col.specs.items() for a, t in spec_chunks(s, least)]
+
+
+def serve_hit(root, path, anchor):
+    url = "/" + os.path.relpath(path, root).replace(os.sep, "/")
+    return {"url": url + ("#" + anchor if anchor else ""), "file": rel(path), "where": anchor or ""}
+
+
+def search_exact(col, query, root):
+    """Literal, case-insensitive: one result per claim, document order, with
+    the text around the first match. Returns (results, total occurrences)."""
+    q = " ".join(query.split()).lower()
+    seen, out, total = set(), [], 0
+    if not q:
+        return out, 0
+    for path, anchor, text in serve_passages(col, least=1):
+        low = text.lower()
+        i = low.find(q)
+        if i < 0 or (path, anchor) in seen:
+            continue
+        seen.add((path, anchor))
+        total += low.count(q)
+        a, b = max(0, i - 70), min(len(text), i + len(q) + 90)
+        out.append({**serve_hit(root, path, anchor), "pre": ("\u2026" if a else "") + text[a:i],
+                    "hit": text[i:i + len(q)], "post": text[i + len(q):b] + ("\u2026" if b < len(text) else "")})
+    return out[:SEARCH_EXACT_MAX], total
+
+
+class ServeSearch:
+    """Semantic search over the whole collection with find's model. One model,
+    loaded once; vectors memoized in serve-vectors.npz, seeded from find's own
+    memo so only passages find never embeds (main's) cost anything."""
+
+    def __init__(self):
+        import threading
+        self.np, self.model, self.lock = import_numpy(), None, threading.Lock()
+        self.problem = None if self.np is not None else (
+            "semantic search needs numpy (uv venv && uv pip install numpy), then run serve again")
+        if self.problem is None and model_problems(model_folder()):
+            self.problem = f"the model in {model_folder()} is not the one this lspec.py pins"
+
+    def embedder(self):
+        if self.model is None:
+            self.model = Embedder(self.np, model_folder())
+        return self.model
+
+    def vectors(self, passages):
+        return cached_vectors(self.np, self.embedder, [t for _, _, t in passages],
+                              name="serve-vectors.npz", borrow=("find-vectors.npz",))
+
+    def warm(self, main):
+        """Embed what the memo lacks before the first question; returns
+        (passages, embedded, seconds) or None."""
+        if self.problem:
+            return None
+        began = time.time()
+        with self.lock:
+            passages = serve_passages(Collection(main))
+            _, embedded = self.vectors(passages)
+            self.embedder()
+        return len(passages), embedded, time.time() - began
+
+    def semantic(self, col, query, root):
+        if self.problem:
+            raise RuntimeError(self.problem)
+        with self.lock:
+            passages = serve_passages(col)
+            vecs, _ = self.vectors(passages)
+            scores = vecs @ self.embedder().embed([query])[0] if passages else []
+        best = {}
+        for (path, anchor, text), score in zip(passages, scores):
+            if (path, anchor) not in best or score > best[(path, anchor)][0]:
+                best[(path, anchor)] = (float(score), text)
+        ranked = sorted(best.items(), key=lambda kv: -kv[1][0])[:SEARCH_SEMANTIC_TOP]
+        return [{**serve_hit(root, p, a), "score": round(sc, 3),
+                 "text": t if len(t) <= 220 else t[:217].rstrip() + "\u2026"} for (p, a), (sc, t) in ranked]
+
+
+def agents_main(root="."):
+    """The main AGENTS.md sends a session to (`lspec.py start MAIN`), or None:
+    an instance names its own main there, not necessarily live-spec.html."""
+    try:
+        with open(os.path.join(root, "AGENTS.md"), encoding="utf-8") as fh:
+            m = re.search(r"lspec\.py\s+start\s+([^\s`'\"]+\.html)", fh.read())
+    except OSError:
+        return None
+    return m.group(1) if m and os.path.exists(os.path.join(root, m.group(1))) else None
+
+
+def cmd_serve(args):
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, unquote, urlsplit
+    import threading
+    if import_numpy() is None and venv_python():          # semantic search wants numpy: the README's .venv
+        argv = [venv_python(), os.path.abspath(__file__)] + (["--main", args.main] if args.main else [])
+        return subprocess.call(argv + ["serve", "--port", str(args.port)] + (["--open"] if args.open else []))
+    main = args.main or default_main() or agents_main()
+    if main is None or not os.path.exists(main):
+        print("lspec serve: no MAIN (pass --main PATH)", file=sys.stderr)
+        return 2
+    root = os.path.realpath(os.getcwd())
+    main = canon(main)
+    main_url = "/" + os.path.relpath(main, root).replace(os.sep, "/")
+
+    class Handler(SimpleHTTPRequestHandler):
+        def log_message(self, fmt, *a):
+            pass
+
+        def send_body(self, body, ctype, code=200):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def do_HEAD(self):
+            self.do_GET()
+
+        def do_GET(self):
+            path = unquote(urlsplit(self.path).path)
+            if path == "/":
+                self.send_response(302); self.send_header("Location", main_url); self.end_headers()
+                return
+            if path == SERVE_CSS:
+                css = os.path.join(root, "lspec.css")
+                if os.path.isfile(css):
+                    with open(css, "rb") as fh:
+                        return self.send_body(fh.read(), "text/css; charset=utf-8")
+                return self.send_error(404)
+            if path == SERVE_SEARCH:
+                q = parse_qs(urlsplit(self.path).query)
+                query, mode = (q.get("q") or [""])[0][:300], (q.get("mode") or ["exact"])[0]
+                began = time.time()
+                try:
+                    col = Collection(main)
+                    if mode == "semantic":
+                        out = {"results": search.semantic(col, query, root)} if query.strip() else {"results": []}
+                    else:
+                        results, total = search_exact(col, query, root)
+                        out = {"results": results, "total": total}
+                except Exception as e:
+                    out = {"error": str(e) or type(e).__name__}
+                out.update(mode=mode, q=query, ms=int((time.time() - began) * 1000))
+                return self.send_body(json.dumps(out).encode("utf-8"), "application/json")
+            if serve_refused(self.path, root):
+                return self.send_error(403, "not served: dotfiles and paths outside the instance")
+            fs = self.translate_path(self.path)
+            if not fs.endswith(".html") or not os.path.isfile(fs):
+                return SimpleHTTPRequestHandler.do_GET(self) if self.command == "GET" else \
+                    SimpleHTTPRequestHandler.do_HEAD(self)
+            with open(fs, encoding="utf-8") as fh:
+                raw = fh.read()
+            try:
+                data = serve_map(Collection(main), fs, root)
+            except Exception as e:   # the spec is never hidden by a map failure
+                data = {"error": f"{type(e).__name__}: {e}"}
+            self.send_body(serve_page(raw, data, root).encode("utf-8"), "text/html; charset=utf-8")
+
+    search = ServeSearch()
+    make = lambda *a, **kw: Handler(*a, directory=root, **kw)
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", args.port), make)
+    except OSError as e:                     # the port is taken: another serve, most often
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), make)
+        print(f"port {args.port} unavailable ({e.strerror or e}); using {srv.server_address[1]}")
+    print(stamp()[0])
+    print(f"serving {rel(main)} at http://127.0.0.1:{srv.server_address[1]}/  "
+          f"(navigation only: the map is not a read; Ctrl-C stops)")
+    if search.problem:
+        print(f"search: exact only; {search.problem}")
+    else:
+        def warm():
+            done = search.warm(main)
+            if done:
+                print(f"search: {done[0]} passage(s) ready, {done[1]} embedded in {done[2]:.1f}s")
+                sys.stdout.flush()
+        threading.Thread(target=warm, daemon=True).start()
+    sys.stdout.flush()
+    if args.open:
+        import webbrowser
+        url = f"http://127.0.0.1:{srv.server_address[1]}{main_url}"
+        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.server_close()
+    return 0
 
 
 def main(argv):
@@ -7812,6 +8716,11 @@ def main(argv):
                     help="embed only the passages the cache lacks, and answer nothing (start and post-commit run it)")
     fd.add_argument("--top", type=int, default=FIND_TOP, metavar="N",
                     help=f"how many to list (default {FIND_TOP})"); add_main(fd)
+    sv = sub.add_parser("serve", help="read the collection in a browser, with a map beside each page",
+                        formatter_class=raw, epilog=HELP["serve"] % SERVE_PORT)
+    sv.add_argument("main_pos", nargs="?", metavar="MAIN"); add_main(sv)
+    sv.add_argument("--port", type=int, default=SERVE_PORT, help=f"port on 127.0.0.1 (default {SERVE_PORT}; 0 picks a free one; a taken port falls back to a free one)")
+    sv.add_argument("--open", action="store_true", help="open main in the default browser once serving (serve.sh / serve.bat pass it)")
     cp = sub.add_parser("copy", help="start a new project from a copy of this main",
                         formatter_class=raw, epilog=HELP["copy"])
     cp.add_argument("--to", metavar="DIR", help="the new repository's directory"); add_main(cp)
@@ -7834,7 +8743,8 @@ def main(argv):
               "check": cmd_check, "show": cmd_show, "neighbors": cmd_neighbors,
               "impact": cmd_impact, "mv": cmd_mv, "review": cmd_review,
               "hook": cmd_hook, "import": cmd_import, "graduate": cmd_graduate,
-              "export": cmd_export, "copy": cmd_copy, "find": cmd_find}[args.verb](args)
+              "export": cmd_export, "copy": cmd_copy, "find": cmd_find,
+              "serve": cmd_serve}[args.verb](args)
         if args.verb in ("check", "show", "neighbors", "impact", "find") and not (
                 getattr(args, "clean", False) or getattr(args, "staged", False)):
             unfinished_notice()

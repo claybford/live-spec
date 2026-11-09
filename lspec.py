@@ -6713,7 +6713,9 @@ def cmd_start(args):
     print(title("OBLIGATIONS"))
     rc, clean = obligations_report(col)
     print_shared_literals(col)
-    imports_report(col)
+    notices = tracking_notices(col)
+    updates_report(notices, col)
+    imports_report(col, notices)
     slots_report(col)
     if (
         in_git
@@ -9859,10 +9861,12 @@ TRACK_TIMEOUT = 30  # seconds per network step of a tracking check at start
 
 
 def tracking_notices(col):
-    """One line per tracking import: behind by N commits, up to date, or
+    """One record per tracking import: behind by N commits, up to date, or
     unreachable; never a block, never a write to the collection
     (portability.html dl-tracking). Each check is kept in lspec/tracking.json,
-    transaction state, so serve can say when upstream was last looked at."""
+    transaction state, so serve can say when upstream was last looked at.
+    -> [{"name", "state", "line"}], state one of behind | current |
+    unreachable | unknown."""
     out, seen = [], read_state("tracking.json") or {}
     for key, rec in sorted(col.imports.items()):
         if rec["nested"] or rec["version"] != "tracking":
@@ -9879,13 +9883,25 @@ def tracking_notices(col):
             tmp, sha = fetch_upstream(rec["source"], batch=True, timeout=TRACK_TIMEOUT)
         except ImportRefused as e:
             note["error"] = str(e)
-            out.append(f"{rec['name']}: upstream unreachable ({e})")
+            out.append(
+                {
+                    "name": rec["name"],
+                    "state": "unreachable",
+                    "line": f"{rec['name']}: upstream unreachable ({e})",
+                }
+            )
             continue
         note["upstream"] = sha
         try:
             if sha == rec["rev"]:
                 note["behind"] = 0
-                out.append(f"{rec['name']}: up to date at {sha[:12]}")
+                out.append(
+                    {
+                        "name": rec["name"],
+                        "state": "current",
+                        "line": f"{rec['name']}: up to date at {sha[:12]}",
+                    }
+                )
                 continue
             try:
                 git_net(
@@ -9900,13 +9916,21 @@ def tracking_notices(col):
                 n = git("rev-list", "--count", f"{rec['rev']}..{sha}", cwd=tmp).strip()
                 note["behind"] = int(n)
                 out.append(
-                    f"{rec['name']}: upstream has {n} new commit(s) since {rec['rev'][:12]}; "
-                    + command(col, "import", "--update", rec["name"])
+                    {
+                        "name": rec["name"],
+                        "state": "behind",
+                        "line": f"{rec['name']}: upstream has {n} new commit(s) since "
+                        f"{rec['rev'][:12]}",
+                    }
                 )
             except RuntimeError:
                 out.append(
-                    f"{rec['name']}: upstream is at {sha[:12]}, the import at {rec['rev'][:12]}; "
-                    + command(col, "import", "--update", rec["name"])
+                    {
+                        "name": rec["name"],
+                        "state": "unknown",
+                        "line": f"{rec['name']}: upstream is at {sha[:12]}, "
+                        f"the import at {rec['rev'][:12]}",
+                    }
                 )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -9918,8 +9942,27 @@ def tracking_notices(col):
     return out
 
 
-def imports_report(col):
-    """The imports of MAIN with their settings, for start."""
+def updates_report(notices, col):
+    """Tracking imports behind upstream, as a recommendation naming the verb;
+    start never applies the update and never blocks on it (dl-tracking)."""
+    behind = [n for n in notices if n["state"] == "behind"]
+    if not behind:
+        return
+    print()
+    print(f"{title('UPDATES RECOMMENDED')} ({len(behind)}):")
+    for n in behind:
+        print(f"  {n['line']}")
+        print(f"  update: {command(col, 'import', '--update', n['name'])}")
+    print(
+        "  take one before work that crosses into its import; the update lands as "
+        "staged changes for the gate"
+    )
+
+
+def imports_report(col, notices):
+    """The imports of MAIN with their settings, for start. Tracking outcomes
+    other than behind are notes here; a behind import is recommended by
+    updates_report, before this section."""
     tops = [r for r in col.imports.values() if not r["nested"]]
     if not tops:
         return
@@ -9954,8 +9997,9 @@ def imports_report(col):
         )
         for p, i in theirs:
             print(f"    {addr(p, i)}")
-    for line in tracking_notices(col):
-        print(f"  {status('note')}: {line}")
+    for n in notices:
+        if n["state"] != "behind":
+            print(f"  {status('note')}: {n['line']}")
     print(
         "  rules: portability.html in the methodology; "
         + cmd("python3 lspec.py import --help")
@@ -10263,7 +10307,8 @@ Both settings are explicit:
                      imported main is demoted in place (status line,
                      conventions, commit types and tooling instruction removed)
   --version pinned   stays at SHA until a deliberate --update
-  --version tracking start reports when upstream has moved; --update applies it
+  --version tracking start recommends --update when upstream has moved; the
+                     verb applies it
 --adopting TEXT says what subject or component the unit is (the selection
 cell); --reason TEXT why it is adopted (the reason cell); --rejected TEXT the
 alternatives (else TBD, which the gate refuses until filled). The result is

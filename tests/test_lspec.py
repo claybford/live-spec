@@ -4044,11 +4044,14 @@ class Imports(unittest.TestCase):
         self.assertEqual(rc, 0, out); commit_reconciled(d)
         rc, out = cli(d, "start")
         self.assertIn("electrical: up to date at", out)
+        self.assertNotIn("UPDATES RECOMMENDED", out)
         edit(u, "electrical.html", "12 V", "24 V"); commit(u, "docs: 24 V")
         commit(u, "docs: again")
         rc, out = cli(d, "start")
+        self.assertEqual(rc, 0, out)                       # a recommendation, not a block
+        self.assertIn("UPDATES RECOMMENDED (1):", out)
         self.assertIn("electrical: upstream has 2 new commit(s) since", out)
-        self.assertIn("import --update electrical", out)
+        self.assertIn("update: python3 lspec.py --main main.html import --update electrical", out)
         self.assertEqual(sh("git", "status", "--porcelain", cwd=d).strip(), "")
         self.assertIn("12 V", Path(d, "imports", "electrical", "electrical.html").read_text())
 

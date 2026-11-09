@@ -2088,7 +2088,7 @@ class RevisionRegressions(unittest.TestCase):
                  'evidence confirmed(source) / provisional(source); commitment locked / open; review WATCH'),
                 ('[ADAPT: 40]', '40'),
                 ('[ADAPT: lspec]', 'lspec'),
-                ('[ADAPT: the commit this seed, lspec.py, hooks/ and models/ were copied from]', '0123456')]:
+                ('[ADAPT: the commit this seed, lspec.py, lspec.css, hooks/ and models/ were copied from]', '0123456')]:
             seed = seed.replace(marker, fill)
         return seed
 

@@ -5,7 +5,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>The Living Specification - a methodology for multi-session AI design</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/claybford/live-spec@639a26d4765b75d7b01baf5c4202aa46b89758c7/lspec.css">
+<link rel="stylesheet" href="lspec.css">
 </head>
 <body>
 
@@ -72,7 +72,7 @@
 <p>Copy the <a href="#dl-seed">seed</a> verbatim into a new file. Read <a href="background.html">background.html</a> whole first: its type mapping supplies the per-domain fills (<a href="#dl-split-background">dl-split-background</a>). Fill its slots using this methodology; resolve every <code data-literal>[ADAPT]</code> choice (validate the template with <code>lspec check --template</code>) &mdash; the footer's revision is the commit the seed and tool were copied from (<a href="portability.html#footer-rule">the version record</a>) &mdash; then put it under version control &mdash; the first commit is typed <code>seed:</code> and starts the lineage. Preserve the operating rules for every structure or mechanism included in the instance, including when entries are added, retained, or removed. Before the seed commit, identify claims whose validity depends on another claim remaining true and wire those dependencies with <code>rel="depends-on"</code>; navigation alone earns no edge. Record the assessment in the seed commit body, including the reason if no dependencies qualify. Assess likewise which settled claims deserve <code>data-sealed</code> protection &mdash; those whose silent change would corrupt intended state, such as irreversible locks and do-not-revert hardenings &mdash; and mark them; there is no minimum count, and the reasoning belongs in the same seed-commit assessment. File a <a href="#v-watch">watch entry</a> for every failure the material already records: the gate asks each commit, the seed commit included, what it watched and what it decided (<a href="#dl-asked">dl-asked</a>). Do not copy this methodology's explanatory body or decision history. Add optional registers when their triggers arise (<a href="#regimes">regimes</a>).</p>
 <pre data-specimen="seed">&lt;!DOCTYPE html&gt;&lt;html lang="en"&gt;&lt;head&gt;&lt;meta charset="UTF-8"&gt;
 &lt;title&gt;[PROJECT] &mdash; Living Specification&lt;/title&gt;
-&lt;link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/claybford/live-spec@639a26d4765b75d7b01baf5c4202aa46b89758c7/lspec.css"&gt;
+&lt;link rel="stylesheet" href="lspec.css"&gt;
 &lt;/head&gt;&lt;body&gt;&lt;main&gt;
 
 &lt;h1&gt;[PROJECT]&lt;/h1&gt;
@@ -133,9 +133,9 @@
 
 &lt;p&gt;Tooling [ADAPT: lspec]: begin with &lt;code&gt;python3 lspec.py start MAIN&lt;/code&gt;
   and follow its output. Without the tool, perform its checks by hand. This
-  instance carries its own copy of the tool, hooks and model; never link a methodology
-  repository in their place. Rules and tool share one revision, the one the
-  footer names, and upgrade together.&lt;/p&gt;
+  instance carries its own copy of the tool, hooks, model and &lt;code&gt;lspec.css&lt;/code&gt;;
+  never link a methodology repository in their place. Rules, tool and stylesheet
+  share one revision, the one the footer names, and upgrade together.&lt;/p&gt;
 
 &lt;h2 id="params"&gt;Key Parameters &mdash; single source of truth&lt;/h2&gt;
 &lt;table&gt;&lt;tr&gt;&lt;th&gt;Parameter&lt;/th&gt;&lt;th&gt;Value&lt;/th&gt;&lt;th&gt;Status &middot; provenance&lt;/th&gt;&lt;/tr&gt;&lt;/table&gt;
@@ -176,7 +176,7 @@
        and read-only tasks included. --&gt;
 
 &lt;/main&gt;&lt;/body&gt;&lt;/html&gt;
-&lt;!-- github.com/claybford/live-spec @ [ADAPT: the commit this seed, lspec.py, hooks/ and models/ were copied from]. Clayton Ford, 2026. MIT. --&gt;</pre>
+&lt;!-- github.com/claybford/live-spec @ [ADAPT: the commit this seed, lspec.py, lspec.css, hooks/ and models/ were copied from]. Clayton Ford, 2026. MIT. --&gt;</pre>
 
 <hr>
 
@@ -450,7 +450,7 @@
 <tr id="dl-split-background"><td><code>dl-split-background</code> <a href="background.html">background.html</a> holds the type mapping, the anti-patterns and the format rationale: read whole at seeding; no maintenance move of the <a href="#protocol">protocol</a> crosses into it</td><td>Keep it in main; an explainer outside the collection, with no split row</td><td>Every session reads main whole; exposition no maintenance move reads is a per-session tax (<a href="#dl-wholeload">dl-wholeload</a>). First live example of <a href="#p19">P19</a>. If a commit to main ever needs this file read first, merge it back.</td></tr>
 <tr id="dl-split-serve"><td><code>dl-split-serve</code> <a href="serve.html">serve.html</a> holds the design of <code>lspec serve</code>, the collection read by people in a browser with a map and search: read whole when a change touches serve, its sidebar or its launchers</td><td>Keep it in main&rsquo;s decision log; a README section</td><td>Every session reads main whole (<a href="#dl-wholeload">dl-wholeload</a>), but serve binds only reading by people, never operating a spec; a README is a second home the gate never reads.</td></tr>
 <tr id="dl-split-portability"><td><code>dl-split-portability</code> <a href="portability.html">portability.html</a> holds how content moves between repositories &mdash; import, export, graduation, copying a main &mdash; and the tool verbs that do it: read whole when a move does any of those or changes that surface</td><td>Keep it in main; a tool README; rules carried in every instance's seed</td><td>Main is past its word mark and every session reads it whole (<a href="#dl-wholeload">dl-wholeload</a>), while these rules bind only moves that cross repositories; a README is a second home the gate never reads (<a href="#dl-portability">dl-portability</a>).</td></tr>
-<tr id="dl-substrate"><td><code>dl-substrate</code> One HTML file per spec, styled by one external classless stylesheet, <code>lspec.css</code>, pinned by commit, keyed only on the <a href="#substrate">markup contract</a>; "self-contained" scopes to the state</td><td>Replaced: water.css, blind to the contract; a design system spec authors apply by class; Markdown; embedding the stylesheet</td><td>Rows, seals, watches and typed edges are what a reader scans; a classless sheet shows them without one added attribute, and no session reads it (<a href="background.html#format">the format</a>). Offline, plain HTML.</td></tr>
+<tr id="dl-substrate"><td><code>dl-substrate</code> One HTML file per spec, styled by one external classless stylesheet, <code>lspec.css</code>, carried in the collection, keyed only on the <a href="#substrate">markup contract</a>; "self-contained" scopes to the state</td><td>Replaced: water.css, blind to the contract; a CDN-pinned sheet; a design system spec authors apply by class; Markdown; embedding the stylesheet</td><td>Rows, seals, watches and typed edges are what a reader scans; a classless sheet shows them without one added attribute, and no session reads it (<a href="background.html#format">the format</a>). Offline, the collection carries it.</td></tr>
 <tr id="dl-adapt"><td><code>dl-adapt</code> Mark domain-specific choices <code data-literal>[ADAPT]</code> rather than prescribe</td><td>One prescribed vocabulary / format for all domains</td><td>The marking vocabulary is per-document, the discipline is not; <a href="background.html#generalize">the type mapping</a> supplies per-domain fills.</td></tr>
 <tr id="dl-index"><td><code>dl-index</code> Distinguish store-as-container from <a href="#v-index">indexed authority</a>; document&nbsp;&larr;&nbsp;artifact for actual behavior</td><td>"The document is always the state"; implementation behavior overriding approved requirements</td><td>The running artifact establishes actual behavior; fix stale observations in the document. Required behavior remains governed by approved requirements (<a href="#p1">P1</a>, <a href="#p7">P7</a>).</td></tr>
 <tr id="dl-decay"><td><code>dl-decay</code> "Confirmed" is not final &mdash; an event adds <a href="#v-watch">watch</a> beside it; resolution re-confirms or demotes to provisional</td><td>Confirmed as a terminal state</td><td>The environment moves under a live design. Mechanics: <a href="#dl-watchreg">dl-watchreg</a>.</td></tr>

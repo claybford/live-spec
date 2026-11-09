@@ -1104,6 +1104,28 @@ class C(unittest.TestCase):
     def test_pass_line_lists_declared_counts(self):
         rc, out = run(); self.assertIn("4 cornerstones, 2 principles, 5 differences", out)
 
+    def test_a_spec_without_lspec_py_is_not_held_to_the_tool_set(self):
+        rc, out = run(); self.assertEqual(rc, 0, out); self.assertNotIn("[toolset]", out)
+
+    def test_an_instance_missing_its_tool_set_fails(self):
+        rc, out = run(files={"lspec.py": "# tool\n", "lspec.css": "body{}\n"})
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn("lspec.css is missing", out)
+        self.assertIn("[toolset] serve.sh is missing", out)
+        self.assertIn("[toolset] hooks/pre-commit is missing", out)
+        self.assertIn(f"[toolset] models/{lspec.MODEL_NAME}/weights.npz is missing", out)
+
+    def test_a_complete_tool_set_passes(self):
+        files = {"lspec.py": "# tool\n", "lspec.css": "body{}\n",
+                 "serve.sh": "#!/bin/sh\n", "serve.bat": "@echo off\n",
+                 ".gitattributes": "lspec.py text eol=lf\n",
+                 f"models/{lspec.MODEL_NAME}/weights.npz": "",
+                 f"models/{lspec.MODEL_NAME}/LICENSE": ""}
+        for name in lspec.GATE_HOOKS + ("post-commit",):
+            files[f"hooks/{name}"] = "#!/bin/sh\nexit 0\n"
+        rc, out = run(files=files)
+        self.assertEqual(rc, 0, out); self.assertNotIn("[toolset]", out)
+
 
 class W(unittest.TestCase):
     """Windows portability: git arguments, commit subjects and href values must
@@ -2579,6 +2601,16 @@ class HookIntegration(unittest.TestCase):
         """A temp repo with lspec.py committed and the gate hooks installed."""
         d = self.track(tempfile.mkdtemp())
         shutil.copy(os.path.join(self.HOOKS, '..', 'lspec.py'), os.path.join(d, 'lspec.py'))
+        os.makedirs(os.path.join(d, 'hooks'), exist_ok=True)
+        shutil.copy2(os.path.join(self.HOOKS, 'post-commit'), os.path.join(d, 'hooks', 'post-commit'))
+        for name, text in (('lspec.css', 'body{}\n'), ('serve.sh', '#!/bin/sh\n'),
+                           ('serve.bat', '@echo off\n'),
+                           ('.gitattributes', 'lspec.py text eol=lf\n')):
+            Path(d, name).write_text(text)
+        model = Path(d, 'models', lspec.MODEL_NAME)
+        model.mkdir(parents=True)
+        for name in lspec.MODEL_PINS:
+            (model / name).write_text('')
         Path(d, 'main.html').write_text(MAIN.format(extra=''))
         Path(d, 'motor.html').write_text(MOTOR.format(extra=''))
         sh('git', 'init', '-q', cwd=d)
@@ -2638,8 +2670,9 @@ class HookIntegration(unittest.TestCase):
     def test_post_commit_lists_leftovers_and_is_silent_when_clean(self):
         d = self.hrepo()
         self.install(d, 'post-commit')
-        sh('git', 'add', 'hooks/post-commit', cwd=d)
-        self.assertEqual(self.gcommit(d, 'docs: install completion hook').returncode, 0)
+        # hrepo carries hooks/post-commit already; installing the symlink is
+        # .git state, so the commit that proves it runs is an empty audit.
+        self.assertEqual(self.gcommit(d, 'audit: install completion hook').returncode, 0)
         Path(d, 'unfinished.txt').write_text('draft')
         result = self.gcommit(d, 'audit: session event')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -3684,6 +3717,10 @@ def upstream(bus="12 V"):
     # The real post-commit only lists leftovers and warms find; this stand-in
     # stays quiet so a copied installation proves it runs cleanly.
     Path(u, "hooks", "post-commit").write_text("#!/bin/sh\nexit 0\n")
+    model = Path(u, "models", lspec.MODEL_NAME)
+    model.mkdir(parents=True)
+    for name in lspec.MODEL_PINS:
+        (model / name).write_text("")
     sh("git", "init", "-q", cwd=u)
     commit(u, "seed: electrical")
     return u

@@ -2215,6 +2215,40 @@ def attribution_failure(path, raw):
     )
 
 
+TOOLSET_FILES = ("lspec.css", "serve.sh", "serve.bat", ".gitattributes")
+
+
+def toolset_failures(col):
+    """An instance that carries lspec.py carries the rest of the tool set at
+    the same revision: the stylesheet, the launchers, the line-ending
+    attributes, the gate hook sources and find's model (the seed's tooling
+    paragraph; dl-rule-locality, dl-substrate). Judged against the selected
+    basis, beside main; a bare template, with no lspec.py, is not an instance
+    yet."""
+    root = os.path.dirname(col.main)
+    at = col._exists if hasattr(col, "_exists") else os.path.exists
+    if not at(os.path.join(root, "lspec.py")):
+        return []
+    hint = (
+        "the instance carries the whole tool set at one revision; copy it from "
+        "the same live-spec commit (python3 lspec.py hook --help)"
+    )
+    out = []
+    for name in TOOLSET_FILES:
+        if not at(os.path.join(root, name)):
+            out.append(f"[toolset] {name} is missing beside lspec.py — {hint}")
+    for name in GATE_HOOKS + ("post-commit",):
+        if not at(os.path.join(root, "hooks", name)):
+            out.append(f"[toolset] hooks/{name} is missing — {hint}")
+    for name in MODEL_PINS:
+        if not at(os.path.join(root, MODEL_DIR, name)):
+            out.append(
+                f"[toolset] {posix(os.path.join(MODEL_DIR, name))} is missing — "
+                "find's model travels with the tool; copy it from the same live-spec commit"
+            )
+    return out
+
+
 def check_structure(col, specimens=True, markers=True):
     """Structural failures of the collection. A defect wholly inside a
     mirrored import is upstream's to fix: it goes to col.fyi, not the result
@@ -2224,6 +2258,8 @@ def check_structure(col, specimens=True, markers=True):
     imported = getattr(col, "imported", lambda p: False)
     commit_types(col, fails)
     main = getattr(col, "main", None)
+    if main is not None:
+        fails += toolset_failures(col)
     if main in col.specs and (
         failure := attribution_failure(main, col.specs[main].raw)
     ):
@@ -10179,6 +10215,9 @@ accounting questions to answer, the handoff commit and the start --resume
 command for a follow-up.""",
     "check": """\
 Validates structure: anchors, ids, counts, cell caps, row labels, markers.
+An instance carrying lspec.py must carry the rest of the tool set beside it —
+lspec.css, serve.sh, serve.bat, .gitattributes, hooks/ and find's model; a
+missing one fails (the seed's tooling paragraph).
 Notes an .html file under main's directory that the collection does not reach;
 one that declares its own data-commit-types outside imports/ is a second
 operating main and fails (one operating main per repository; another

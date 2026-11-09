@@ -5,7 +5,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>The Living Specification - a methodology for multi-session AI design</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/claybford/live-spec@639a26d4765b75d7b01baf5c4202aa46b89758c7/lspec.css">
 </head>
 <body>
 
@@ -72,7 +72,7 @@
 <p>Copy the <a href="#dl-seed">seed</a> verbatim into a new file. Read <a href="background.html">background.html</a> whole first: its type mapping supplies the per-domain fills (<a href="#dl-split-background">dl-split-background</a>). Fill its slots using this methodology; resolve every <code data-literal>[ADAPT]</code> choice (validate the template with <code>lspec check --template</code>) &mdash; the footer's revision is the commit the seed and tool were copied from (<a href="portability.html#footer-rule">the version record</a>) &mdash; then put it under version control &mdash; the first commit is typed <code>seed:</code> and starts the lineage. Preserve the operating rules for every structure or mechanism included in the instance, including when entries are added, retained, or removed. Before the seed commit, identify claims whose validity depends on another claim remaining true and wire those dependencies with <code>rel="depends-on"</code>; navigation alone earns no edge. Record the assessment in the seed commit body, including the reason if no dependencies qualify. Assess likewise which settled claims deserve <code>data-sealed</code> protection &mdash; those whose silent change would corrupt intended state, such as irreversible locks and do-not-revert hardenings &mdash; and mark them; there is no minimum count, and the reasoning belongs in the same seed-commit assessment. File a <a href="#v-watch">watch entry</a> for every failure the material already records: the gate asks each commit, the seed commit included, what it watched and what it decided (<a href="#dl-asked">dl-asked</a>). Do not copy this methodology's explanatory body or decision history. Add optional registers when their triggers arise (<a href="#regimes">regimes</a>).</p>
 <pre data-specimen="seed">&lt;!DOCTYPE html&gt;&lt;html lang="en"&gt;&lt;head&gt;&lt;meta charset="UTF-8"&gt;
 &lt;title&gt;[PROJECT] &mdash; Living Specification&lt;/title&gt;
-&lt;link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css"&gt;
+&lt;link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/claybford/live-spec@639a26d4765b75d7b01baf5c4202aa46b89758c7/lspec.css"&gt;
 &lt;/head&gt;&lt;body&gt;&lt;main&gt;
 
 &lt;h1&gt;[PROJECT]&lt;/h1&gt;

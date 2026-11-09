@@ -7038,7 +7038,7 @@ def cmd_export(args):
         chosen.append(found)
     title_ = html.escape(f"Export from {rel(col.main)} @ {sha[:12]}")
     out = ['<!DOCTYPE html>', '<html lang="en"><head><meta charset="UTF-8">', f'<title>{title_}</title>',
-           '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css">',
+           '<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/claybford/live-spec@639a26d4765b75d7b01baf5c4202aa46b89758c7/lspec.css">',
            '</head><body><main>', f'<h1 id="top">{title_}</h1>',
            f'<p id="about">A one-off export (the methodology\'s portability.html): subject-shaped material selected from '
            f'<code>{html.escape(source)}</code> at <code>{sha}</code>, each item carrying its provenance and '

@@ -9954,8 +9954,8 @@ def updates_report(notices, col):
         print(f"  {n['line']}")
         print(f"  update: {command(col, 'import', '--update', n['name'])}")
     print(
-        "  take one before work that crosses into its import; the update lands as "
-        "staged changes for the gate"
+        "  run it before work that reads or relies on the imported files; the update "
+        "leaves them staged for the normal reconcile and commit"
     )
 
 

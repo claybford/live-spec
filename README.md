@@ -37,6 +37,9 @@ better.
   `lspec.py`. Apache-2.0, not MIT; its folder records the source revision, the
   changes made and how to rebuild it. It travels with `lspec.py`, which pins its
   checksums.
+- **`lspec.css`** — the one classless stylesheet each spec loads; it is carried
+  beside the tool, served offline by `lspec serve`, and travels with a copy or a
+  graduation.
 - **`serve.html`** — supporting spec for `lspec serve`, the collection read in a
   browser with a map and search; its design and decisions.
 - **`serve.sh`** and **`serve.bat`** — double-click to read the collection in
@@ -54,7 +57,8 @@ checkout of this repository as the artifact under test.
 ## Using it
 
 Hand this repository to an AI coding agent — a clone, or at least its HTML
-files, `lspec.py`, `hooks/` and `models/` — along with the work you want
+files, `lspec.py`, `lspec.css`, `hooks/`, `models/`, `serve.sh`, `serve.bat` and
+`.gitattributes` — along with the work you want
 captured, and say "capture this into this format." The agent instantiates a
 living specification: a persistent, cross-session, human- and machine-readable
 definition that any future session, or you, can pick up cold. The spec's

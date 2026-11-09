@@ -3674,6 +3674,10 @@ def upstream(bus="12 V"):
     Path(u, "sizing.html").write_text('<p id="x">sizing, no split row</p>')
     Path(u, "notes.md").write_text("measured\n")
     Path(u, "lspec.py").write_text("# upstream's tool copy\n")
+    Path(u, "lspec.css").write_text("body{}\n")
+    Path(u, "serve.sh").write_text("#!/bin/sh\n")
+    Path(u, "serve.bat").write_text("@echo off\n")
+    Path(u, ".gitattributes").write_text("lspec.py text eol=lf\n")
     Path(u, "hooks").mkdir(); Path(u, "hooks", "pre-commit").write_text("#!/bin/sh\n")
     sh("git", "init", "-q", cwd=u)
     commit(u, "seed: electrical")
@@ -3737,6 +3741,23 @@ class Imports(unittest.TestCase):
         self.assertNotIn("[adapt]", out)
         rc, out = do_import(d, u)
         self.assertEqual(rc, 2); self.assertIn("already imported", out)
+
+    def test_a_linked_stylesheet_stays_behind_as_tool(self):
+        """dl-selection: lspec.css is the tool's, not the unit's; a spec that
+        links it must not drag upstream's copy into imports/."""
+        u, d = upstream(), importer()
+        edit(u, "electrical.html", "<html>", '<html><head><link rel="stylesheet" href="lspec.css"></head>')
+        commit(u, "docs: link the stylesheet")
+        rc, out = do_import(d, u, "mirrored", "pinned", "electrical", "--dry-run")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("left behind, upstream's tool copy: lspec.css, lspec.py", out)
+        rc, out = do_import(d, u)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(Path(d, "imports", "electrical", "lspec.css").exists())
+
+    def test_the_tool_set_carries_the_stylesheet_and_launchers(self):
+        for name in ("lspec.py", "lspec.css", "serve.sh", "serve.bat", ".gitattributes"):
+            self.assertIn(name, lspec.TOOL_FILES)
 
     def test_the_adoption_answer_binds_the_row_text(self):
         """diag-gatedigest: the import item shows the split row's text and asks
@@ -4398,6 +4419,8 @@ class Graduation(unittest.TestCase):
         self.assertIn("python3 lspec.py start battery.html", text)
         self.assertIn('id="capacity"', text)
         self.assertTrue(Path(b, "lspec.py").exists() and Path(b, "hooks", "pre-commit").exists())
+        for name in ("lspec.css", "serve.sh", "serve.bat", ".gitattributes"):
+            self.assertTrue(Path(b, name).exists(), name)
         self.assertIn("battery.html", Path(b, "AGENTS.md").read_text())
         # the seeding session: fill the slots, drop the links back to the parent, seed
         text = re.sub(r"Status: \[ADAPT: forward design \| live-system\]\. Locked: \[ADAPT\]\.", "Status: live-system. Locked: nothing.", text)
@@ -4535,6 +4558,8 @@ class CopyMain(unittest.TestCase):
         self.assertIn(f"provisional(inherited from electrical.html @ {sha[:12]}; ", text)
         self.assertNotIn("data-sealed", text); self.assertIn("[ADAPT: forward design | live-system]", text)
         self.assertTrue(Path(n, "battery.html").exists())
+        for name in ("lspec.py", "lspec.css", "serve.sh", "serve.bat", ".gitattributes"):
+            self.assertTrue(Path(n, name).exists(), name)
         self.assertEqual(lspec.model_problems(os.path.join(n, lspec.MODEL_DIR)), [])   # the model travels, intact
         # the seeding session: status, slot, the watch; keep dl-bus, delete dl-split-battery? no — keep it,
         # modify the watch's wording, reopen nothing, delete nothing

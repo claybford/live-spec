@@ -7908,9 +7908,14 @@ def warm_elsewhere(args):
 
 
 def copy_tool(root, dest):
-    """The tool a new repository carries: this lspec.py, ROOT's hooks, and the
-    model beside this lspec.py, so tool and model share one revision."""
+    """The tool a new repository carries: this lspec.py, the stylesheet and
+    launchers beside it, ROOT's line-ending attributes and hooks, and the model
+    beside this lspec.py, so all travel at one revision."""
     shutil.copy(__file__, os.path.join(dest, "lspec.py"))
+    for name in ("lspec.css", "serve.sh", "serve.bat", ".gitattributes"):
+        src = os.path.join(root, name)
+        if os.path.isfile(src):
+            shutil.copy(src, os.path.join(dest, name))
     hooks = os.path.join(root, "hooks")
     if os.path.isdir(hooks):
         shutil.copytree(hooks, os.path.join(dest, "hooks"))
@@ -8127,6 +8132,10 @@ def cmd_pick(args):
 
 TOOL_FILES = (
     "lspec.py",
+    "lspec.css",
+    "serve.sh",
+    "serve.bat",
+    ".gitattributes",
     "hooks",
     "models",
 )  # upstream's tool copy stays behind (dl-selection)
@@ -9152,7 +9161,8 @@ def graduate_prepare(col, args):
     source = args.remote or posix(dest)
     print(
         f"graduated {rel(path)} as committed at {sha[:12]} into {args.to}/{os.path.basename(path)}, "
-        f"converted to a main; lspec.py, hooks/, models/ and AGENTS.md copied; staged, nothing committed"
+        f"converted to a main; the tool (lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes), "
+        f"hooks/, models/ and AGENTS.md copied; staged, nothing committed"
     )
     for n in notes:
         print(f"  {status('note')}: {n}")
@@ -10120,7 +10130,7 @@ commit-msg refuses a message whose subject or trailers differ from the receipt;
 post-commit lists files still uncommitted and prints nothing when there are
 none. Sources must keep executable modes. Upgrading an instance is one move
 from one live-spec commit, rules, tool and stylesheet together: copy that commit's
-lspec.py, lspec.css, hooks/ and models/ and install the hooks; bring every paragraph the instance took from the
+lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes, hooks/ and models/ and install the hooks; bring every paragraph the instance took from the
 seed (status-line instruction, conventions, decisions, session, dependencies,
 tooling, open items, record) to that commit's seed text, keeping the
 instance's own [ADAPT] answers; set the footer line to that commit with the
@@ -10151,7 +10161,8 @@ import (the methodology's portability.html). copy --to DIR seeds a new repositor
 from this collection's owned files as committed at HEAD: every confirmed(...)
 token becomes provisional(inherited from MAIN @ COMMIT; ...), every data-sealed
 is lifted (seals are reassessed at the seed), the status line is reset to
-[ADAPT] slots to re-derive whole, lspec.py, hooks/, models/ and AGENTS.md ride along;
+[ADAPT] slots to re-derive whole, the tool (lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes),
+hooks/, models/ and AGENTS.md ride along;
 all staged, nothing committed. The first commit is seed: and its gate asks one
 judgment per inherited decision row, watch entry, open item, diagnostic row,
 fence and directive, against the staged file:
@@ -10174,7 +10185,8 @@ is recorded as the source when given, else DIR's path). FILE as committed in
 this parent at COMMIT (default HEAD) is converted to a main — the parent's
 conventions, session and tooling paragraphs inserted after its heading, a
 status line of [ADAPT] slots for the seeding session to fill, the parent's
-footer carried — with lspec.py, hooks/, models/ and AGENTS.md beside it, all staged.
+footer carried — with the tool (lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes),
+hooks/, models/ and AGENTS.md beside it, all staged.
 Its first commit is a seed: (fresh history: the parent's commits name another
 main's gate), whose body names the source: graduated from <repo> @ <commit>.
 
@@ -10191,8 +10203,8 @@ Adopts another repository's subject-shaped content (the methodology's
 portability.html). SOURCE is a git URL or local path, ENTRY the unit's entry file in
 it; --at REV picks a commit, tag or branch (default: upstream HEAD). The unit
 is ENTRY, everything its split rows reach (upstream's own imports included) and
-every other upstream file those specs link; upstream's lspec.py, hooks/ and
-models/ stay behind. It is listed, then written under imports/NAME/ with upstream's layout,
+every other upstream file those specs link; upstream's tool (lspec.py, lspec.css,
+serve.sh, serve.bat, .gitattributes), hooks/ and models/ stay behind. It is listed, then written under imports/NAME/ with upstream's layout,
 and a split row dl-split-NAME is added to MAIN's decision log carrying the
 settings in one declaration: <code data-import>SOURCE @ SHA EDITS VERSION</code>.
 Both settings are explicit:

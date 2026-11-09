@@ -2658,6 +2658,19 @@ class HookIntegration(unittest.TestCase):
         self.assertIn("OPEN [subject] type 'chore' is not declared", result.stdout)
         self.assertIn('no reconcile receipt', result.stderr)
 
+    def test_a_head_with_a_second_main_can_be_repaired(self):
+        """watch-headrule: an instance whose HEAD carries a hand-copied
+        methodology main (from before dl-onemain) commits its removal
+        through the live hooks; the gate does not stop on HEAD's finding."""
+        d = self.hrepo()
+        Path(d, 'live-spec').mkdir()
+        Path(d, 'live-spec/live-spec.html').write_text(T.OTHER)
+        self.oob(d, 'docs: hand-copied methodology', 'live-spec')
+        sh('git', 'rm', '-rq', 'live-spec', cwd=d)
+        r = self.gcommit(d, 'docs: remove the hand-copied methodology main')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn('unreadable', r.stdout)
+
     def test_commit_message_carries_reconciled_subject_and_trailers(self):
         d = self.hrepo()
         edit(d, 'motor.html', '120 kW', '105 kW')
@@ -3397,6 +3410,29 @@ class SealGate(unittest.TestCase):
         edit(d, 'sub/main.html', ' data-sealed', '')
         _, sealed, _ = self.sealed(d, main='sub/main.html')
         self.assertIn('sealed:main.html#req', sealed)          # old address named
+
+    def test_a_head_finding_leaves_the_baseline_readable(self):
+        """watch-headrule: a HEAD that predates dl-onemain (a hand-copied
+        methodology main beside the instance's) is a finding about HEAD, not
+        an unreadable baseline. A commit removing it gets a baseline; one
+        keeping it is refused on the staged candidate, as before."""
+        d = lrepo()
+        Path(d, 'live-spec').mkdir()
+        Path(d, 'live-spec/live-spec.html').write_text(T.OTHER)
+        commit(d, 'docs: hand-copied methodology')
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        sh('git', 'add', '-A', cwd=d)
+        _, items, _ = evaluate_in(d)
+        self.assertFalse([it for it in items if it['kind'] == 'baseline'], items)
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            staged = lspec.Collection('main.html', basis='staged')
+        finally:
+            os.chdir(cwd)
+        self.assertTrue(any('second operating main' in f for f in staged.fails))
+        sh('git', 'rm', '-rq', 'live-spec', cwd=d)
+        _, items, _ = evaluate_in(d)
+        self.assertFalse([it for it in items if it['kind'] == 'baseline'], items)
 
     def test_a_supporting_specs_sealed_claim_is_asked(self):
         """dl-seal: a seal in a supporting spec takes part

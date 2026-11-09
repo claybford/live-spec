@@ -1510,6 +1510,9 @@ class Collection:
             [],
         )
         self.fyi = []  # defects wholly inside mirrored imports: upstream's to fix
+        # The subset of fails that are files this basis could not read: the
+        # only ones that leave a baseline incomplete (head_collection).
+        self.read_fails = []
         self.imports = (
             {}
         )  # name -> {source, rev, edits, version, dir, entry, row: (path, rid)}
@@ -1629,6 +1632,7 @@ class Collection:
             s, err = self._read(p)
             if err:
                 self.fails.append(err)
+                self.read_fails.append(err)
                 continue
             if s is None:
                 continue  # main/file absent at this basis: empty collection
@@ -1713,7 +1717,9 @@ class Collection:
                 self.fails.append(
                     f"[collection] {rel(fp)} declares its own commit vocabulary: "
                     f"a second operating main — one operating main per repository; "
-                    f"another repository's main is imported under {IMPORTS_DIR}/"
+                    f"remove it (a hand-copied methodology: the instance carries its "
+                    f"own rules and tool), or import another repository's main under "
+                    f"{IMPORTS_DIR}/"
                 )
             else:
                 self.disconnected.append(fp)
@@ -2871,14 +2877,17 @@ def renamed_from(root, new_abs):
 
 def head_collection(col):
     """MAIN's collection at HEAD, following a staged rename of main. Raises
-    HistoryUnavailable when the baseline cannot be read completely."""
+    HistoryUnavailable when the baseline cannot be read completely. HEAD's
+    own findings (a second operating main, an orphan, a ghost row) leave it
+    readable: they are judged on the staged candidate, which is how a commit
+    repairs a HEAD that predates a rule (watch-headrule)."""
     head = Collection(rel(col.main), basis="HEAD")
     if col.main not in head.specs:
         old = renamed_from(repo_root(), col.main)
         if old:
             head = Collection(old, basis="HEAD")
-    if head.fails:
-        raise HistoryUnavailable("; ".join(head.fails))
+    if head.read_fails:
+        raise HistoryUnavailable("; ".join(head.read_fails))
     return head
 
 
@@ -10220,8 +10229,9 @@ lspec.css, serve.sh, serve.bat, .gitattributes, hooks/ and find's model; a
 missing one fails (the seed's tooling paragraph).
 Notes an .html file under main's directory that the collection does not reach;
 one that declares its own data-commit-types outside imports/ is a second
-operating main and fails (one operating main per repository; another
-repository's main is imported under imports/). --staged validates the index; --template skips the
+operating main and fails (one operating main per repository: remove it, or
+import another repository's main under imports/; a HEAD that still carries
+one is repaired by an ordinary gated commit). --staged validates the index; --template skips the
 [ADAPT]/[PROJECT] gate; --diff BASE and --neighborhood TARGET print neighborhoods;
 --clean lists staged, unstaged and untracked files repo-wide (silent, 0 when none).
 Hooks do not clone; run check in CI.""",

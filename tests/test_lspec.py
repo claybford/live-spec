@@ -3678,7 +3678,12 @@ def upstream(bus="12 V"):
     Path(u, "serve.sh").write_text("#!/bin/sh\n")
     Path(u, "serve.bat").write_text("@echo off\n")
     Path(u, ".gitattributes").write_text("lspec.py text eol=lf\n")
-    Path(u, "hooks").mkdir(); Path(u, "hooks", "pre-commit").write_text("#!/bin/sh\n")
+    Path(u, "hooks").mkdir()
+    for name in ("pre-commit", "prepare-commit-msg", "commit-msg"):
+        Path(u, "hooks", name).write_text(f'#!/bin/sh\npython3 lspec.py hook {name} "$@"\n')
+    # The real post-commit only lists leftovers and warms find; this stand-in
+    # stays quiet so a copied installation proves it runs cleanly.
+    Path(u, "hooks", "post-commit").write_text("#!/bin/sh\nexit 0\n")
     sh("git", "init", "-q", cwd=u)
     commit(u, "seed: electrical")
     return u
@@ -4421,6 +4426,8 @@ class Graduation(unittest.TestCase):
         self.assertTrue(Path(b, "lspec.py").exists() and Path(b, "hooks", "pre-commit").exists())
         for name in ("lspec.css", "serve.sh", "serve.bat", ".gitattributes"):
             self.assertTrue(Path(b, name).exists(), name)
+        for name in lspec.GATE_HOOKS + ("post-commit",):
+            self.assertTrue(Path(b, ".git", "hooks", name).exists(), name)
         self.assertIn("battery.html", Path(b, "AGENTS.md").read_text())
         # the seeding session: fill the slots, drop the links back to the parent, seed
         text = re.sub(r"Status: \[ADAPT: forward design \| live-system\]\. Locked: \[ADAPT\]\.", "Status: live-system. Locked: nothing.", text)
@@ -4431,6 +4438,7 @@ class Graduation(unittest.TestCase):
         os.chdir(b)
         try:
             rc, out = lspec_cli("start", "battery.html"); self.assertIn("PASS", out)
+            self.assertNotIn("HOOKS", out)
             rc, out = lspec_cli("--main", "battery.html", "reconcile", "--subject", "seed: battery graduated",
                                 "--body", "graduated from the parent; no dependencies qualify; nothing sealed")
             answer_all_main(b, "battery.html")
@@ -4560,6 +4568,8 @@ class CopyMain(unittest.TestCase):
         self.assertTrue(Path(n, "battery.html").exists())
         for name in ("lspec.py", "lspec.css", "serve.sh", "serve.bat", ".gitattributes"):
             self.assertTrue(Path(n, name).exists(), name)
+        for name in lspec.GATE_HOOKS + ("post-commit",):
+            self.assertTrue(Path(n, ".git", "hooks", name).exists(), name)
         self.assertEqual(lspec.model_problems(os.path.join(n, lspec.MODEL_DIR)), [])   # the model travels, intact
         # the seeding session: status, slot, the watch; keep dl-bus, delete dl-split-battery? no — keep it,
         # modify the watch's wording, reopen nothing, delete nothing
@@ -4577,6 +4587,7 @@ class CopyMain(unittest.TestCase):
         os.chdir(n)
         try:
             rc, out = lspec_cli("start", "electrical.html"); self.assertIn("PASS", out)
+            self.assertNotIn("HOOKS", out)
             rc, out = lspec_cli("--main", "electrical.html", "reconcile", "--subject", "seed: the 4runner electrics",
                                 "--body", f"copied from {u} @ {sha}; dependencies none; seals none stand")
             self.assertIn("inherit 3", out)
@@ -6026,6 +6037,21 @@ class StartHooks(unittest.TestCase):
         w = tempfile.mkdtemp(); shutil.rmtree(w)
         sh('git', 'worktree', 'add', '-q', w, cwd=d)
         self.assertNotIn('HOOKS', cli(w, 'start')[1])
+
+
+    def test_install_hooks_falls_back_to_executable_copies(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        shutil.copytree(os.path.join(os.path.dirname(lspec.__file__), "hooks"),
+                        os.path.join(d, "hooks"))
+        sh("git", "init", "-q", cwd=d)
+        with mock.patch("os.symlink", side_effect=OSError("refused")):
+            installed = lspec.install_hooks(d)
+        self.assertEqual(sorted(installed), sorted(lspec.GATE_HOOKS + ("post-commit",)))
+        for name in installed:
+            hook = Path(d, ".git", "hooks", name)
+            self.assertTrue(hook.is_file() and not hook.is_symlink(), name)
+            self.assertTrue(os.access(hook, os.X_OK), name)
 
 
 class Checklist(unittest.TestCase):

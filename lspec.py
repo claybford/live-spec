@@ -7923,6 +7923,44 @@ def copy_tool(root, dest):
         shutil.copytree(model_folder(), os.path.join(dest, MODEL_DIR))
 
 
+def install_hooks(dest):
+    """Link the copied gate hooks into DEST's git hooks directory, relative so
+    the repository can move; fall back to a copy where symlinks are refused.
+    Returns the names installed."""
+    hooks = git(
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "hooks",
+        cwd=dest,
+        check=False,
+    ).strip()
+    if not hooks:
+        return []
+    os.makedirs(hooks, exist_ok=True)
+    installed = []
+    for name in GATE_HOOKS + ("post-commit",):
+        src = os.path.join(dest, "hooks", name)
+        if not os.path.isfile(src):
+            continue
+        try:  # a copy may lose the executable bit; git ignores such a hook
+            os.chmod(src, os.stat(src).st_mode | 0o111)
+        except OSError:
+            pass
+        target = os.path.join(hooks, name)
+        try:
+            if os.path.lexists(target):
+                os.remove(target)
+            os.symlink(os.path.relpath(src, hooks), target)
+        except OSError:
+            try:
+                shutil.copy(src, target)
+            except OSError:
+                continue
+        installed.append(name)
+    return installed
+
+
 def cmd_find(args):
     if os.environ.get("LSPEC_NO_WARM") and args.warm:
         return 0
@@ -9148,6 +9186,7 @@ def graduate_prepare(col, args):
     with open(target, "w", encoding="utf-8") as fh:
         fh.write(text)
     copy_tool(root, dest)
+    installed = install_hooks(dest)
     with open(os.path.join(dest, "AGENTS.md"), "w", encoding="utf-8") as fh:
         fh.write(
             "READ THIS FIRST, BEFORE ANYTHING ELSE, DO NOT SKIP:\n"
@@ -9162,14 +9201,16 @@ def graduate_prepare(col, args):
     print(
         f"graduated {rel(path)} as committed at {sha[:12]} into {args.to}/{os.path.basename(path)}, "
         f"converted to a main; the tool (lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes), "
-        f"hooks/, models/ and AGENTS.md copied; staged, nothing committed"
+        f"hooks/, models/ and AGENTS.md copied; "
+        + (
+            f"hooks installed: {', '.join(installed)}; staged, nothing committed"
+            if installed
+            else "hooks not installed; run python3 lspec.py hook --help; staged, nothing committed"
+        )
     )
     for n in notes:
         print(f"  {status('note')}: {n}")
-    print(
-        "next, in the new repository: install the hooks (lspec hook --help), fill the status line's "
-        "[ADAPT] slots, then"
-    )
+    print("next, in the new repository: fill the status line's [ADAPT] slots, then")
     print("  " + cmd(f"python3 lspec.py start {os.path.basename(path)}"))
     print(
         "  "
@@ -9680,6 +9721,7 @@ def copy_main(col, args):
         os.makedirs(os.path.dirname(target), exist_ok=True)
         shutil.copy(q, target)
     copy_tool(root, dest)
+    installed = install_hooks(dest)
     main_name = os.path.basename(col.main)
     with open(os.path.join(dest, "AGENTS.md"), "w", encoding="utf-8") as fh:
         fh.write(
@@ -9718,7 +9760,11 @@ def copy_main(col, args):
             + ", ".join(prose)
             + "): read each, and demote any that is evidence"
         )
-    print("next, in the new repository: install the hooks, fill the status line, then")
+    if installed:
+        print(f"hooks installed: {', '.join(installed)}")
+    else:
+        print("hooks not installed; install them with python3 lspec.py hook --help")
+    print("next, in the new repository: fill the status line, then")
     print("  " + cmd(f"python3 lspec.py start {main_name}"))
     print(
         "  "
@@ -10122,6 +10168,8 @@ state with this verb.""",
 Install all four from the repository root:
   for h in pre-commit prepare-commit-msg commit-msg post-commit; do
     ln -sf ../../hooks/$h .git/hooks/$h; done
+copy and graduate install these in the new repository; a seed built by hand
+runs the loop above before its first commit.
 pre-commit refuses without a receipt matching HEAD, the index and the checker
 being committed (`git commit -a` and path-limited commits build a different
 index); prepare-commit-msg writes the reconciled subject, body and Reconciled:
@@ -10162,7 +10210,7 @@ from this collection's owned files as committed at HEAD: every confirmed(...)
 token becomes provisional(inherited from MAIN @ COMMIT; ...), every data-sealed
 is lifted (seals are reassessed at the seed), the status line is reset to
 [ADAPT] slots to re-derive whole, the tool (lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes),
-hooks/, models/ and AGENTS.md ride along;
+hooks/, models/ and AGENTS.md ride along, the four gate hooks installed;
 all staged, nothing committed. The first commit is seed: and its gate asks one
 judgment per inherited decision row, watch entry, open item, diagnostic row,
 fence and directive, against the staged file:
@@ -10186,7 +10234,7 @@ this parent at COMMIT (default HEAD) is converted to a main — the parent's
 conventions, session and tooling paragraphs inserted after its heading, a
 status line of [ADAPT] slots for the seeding session to fill, the parent's
 footer carried — with the tool (lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes),
-hooks/, models/ and AGENTS.md beside it, all staged.
+hooks/, models/ and AGENTS.md beside it, the four gate hooks installed, all staged.
 Its first commit is a seed: (fresh history: the parent's commits name another
 main's gate), whose body names the source: graduated from <repo> @ <commit>.
 

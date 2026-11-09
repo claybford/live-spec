@@ -66,6 +66,10 @@ instructions are for the agent; yours is that one sentence.
 
 To look before you leap: open `live-spec.html`, then `python3 lspec.py check`.
 
+A hand-built instance installs the four gate hooks before its first commit
+(`python3 lspec.py hook --help`); `copy` and `graduate` install them in the new
+repository themselves.
+
 `find` needs numpy; nothing else does, the git hooks included. The preferred
 setup is a virtual environment managed by [uv](https://docs.astral.sh/uv/):
 

@@ -22,13 +22,14 @@ better.
 - **`background.html`** — how the pattern maps across hardware, software, process,
   agentic and project work; the anti-patterns; why HTML. Read it when adapting the
   pattern to a new domain.
-- **`lspec.py`** and **`hooks/`** — optional maintenance automation (Python standard
+- **`lspec.py`** and **`hooks/`** — maintenance automation (Python standard
   library only, except `find`): a validator, a commit gate that asks each commit
   the questions the protocol says to ask, git hooks that hold it to its answers,
   the verbs that move content between repositories (`import`, `export`,
   `graduate`, `copy`), and `find`, which matches a question main gives no
   direction for against the supporting specs' passages and points a session to
-  the file to read whole. The spec reads and
+  a file, and `pick`, which prints the route main splits that file along before
+  the session reads it whole. The spec reads and
   operates without it. `python3 lspec.py --help` and `python3 lspec.py VERB
   --help` are its reference.
 - **`models/`** — the embedding model `find` runs: IBM's

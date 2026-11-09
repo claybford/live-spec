@@ -6780,13 +6780,73 @@ class Find(unittest.TestCase):
             self.assertEqual(len(z.files), len({t for _, _, c in lspec.find_chunks(col).values() for _, t in c}))
 
     @needs_numpy
+    def test_an_interrupted_warm_keeps_the_batches_it_finished(self):
+        d = self.git_collection()
+        cwd = os.getcwd(); os.chdir(d)
+        self.addCleanup(os.chdir, cwd)
+        texts = [f"passage number {i} about the house battery and its fuses" for i in range(5)]
+
+        class Stops:
+            calls = 0
+            def embed(self, batch):
+                Stops.calls += 1
+                if Stops.calls == 2:
+                    raise KeyboardInterrupt
+                return numpy.ones((len(batch), 384), numpy.float32)
+
+        with mock.patch.object(lspec, "FIND_BATCH", 2):
+            with self.assertRaises(KeyboardInterrupt):
+                lspec.cached_vectors(numpy, Stops, texts)
+            with numpy.load(lspec.state_path("find-vectors.npz")) as z:
+                self.assertEqual(len(z.files), 2)                 # the first batch was saved
+            Stops.calls = 2
+            _, embedded = lspec.cached_vectors(numpy, Stops, texts)
+        self.assertEqual(embedded, 3)
+
+    @needs_numpy
+    def test_workers_embed_what_this_process_would(self):
+        texts = ["The diesel heater cuts out below 11.5 V.", "Fuses sit on the bus bar.",
+                 "Two batteries in parallel.", "A 6 AWG run from the bus bar."]
+        here = lspec.Embedder(numpy, lspec.model_folder()).embed(texts)
+        batches = [texts[:2], texts[2:]]
+        with mock.patch.dict(os.environ, {"LSPEC_FIND_WORKERS": "2"}):
+            self.assertEqual(lspec.find_workers(len(batches)), 2)
+            got = list(lspec.embed_batches(None, batches, lspec.model_folder()))
+        self.assertEqual([b for b, _ in got], batches)
+        self.assertTrue(numpy.allclose(numpy.concatenate([v for _, v in got]), here, atol=1e-5))
+
+    def test_worker_count(self):
+        with mock.patch.dict(os.environ, {"LSPEC_FIND_WORKERS": "1"}):
+            self.assertEqual(lspec.find_workers(10), 1)
+        with mock.patch.dict(os.environ, {"LSPEC_FIND_WORKERS": "16"}):
+            self.assertEqual(lspec.find_workers(10), lspec.FIND_MAX_WORKERS)
+            self.assertEqual(lspec.find_workers(1), 1)       # one batch: no pool
+
+    @needs_numpy
     def test_start_warms_and_then_stays_quiet(self):
         d = self.git_collection()
         with mock.patch.dict(os.environ, {"LSPEC_NO_WARM": ""}):
             first = cli(d, "start")[1]
             again = cli(d, "start")[1]
         self.assertIn("passage cache current:", first)
+        self.assertLess(first.index("CPU-heavy until done"), first.index("passage cache current:"))
+        self.assertNotIn("find index: batch", first)          # not a terminal: no progress lines
         self.assertNotIn("passage cache current:", again)
+        self.assertNotIn("CPU-heavy", again)                  # nothing to embed: nothing said
+
+    def test_the_warning_estimates_from_the_last_large_warm(self):
+        d = self.git_collection()
+        cwd = os.getcwd(); os.chdir(d)
+        self.addCleanup(os.chdir, cwd)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            lspec.warm_progress(100, 2, 1, 0)
+        self.assertNotIn("about", out.getvalue())             # no rate yet: no guess
+        lspec.write_state("find-rate.json", {"seconds_per_passage": 0.05})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            lspec.warm_progress(100, 2, 1, 0)
+        self.assertIn("about 5s at the last warm's rate", out.getvalue())
 
     def test_without_numpy_it_runs_under_the_repos_venv(self):
         d = self.git_collection()
@@ -6801,6 +6861,17 @@ class Find(unittest.TestCase):
         self.assertEqual(argv[0], str(venv))
         self.assertEqual(argv[-4:], ["find", "anything", "--top", str(lspec.FIND_TOP)])
 
+    def test_the_venv_warm_prints_live(self):
+        d = self.git_collection()
+        venv = Path(d, ".venv", "bin", "python")
+        venv.parent.mkdir(parents=True); venv.write_text("#!/bin/sh\n"); venv.chmod(0o755)
+        cwd = os.getcwd(); os.chdir(d)
+        self.addCleanup(os.chdir, cwd)
+        with mock.patch.object(lspec.subprocess, "run") as run:
+            lspec.warm_elsewhere(argparse.Namespace(main="main.html"))
+        self.assertEqual(run.call_args[0][0][-2:], ["find", "--warm"])
+        self.assertNotIn("capture_output", run.call_args[1])  # its lines reach the user as they print
+
     def test_post_commit_warms_detached(self):
         hook = Path(lspec.__file__).with_name("hooks").joinpath("post-commit").read_text()
         self.assertIn("python3 lspec.py find --warm >/dev/null 2>&1 &", hook)
@@ -6808,6 +6879,82 @@ class Find(unittest.TestCase):
 
     def test_the_model_stays_behind_on_import(self):
         self.assertIn("models", lspec.TOOL_FILES)
+
+
+PICK_FILES = {**FIND_FILES,
+              "wiring.html": FIND_FILES["wiring.html"].replace(
+                  '<h1 id="top">Harness</h1>',
+                  '<h1 id="top">Harness</h1><p id="status">Locked: 35 mm2 traction cable. Open: the left-rail routing.</p>'),
+              "motor.html": FIND_FILES["motor.html"] + '<p id="draw">Its pump draws through '
+                            '<a rel="depends-on" href="fuses.html#ratings">the pump fuse</a>.</p>'}
+
+
+class Pick(unittest.TestCase):
+    """lspec pick (live-spec.html dl-pick): the route from main to a file find
+    pointed to, and the file's whole read added to the request."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        Path(self.d, "main.html").write_text(FIND_MAIN)
+        for name, text in PICK_FILES.items():
+            Path(self.d, name).write_text(text)
+        subprocess.run(["git", "init", "-q", self.d], check=True)
+
+    def test_it_prints_every_hop_but_main_and_the_file(self):
+        rc, out = cli(self.d, "pick", "fuses.html")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("main.html#dl-split-wiring", out)
+        self.assertIn("holds: wiring.html holds the harness", out)
+        self.assertIn("rejected: one file", out)
+        self.assertIn("reason: a subject of its own", out)
+        self.assertIn("wiring.html#status: Locked: 35 mm2 traction cable.", out)     # the spec between
+        self.assertIn("wiring.html#dl-split-fuses", out)
+        self.assertIn("holds: fuses.html holds the protection devices", out)
+        self.assertIn("motor.html#draw -> fuses.html#ratings", out)                  # depends-on into it
+        self.assertNotIn("Camper", out)                                               # main is read, not printed
+        self.assertIn("READ — fuses.html whole", out)
+        self.assertLess(out.index("dl-split-wiring"), out.index("dl-split-fuses"))
+
+    def test_it_takes_a_number_from_the_last_find(self):
+        cwd = os.getcwd(); os.chdir(self.d)
+        try:
+            lspec.write_state("find-last.json", {"question": "q", "files": ["motor.html", "fuses.html"]})
+        finally:
+            os.chdir(cwd)
+        rc, out = cli(self.d, "pick", "2")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("PICK — fuses.html", out)
+        rc, out = cli(self.d, "pick", "3")
+        self.assertEqual(rc, 2)
+        self.assertIn("no result 3 from the last find (it listed 2)", out)
+
+    def test_main_and_strangers_are_refused(self):
+        self.assertEqual(cli(self.d, "pick", "main.html")[0], 2)
+        rc, out = cli(self.d, "pick", "nowhere.html")
+        self.assertEqual(rc, 2)
+        self.assertIn("not in main.html's collection", out)
+
+    def test_the_pick_joins_the_requests_read_items(self):
+        cli(self.d, "start")
+        rc, out = cli(self.d, "pick", "fuses.html")
+        self.assertIn("the next commit's gate asks for that read", out)
+        cwd = os.getcwd(); os.chdir(self.d)
+        try:
+            request = lspec.read_state("request.json")
+            self.assertEqual(request["picked"], ["fuses.html"])
+            col = lspec.load(argparse.Namespace(main="main.html", fails=[]))
+            ctx = argparse.Namespace(staged=col, request=request, changed={}, root=lspec.canon(self.d),
+                                     head_state="unborn", probes={})
+            titles = [it["title"] for it in lspec.read_items(ctx)]
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(titles, ["read main.html whole", "read fuses.html whole"])
+
+    def test_without_a_request_it_says_the_gate_does_not_track_it(self):
+        rc, out = cli(self.d, "pick", "motor.html")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("no request is open", out)
 
 
 if __name__ == "__main__":

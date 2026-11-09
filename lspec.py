@@ -4254,8 +4254,9 @@ def staged_paths(ctx):
 
 
 def read_items(ctx):
-    """Read whole: main, every collection file this commit edits, and the
-    files holding targets of dependencies declared in edited files. Evidence
+    """Read whole: main, every collection file this commit edits, every file
+    this request picked, and the files holding targets of dependencies
+    declared in edited files. Evidence
     is the request's start commit, so a read answered once holds for the
     request and is asked again by the next."""
     col = ctx.staged
@@ -4266,6 +4267,10 @@ def read_items(ctx):
         if p in col.specs:
             edited.add(p)
     governing = {col.main} | edited
+    for name in (ctx.request or {}).get("picked", []):  # lspec pick (dl-pick)
+        p = canon(os.path.join(ctx.root, name))
+        if p in col.specs:
+            governing.add(p)
     for fp, l, tp, fr in col.depends_on_edges():
         if fp in edited and tp in col.specs:
             governing.add(tp)
@@ -6764,7 +6769,9 @@ def cmd_start(args):
             "it gives no direction, "
             + cmd(command(col, "find", "QUESTION"))
             + " matches the question "
-            "against the supporting specs' passages; read the file it points to whole before acting on it "
+            "against the supporting specs' passages; pick the file it points to ("
+            + cmd(command(col, "pick", "N"))
+            + "), which prints the route to it, then read that file whole before acting on it "
             "(needs numpy: " + cmd("python3 lspec.py find --help") + ")."
         )
     return rc
@@ -7502,7 +7509,8 @@ class Embedder:
 
     def embed(self, texts):
         """One unit vector per text. Every step but attention works token by
-        token, so all texts' tokens run as one matrix; attention runs per text."""
+        token, so all texts' tokens run as one matrix; attention runs per text
+        (padding texts into stacked groups measured 18% slower)."""
         np, w, H, D = self.np, self.w, self.HEADS, self.HEAD_DIM
         batch = [self.tokenizer.encode(t) for t in texts]
         lengths = [len(ids) for ids in batch]
@@ -7655,13 +7663,102 @@ def find_chunks(col):
     return out
 
 
-def cached_vectors(np, embedder, texts, name="find-vectors.npz", borrow=()):
+FIND_BATCH = (
+    64  # passages per embed call: bounds memory, and the cache saves after each
+)
+FIND_MAX_WORKERS = 4  # each worker holds the model dequantized, about 200 MB
+
+_worker_model = None
+
+
+def _worker_start(folder):
+    """A pool worker: one BLAS thread (the pool is the parallelism), its own model."""
+    global _worker_model
+    import numpy
+
+    _worker_model = Embedder(numpy, folder)
+
+
+def _worker_embed(texts):
+    return _worker_model.embed(texts)
+
+
+def find_workers(n_batches):
+    """Worker processes for N_BATCHES: LSPEC_FIND_WORKERS if set, else the
+    cores, at most FIND_MAX_WORKERS; 1 means embed in this process."""
+    try:
+        want = int(os.environ.get("LSPEC_FIND_WORKERS", "0")) or os.cpu_count() or 1
+    except ValueError:
+        want = 1
+    return max(1, min(want, FIND_MAX_WORKERS, n_batches))
+
+
+BLAS_THREAD_VARS = (
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
+
+
+def embed_batches(embedder, batches, folder=None):
+    """Yield (batch, vectors) as each batch finishes. With FOLDER (the real
+    model) and more than one batch, spawned worker processes embed batches in
+    parallel, one BLAS thread each; any pool trouble falls back to EMBEDDER
+    here for the batches not yet done."""
+    done = 0
+    workers = find_workers(len(batches)) if folder else 1
+    if workers > 1:
+        import multiprocessing
+
+        saved = {k: os.environ.get(k) for k in BLAS_THREAD_VARS}
+        os.environ.update(
+            {k: "1" for k in BLAS_THREAD_VARS}
+        )  # the workers read these as they start
+        try:
+            pool = multiprocessing.get_context("spawn").Pool(
+                workers, _worker_start, (folder,)
+            )
+        except Exception:
+            pool = None
+        finally:  # this process keeps its own threads
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        if pool is not None:
+            try:
+                with pool:
+                    for vectors in pool.imap(_worker_embed, batches):
+                        yield batches[done], vectors
+                        done += 1
+            except Exception:
+                pass
+    model = embedder() if done < len(batches) else None
+    for batch in batches[done:]:
+        yield batch, model.embed(batch)
+
+
+def cached_vectors(
+    np,
+    embedder,
+    texts,
+    name="find-vectors.npz",
+    borrow=(),
+    folder=None,
+    progress=None,
+):
     """Passage vectors, memoized under .git/lspec by model and text (dl-state):
     only a passage not already there is embedded, and EMBEDDER, a callable,
-    loads the model only then. The memo keeps exactly TEXTS, so it never grows
-    past the collection. Outside git, or on any cache trouble, computed afresh.
-    NAME is the memo this caller owns; BORROW names memos read, never pruned
-    (serve reads find's). Returns (vectors, how many were embedded)."""
+    loads the model only then. Missing passages go in FIND_BATCH batches of
+    similar length, saved as each finishes, so an interrupted warm keeps its
+    work; FOLDER lets embed_batches use worker processes. The memo keeps exactly
+    TEXTS, so it never grows past the collection. Outside git, or on any cache
+    trouble, computed afresh. NAME is the memo this caller owns; BORROW names
+    memos read, never pruned (serve reads find's). PROGRESS, if given, is
+    called as (passages, batches, workers, batches done) before the first batch
+    and after each. Returns (vectors, how many were embedded)."""
     key = lambda t: hashlib.sha256(
         (MODEL_PINS["weights.npz"] + "\0" + t).encode()
     ).hexdigest()[:32]
@@ -7676,19 +7773,37 @@ def cached_vectors(np, embedder, texts, name="find-vectors.npz", borrow=()):
                         owned = set(z.files)
             except (OSError, ValueError):
                 pass
-    missing = list(dict.fromkeys(t for t in texts if key(t) not in memo))
-    if missing:
-        memo.update(zip(map(key, missing), embedder().embed(missing)))
-    keep = {key(t): memo[key(t)] for t in texts}
-    if path and (missing or set(keep) != owned):
+    wanted = set(map(key, texts))
+
+    def save():
+        if not path:
+            return
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".npz")
             with os.fdopen(fd, "wb") as f:
-                np.savez(f, **keep)
+                np.savez(f, **{k: v for k, v in memo.items() if k in wanted})
             os.replace(tmp, path)
         except OSError:
             pass
+
+    missing = sorted(
+        dict.fromkeys(t for t in texts if key(t) not in memo), key=len, reverse=True
+    )
+    batches = [missing[i : i + FIND_BATCH] for i in range(0, len(missing), FIND_BATCH)]
+    workers = find_workers(len(batches)) if folder else 1
+    if batches and progress:
+        progress(len(missing), len(batches), workers, 0)
+    for done, (batch, vectors) in enumerate(
+        embed_batches(embedder, batches, folder), 1
+    ):
+        memo.update(zip(map(key, batch), vectors))
+        save()
+        if progress:
+            progress(len(missing), len(batches), workers, done)
+    keep = {key(t): memo[key(t)] for t in texts}
+    if not missing and set(keep) != owned:
+        save()
     vectors = (
         np.stack([keep[key(t)] for t in texts])
         if texts
@@ -7732,8 +7847,45 @@ def warm_cache(col):
         np,
         lambda: Embedder(np, model_folder()),
         [text for _, _, chunks in files.values() for _, text in chunks],
+        folder=model_folder(),
+        progress=warm_progress,
     )
-    return embedded, time.time() - began
+    took = time.time() - began
+    if embedded >= FIND_BATCH:  # a small refresh is mostly model load
+        try:
+            write_state("find-rate.json", {"seconds_per_passage": took / embedded})
+        except Exception:  # outside git, or unwritable: no estimate next time
+            pass
+    return embedded, took
+
+
+def warm_progress(passages, batches, workers, done):
+    """What start and find --warm show while the index fills: one line, printed
+    before the work so a captured run explains its wait and the CPU load, then
+    batch progress on a terminal only, overwritten in place."""
+    if done == 0:
+        try:
+            rate = (read_state("find-rate.json") or {}).get("seconds_per_passage")
+        except Exception:
+            rate = None
+        guess = (
+            f", about {max(1, round(rate * passages))}s at the last warm's rate"
+            if rate
+            else ""
+        )
+        print(
+            f"{title('FIND')} — embedding {passages} passage(s) for find's index on "
+            f"{workers} process(es){guess}: CPU-heavy until done, then cached",
+            flush=True,
+        )
+    if sys.stderr.isatty():
+        end = "\n" if done == batches else ""
+        print(
+            f"\r  find index: batch {done}/{batches}",
+            end=end,
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def warm_elsewhere(args):
@@ -7745,17 +7897,14 @@ def warm_elsewhere(args):
     argv = [venv, os.path.abspath(__file__)] + (
         ["--main", args.main] if getattr(args, "main", None) else []
     )
+    sys.stdout.flush()
     try:
-        out = subprocess.run(
-            argv + ["find", "--warm"], capture_output=True, text=True, timeout=1800
-        )
+        subprocess.run(
+            argv + ["find", "--warm"], timeout=1800
+        )  # prints its own lines, live
     except (OSError, subprocess.SubprocessError):
-        return None
-    return (
-        out.stdout.strip().splitlines()[-1]
-        if out.returncode == 0 and out.stdout.strip()
-        else None
-    )
+        pass
+    return None
 
 
 def copy_tool(root, dest):
@@ -7827,7 +7976,13 @@ def cmd_find(args):
         for path, (_, _, chunks) in files.items()
         for where, text in chunks
     ]
-    vectors, _ = cached_vectors(np, embedder, [text for _, _, text in flat])
+    vectors, _ = cached_vectors(
+        np,
+        embedder,
+        [text for _, _, text in flat],
+        folder=model_folder(),
+        progress=warm_progress,
+    )
     scores = vectors @ embedder().embed([args.question])[0]
     best = {}
     for (path, where, text), score in zip(flat, scores):
@@ -7851,10 +8006,112 @@ def cmd_find(args):
                 f"     match {score:.2f} {where}: "
                 + (text if len(text) <= 110 else text[:107].rstrip() + "...")
             )
+    try:
+        write_state(
+            "find-last.json",
+            {"question": args.question, "files": [repo_rel(p) for p in ranked]},
+        )
+    except Exception:  # outside git: pick takes a path instead
+        pass
     print(
-        "A match is a direction, not a load: if a file's matches answer the question, read that file whole "
+        "A match is a direction, not a load: if a file's matches answer the question, pick it ("
+        + cmd(command(col, "pick", "N"))
+        + ", N its number above) for the route to it, then read it whole "
         "before acting on it; if none does, main already holds the answer or the collection does not "
         "(live-spec.html#dl-find)."
+    )
+    return 0
+
+
+def route_of(col, p):
+    """[(parent, split row id), ...] from main down to P."""
+    route, (q, r) = [], col.parents[p]
+    while q is not None:
+        route.insert(0, (q, r))
+        q, r = col.parents[q]
+    return route
+
+
+def cmd_pick(args):
+    """The route from main to one supporting spec, then its whole read: each
+    spec between (its status line) and each split row whole, the depends-on
+    edges into the file, and the file added to this request's read items
+    (dl-pick)."""
+    col = load(args)
+    target = args.target
+    if target.isdigit():
+        try:
+            last = read_state("find-last.json") or {}
+        except Exception:
+            last = {}
+        files = last.get("files") or []
+        if not 1 <= int(target) <= len(files):
+            print(
+                f"lspec pick: no result {target} from the last find"
+                + (
+                    f" (it listed {len(files)})"
+                    if files
+                    else " in this repository; give a path"
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        target = files[int(target) - 1]
+    p = canon(os.path.join(repo_root() or os.getcwd(), target))
+    if p not in col.specs:
+        p = canon(target)
+    if p not in col.specs:
+        print(
+            f"lspec pick: {target} is not in {rel(col.main)}'s collection (lspec show --graph lists it)",
+            file=sys.stderr,
+        )
+        return 2
+    if p == col.main:
+        print(
+            f"lspec pick: {rel(p)} is main, read whole before anything else",
+            file=sys.stderr,
+        )
+        return 2
+    print(stamp()[0])
+    print(f"{title('PICK')} — {rel(p)}, by the route main splits it along:")
+    for parent, rid in route_of(col, p):
+        spec = col.specs[parent]
+        if parent != col.main and "status" in spec.elems:
+            print(f"  {rel(parent)}#status: {norm(spec.element('status'))}")
+        cells = [
+            norm(c)
+            for c in re.findall(r"<td\b[^>]*>(.*?)</td>", spec.element(rid), re.S)
+        ]
+        cells[0:1] = [re.sub(r"^dl-split-\S+\s*", "", cells[0])] if cells else []
+        print(f"  {rel(parent)}#{rid}")
+        for label, cell in zip(("holds", "rejected", "reason"), cells):
+            print(f"    {label}: {cell}")
+    inbound = [
+        (fp, l, fr) for fp, l, tp, fr in col.depends_on_edges() if tp == p and fp != p
+    ]
+    if inbound:
+        print(
+            f"  depends-on into it: "
+            + "; ".join(
+                f"{addr(fp, l['src'])} -> {addr(p, fr)}" for fp, l, fr in inbound
+            )
+        )
+    recorded = False
+    try:
+        request = read_state("request.json")
+        if request:
+            request["picked"] = sorted(set(request.get("picked", [])) | {repo_rel(p)})
+            write_state("request.json", request)
+            recorded = True
+    except Exception:
+        pass
+    print(
+        f"{title('READ')} — {rel(p)} whole before acting on it (live-spec.html#dl-wholeload)"
+        + (
+            "; the next commit's gate asks for that read."
+            if recorded
+            else "; no request is open, so the gate does not track it (lspec start opens one)."
+        )
     )
     return 0
 
@@ -9664,9 +9921,10 @@ route of split rows from main, what its split row says it holds, and its best
 matches as path#id with an excerpt. Phrase the question in the spec's own terms.
 
 A match is a direction, not a load. If a file's matches answer the question,
-read that file whole before acting on it (live-spec.html#dl-wholeload); if
-none does, main already holds the answer or the collection does not. Scores
-rank; they do not decide. When main does point somewhere, follow it.
+pick it (lspec pick N, N its number in the list) and read it whole before
+acting on it (live-spec.html#dl-wholeload); if none does, main already holds
+the answer or the collection does not. Scores rank; they do not decide. When
+main does point somewhere, follow it.
 
 The model is IBM's granite-embedding-small-english-r2 (Apache-2.0), int8, in
 models/ beside lspec.py; this lspec.py pins its checksums and the two travel
@@ -9684,6 +9942,16 @@ never waits; find --warm does the same by hand. LSPEC_NO_WARM=1 turns warming
 off.
 """
     % CHUNK_WORDS,
+    "pick": """\
+Use it on the file find pointed to, before reading it. N is its number in the
+last find's list (kept in .git/lspec/find-last.json); a path works too. It
+prints the route main splits the file along: for each spec between main and
+the file, its status line, and each split row on the way whole (what it holds,
+what was rejected, why), then the depends-on edges into the file. Main and the
+file itself are not printed: both are read whole. Then it adds the file to the
+open request's read items, so the next commit's gate asks for that read with
+the probe it asks for main's (live-spec.html#dl-pick).
+""",
     "lspec": """\
 A session: start MAIN, read what it lists whole, edit and stage, reconcile
 --subject "type: one transition", answer the checklist (--next / --tick), commit
@@ -11361,6 +11629,18 @@ def main(argv):
         action="store_true",
         help="open main in the default browser once serving (serve.sh / serve.bat pass it)",
     )
+    pk = sub.add_parser(
+        "pick",
+        help="the route to a supporting spec find pointed to, then read it whole",
+        formatter_class=raw,
+        epilog=HELP["pick"],
+    )
+    pk.add_argument(
+        "target",
+        metavar="N|FILE",
+        help="a result number from the last find, or the file's path",
+    )
+    add_main(pk)
     cp = sub.add_parser(
         "copy",
         help="start a new project from a copy of this main",
@@ -11417,6 +11697,7 @@ def main(argv):
             "copy": cmd_copy,
             "find": cmd_find,
             "serve": cmd_serve,
+            "pick": cmd_pick,
         }[args.verb](args)
         if args.verb in ("check", "show", "neighbors", "impact", "find") and not (
             getattr(args, "clean", False) or getattr(args, "staged", False)

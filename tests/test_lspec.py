@@ -35,6 +35,7 @@ from datetime import timedelta
 # suite turns that off (it would load the model in every fixture repository)
 # and the Find tests that cover warming turn it back on.
 os.environ["LSPEC_NO_WARM"] = "1"
+os.environ["LSPEC_NO_VERSION"] = "1"
 
 # A fixture that must be "not yet expired" takes a date past any clock the suite
 # runs under, computed, so no literal silently crosses into the past (five
@@ -6128,6 +6129,62 @@ class StartHooks(unittest.TestCase):
             hook = Path(d, ".git", "hooks", name)
             self.assertTrue(hook.is_file() and not hook.is_symlink(), name)
             self.assertTrue(os.access(hook, os.X_OK), name)
+
+
+class VersionNotice(unittest.TestCase):
+    """start's live-spec version suggestion (portability.html dl-versioncheck)."""
+
+    def upstream(self):
+        u = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, u, True)
+        Path(u, "f").write_text("a")
+        sh("git", "init", "-q", cwd=u)
+        commit(u, "docs: a")
+        return u
+
+    def start_with(self, d, url):
+        with mock.patch.dict(os.environ, {"LSPEC_NO_VERSION": ""}), \
+                mock.patch.object(lspec, "ATTRIBUTION_URL", url):
+            return cli(d, "start")
+
+    def test_a_footer_that_differs_from_live_spec_head_is_suggested(self):
+        u = self.upstream()
+        old = sh("git", "rev-parse", "HEAD", cwd=u).strip()
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, True)
+        edit(d, "main.html", "@ 0123456.", f"@ {old[:12]}.")
+        Path(u, "f").write_text("b")
+        commit(u, "docs: b")
+        _, out = self.start_with(d, u)
+        self.assertIn("OUT OF DATE (1):", out)
+        self.assertIn("rules and tool: live-spec's HEAD is", out)
+        self.assertIn(f"the footer records {old[:12]}", out)
+        self.assertIn("consider upgrading: python3 lspec.py hook --help", out)
+
+    def test_a_current_footer_is_not_noticed(self):
+        u = self.upstream()
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, True)
+        edit(d, "main.html", "@ 0123456.", f"@ {sh('git', 'rev-parse', 'HEAD', cwd=u).strip()[:12]}.")
+        _, out = self.start_with(d, u)
+        self.assertNotIn("OUT OF DATE", out)
+
+    def test_live_spec_itself_has_nothing_to_compare(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, True)
+        edit(d, "main.html",
+             "<!-- github.com/claybford/live-spec @ 0123456. Clayton Ford, 2026. MIT. -->",
+             "<!-- github.com/claybford/live-spec. Clayton Ford, 2026. MIT. -->")
+        _, out = self.start_with(d, os.path.join(d, "no-such-upstream"))
+        self.assertNotIn("live-spec: upstream unreachable", out)
+        self.assertNotIn("OUT OF DATE", out)
+
+    def test_an_unreachable_live_spec_is_a_note(self):
+        d = repo()
+        self.addCleanup(shutil.rmtree, d, True)
+        _, out = self.start_with(d, os.path.join(d, "no-such-upstream"))
+        self.assertIn("live-spec: upstream unreachable", out)
+        self.assertNotIn("OUT OF DATE", out)
 
 
 class Checklist(unittest.TestCase):

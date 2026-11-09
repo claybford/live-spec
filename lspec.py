@@ -2200,6 +2200,7 @@ def slots_report(col):
 # then " @ COMMIT" in a copy, then attribution and license as this revision
 # states them. A year change here travels with the upgrade that brings it.
 ATTRIBUTION_SOURCE = "github.com/claybford/live-spec"
+ATTRIBUTION_URL = "https://" + ATTRIBUTION_SOURCE
 ATTRIBUTION = "Clayton Ford, 2026. MIT."
 FOOTER_RE = re.compile(
     re.escape(ATTRIBUTION_SOURCE)
@@ -6759,7 +6760,8 @@ def cmd_start(args):
     rc, clean = obligations_report(col)
     print_shared_literals(col)
     notices = tracking_notices(col)
-    updates_report(notices, col)
+    version = live_version_notice(col)
+    updates_report(notices, col, version)
     imports_report(col, notices)
     slots_report(col)
     if (
@@ -9987,17 +9989,71 @@ def tracking_notices(col):
     return out
 
 
-def updates_report(notices, col):
-    """Tracking imports behind upstream, as a recommendation naming the verb;
-    start never applies the update and never blocks on it (dl-tracking)."""
-    behind = [n for n in notices if n["state"] == "behind"]
-    if not behind:
-        return
-    print()
-    print(f"{title('OUT OF DATE')} ({len(behind)}):")
-    for n in behind:
-        print(f"  {n['line']}")
-        print(f"  consider updating: {command(col, 'import', '--update', n['name'])}")
+def updates_report(notices, col, version):
+    """Tracking imports behind upstream and a footer revision that differs
+    from live-spec's HEAD, as suggestions naming the move; start never applies
+    an update or upgrade and never blocks on one (dl-tracking, dl-versioncheck)."""
+    lines = [
+        (n["line"], f"consider updating: {command(col, 'import', '--update', n['name'])}")
+        for n in notices
+        if n["state"] == "behind"
+    ]
+    if version and version["line"]:
+        lines.append((version["line"], f"consider upgrading: {version['update']}"))
+    if lines:
+        print()
+        print(f"{title('OUT OF DATE')} ({len(lines)}):")
+        for line, hint in lines:
+            print(f"  {line}")
+            print(f"  {hint}")
+    if version and version["note"]:
+        print(f"  {status('note')}: {version['note']}")
+
+
+def live_version_notice(col):
+    """The footer's live-spec revision against live-spec's HEAD: a suggestion,
+    never a block, and no pinned setting (portability.html dl-versioncheck).
+    A footer with no revision (live-spec itself, or an unresolved seed) checks
+    nothing. HEAD alone is compared, so the check never fetches history.
+    -> {line, update, note} or None."""
+    if os.environ.get("LSPEC_NO_VERSION"):
+        return None
+    spec = col.specs.get(col.main)
+    if spec is None:
+        return None
+    carried = carried_version(spec.raw)
+    if not carried or carried == "source":
+        return None
+    try:
+        head = git_net(
+            "ls-remote",
+            ATTRIBUTION_URL,
+            "HEAD",
+            cwd=os.getcwd(),
+            batch=True,
+            timeout=TRACK_TIMEOUT,
+        ).split()
+    except (RuntimeError, OSError) as e:
+        return {
+            "line": None,
+            "update": None,
+            "note": f"live-spec: upstream unreachable ({e})",
+        }
+    if not head:
+        return {
+            "line": None,
+            "update": None,
+            "note": "live-spec: upstream reported no HEAD",
+        }
+    seen = head[0]
+    if seen.startswith(carried) or carried.startswith(seen):
+        return None
+    return {
+        "line": f"rules and tool: live-spec's HEAD is {seen[:12]}; "
+        f"the footer records {carried[:12]}",
+        "update": cmd("python3 lspec.py hook --help"),
+        "note": None,
+    }
 
 
 def imports_report(col, notices):
@@ -10125,7 +10181,10 @@ against the last audit and the first commit, named past the %d-word mark:
 shown, not capped),
 the sealed claims, the depends-on edges, and the obligations: structural
 failures, REVIEW OWED, watch entries (expired ones flagged), sealed corrections
-awaiting a later session's confirmation, missing or old hooks; plus one
+awaiting a later session's confirmation, missing or old hooks; a tracking
+import behind upstream or a footer revision that differs from live-spec's HEAD
+is suggested for update under OUT OF DATE (LSPEC_NO_VERSION=1 skips the
+live-spec check); plus one
 advisory line, edgeless claims that share a number-with-unit literal. A
 shallow clone gets one CLEARANCE UNKNOWN line naming the fetch, no rows. Then
 read every listed file whole, in sequential pages, before any commit.

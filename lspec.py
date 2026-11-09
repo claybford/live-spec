@@ -9949,14 +9949,10 @@ def updates_report(notices, col):
     if not behind:
         return
     print()
-    print(f"{title('UPDATES RECOMMENDED')} ({len(behind)}):")
+    print(f"{title('OUT OF DATE')} ({len(behind)}):")
     for n in behind:
         print(f"  {n['line']}")
-        print(f"  update: {command(col, 'import', '--update', n['name'])}")
-    print(
-        "  run it before work that reads or relies on the imported files; the update "
-        "leaves them staged for the normal reconcile and commit"
-    )
+        print(f"  consider updating: {command(col, 'import', '--update', n['name'])}")
 
 
 def imports_report(col, notices):

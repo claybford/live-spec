@@ -7715,7 +7715,7 @@ def find_chunks(col):
 FIND_BATCH = (
     64  # passages per embed call: bounds memory, and the cache saves after each
 )
-FIND_MAX_WORKERS = 4  # each worker holds the model dequantized, about 200 MB
+FIND_MAX_WORKERS = 6  # each worker holds the model dequantized, about 200 MB, so 6 is about 1.2 GB
 
 _worker_model = None
 
@@ -11374,6 +11374,7 @@ class ServeSearch:
             [t for _, _, t in passages],
             name="serve-vectors.npz",
             borrow=("find-vectors.npz",),
+            folder=model_folder(),
         )
 
     def warm(self, main):

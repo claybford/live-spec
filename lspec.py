@@ -10822,18 +10822,18 @@ function rail(){[].slice.call(blocks.querySelectorAll(":scope > .gutter")).forEa
     .map(function(e){return {e:e,id:e.fromFile===here?e.from:e.to,file:e.fromFile===here?e.toFile:e.fromFile,mine:e.fromFile===here?"need":"give"};});
   all.forEach(function(it){it.a.onmouseover=function(){hotAll(it.c.id);};it.a.onmouseout=function(){hotAll(null);};});
   outs.ids=ids;outs.zoneBy=zoneBy;
-  if(!edges.length){blocks.classList.remove("gut");drawOut();return;}
-  blocks.style.setProperty("--gw",(10+Math.min(edges.length,6)*6)+"px");blocks.classList.add("gut");
+  if(!edges.length&&!outs.length){blocks.classList.remove("gut");drawOut();return;}
+  blocks.style.setProperty("--gw",(14+Math.max(Math.min(edges.length,6),Math.min(outs.length,6))*8)+"px");blocks.classList.add("gut");
   /* where a line ends: the row when its section is open, else the section's block, at its title */
   var segs=[],box=blocks.getBoundingClientRect(),end=function(id){var q=railEnd(id,ids,zoneBy);q.y-=box.top;q.x-=box.left;return q;};
   edges.forEach(function(e){var a1=end(e.from),a2=end(e.to);if(!a1.row&&!a2.row&&zoneBy[e.from]===zoneBy[e.to])return;segs.push({e:e,a:a1,b:a2});});
   var lanes=[],laneOf=function(lo,hi){for(var L=0;;L++){var ok=(lanes[L]||[]).every(function(s){return hi<s[0]-4||lo>s[1]+4;});if(ok){(lanes[L]=lanes[L]||[]).push([lo,hi]);return L;}}};
   segs.sort(function(p,q){return Math.abs(p.a.y-p.b.y)-Math.abs(q.a.y-q.b.y);});
   segs.forEach(function(sg){sg.L=laneOf(Math.min(sg.a.y,sg.b.y),Math.max(sg.a.y,sg.b.y));});
-  var gw=10+lanes.length*6;blocks.style.setProperty("--gw",gw+"px");
+  var gw=14+Math.max(lanes.length,outs.length)*8;blocks.style.setProperty("--gw",gw+"px");
   box=blocks.getBoundingClientRect();segs.forEach(function(sg){sg.a=end(sg.e.from);sg.b=end(sg.e.to);});   /* re-measure at the final padding */
   var svg=document.createElementNS(SVGNS,"svg");svg.setAttribute("class","gutter");blocks.insertBefore(svg,blocks.firstChild);
-  segs.forEach(function(sg){var X=gw-6-sg.L*6;svg.appendChild(railLine(sg.e,sg.a.x-2,sg.a.y,X,sg.b.x-2,sg.b.y,"need","give"));});
+  segs.forEach(function(sg){var X=gw-8-sg.L*8;svg.appendChild(railLine(sg.e,sg.a.x-2,sg.a.y,X,sg.b.x-2,sg.b.y,"need","give"));});
   drawOut();}
 function railLine(e,x1,y1,X,x2,y2,k1,k2){var g=document.createElementNS(SVGNS,"g");g.dataset.k=" "+e.from+" "+e.to+" ";
   var p=document.createElementNS(SVGNS,"path");p.setAttribute("d","M"+x1+" "+y1+" H"+X+" V"+y2+" H"+x2);g.appendChild(p);
@@ -10849,7 +10849,7 @@ function drawOut(){var old=A.querySelector(":scope > .ogutter");if(old)old.remov
   var ab=A.getBoundingClientRect(),pb=P.getBoundingClientRect(),bb=blocks.getBoundingClientRect(),folded=sec.classList.contains("folded");
   var svg=document.createElementNS(SVGNS,"svg");svg.setAttribute("class","gutter ogutter");A.appendChild(svg);
   var lo=pb.top-ab.top+3,hi=pb.bottom-ab.top-3;
-  outs.forEach(function(o,i){var q=railEnd(o.id,outs.ids,outs.zoneBy),y=Math.min(hi,Math.max(lo,q.y-ab.top)),X=bb.left-ab.left-9-i*4;
+  outs.forEach(function(o,i){var q=railEnd(o.id,outs.ids,outs.zoneBy),y=Math.min(hi,Math.max(lo,q.y-ab.top)),X=bb.left-ab.left-12-i*8;
     var mk=q.y-ab.top===y?o.mine:null,other=o.mine==="need"?"give":"need",tx,ty,tk;
     if(folded){tx=X;ty=lo+5;tk="tip";}
     else{var t=A.querySelector('.tree a.n[href="'+o.file+'"] .f'),tr=t?t.getBoundingClientRect():fold.getBoundingClientRect(),tb=A.querySelector(".tree");

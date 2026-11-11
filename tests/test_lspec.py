@@ -569,6 +569,7 @@ DEFAULT_ANSWERS = {
     "removed": lambda n: ["retired", "nobody", "re-proposes", "it", f"n{n}"],
     "watched": lambda n: ["none"],
     "decided": lambda n: ["none"],
+    "described": lambda n: ["confirmed"],
     "derived": lambda n: ["rederived"],
     "reseed": lambda n: ["reseed", "fixture", "re-instantiates", "it", f"n{n}"],
     "confirm": lambda n: ["confirmed", "fixture", "checked", "it", f"n{n}"],
@@ -2111,7 +2112,7 @@ class RevisionRegressions(unittest.TestCase):
                  'evidence confirmed(source) / provisional(source); commitment locked / open; review WATCH'),
                 ('[ADAPT: 40]', '40'),
                 ('[ADAPT: lspec]', 'lspec'),
-                ('[ADAPT: the commit this seed, lspec.py, lspec.css, hooks/ and models/ were copied from]', '0123456')]:
+                ('[ADAPT: the commit this seed, lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes, hooks/ and models/ were copied from]', '0123456')]:
             seed = seed.replace(marker, fill)
         return seed
 
@@ -6209,10 +6210,10 @@ class Checklist(unittest.TestCase):
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
         out = reconcile_out(d, 'docs: derate')
         self.assertNotIn('token', out)
-        self.assertIn('judgment items open: read 2, watched 1, decided 1, neighbor 1', out)
+        self.assertIn('judgment items open: read 2, watched 1, decided 1, described 1, neighbor 1', out)
         out = cli(d, 'reconcile', '--next')[1]
         self.assertEqual(out.count('token:'), 1)
-        self.assertIn('ITEM 1 of 5 [read]', out)
+        self.assertIn('ITEM 1 of 6 [read]', out)
         self.assertIn('--tick ' + re.search(r'token: (\w+)', out).group(1) + ' --answer read-whole', out)
         rc, out = cli(d, 'reconcile', '--tick', 'deadbeef', '--answer', 'read-whole')
         self.assertEqual(rc, 2); self.assertIn('no current item has token', out)
@@ -6232,14 +6233,16 @@ class Checklist(unittest.TestCase):
         edit(d, 'motor.html', '120 kW', '105 kW'); sh('git', 'add', '-A', cwd=d)
         cli(d, 'reconcile', '--subject', 'docs: derate')
         answer_all(d)
-        self.assertIn('5 answered,', cli(d, 'reconcile')[1])
+        self.assertIn('6 answered,', cli(d, 'reconcile')[1])
         edit(d, 'main.html', 'Main', 'Main heading'); sh('git', 'add', '-A', cwd=d)
         out = cli(d, 'reconcile')[1]
-        self.assertIn('5 answered,', out)            # unrelated change: answers kept
+        self.assertIn('5 answered, 1 to answer,', out)   # unrelated answers kept;
+        self.assertIn('judgment items open: described 1', out)   # an edited passage is asked again
+        answer_all(d)
         edit(d, 'motor.html', '105 kW', '100 kW'); sh('git', 'add', '-A', cwd=d)
         out = cli(d, 'reconcile')[1]
-        self.assertIn(', 1 to answer,', out)       # only the neighbor of the changed claim returns
-        self.assertIn('neighbor 1', out)
+        self.assertIn(', 2 to answer,', out)       # the neighbor of the changed claim, and its passage
+        self.assertIn('described 1, neighbor 1', out)
 
     def test_reasons_cannot_repeat(self):
         d = self.fixture()
@@ -6494,8 +6497,8 @@ class Checklist(unittest.TestCase):
         edit(d, 'motor.html', 'closes after a week quiet', 'unverified: diagnosis unconfirmed')
         sh('git', 'add', '-A', cwd=d)
         out = cli(d, 'reconcile')[1]
-        self.assertIn(', 2 to answer,', out)
-        self.assertIn('cause 1, derived 1', out)   # the rewritten entry is a bootloader source too
+        self.assertIn(', 3 to answer,', out)
+        self.assertIn('cause 1, described 1, derived 1', out)   # a rewritten passage, and a bootloader source too
         self.assertIn('watch entry motor.html#watch-noise (added): watch-noise noise 2026-10-04 unverified',
                       cli(d, 'reconcile', '--next')[1])
 
@@ -6583,6 +6586,53 @@ class Checklist(unittest.TestCase):
         edit(d, 'motor.html', '105 kW', '100 kW'); sh('git', 'add', '-A', cwd=d)
         out = cli(d, 'reconcile', '--subject', 'docs: derate more')[1]
         self.assertIn('watched 1, decided 1', out)   # last commit's "none" does not carry
+
+    def test_described_is_asked_when_a_spec_passage_changes(self):
+        """P1 across the spec-artifact boundary: asked after decided on a commit
+        that edits a spec passage, never on a review, and the passages are bound,
+        not printed."""
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        items = self.items(d, 'docs: derate')
+        kinds = [it['kind'] for it in items]
+        self.assertIn('described', kinds)
+        self.assertEqual(kinds.index('described'), kinds.index('decided') + 1)
+        it = next(i for i in items if i['kind'] == 'described')
+        self.assertNotIn('105 kW', it['excerpt'])
+        self.assertIn('e.g. in code', it['question'])
+        kinds = [it['kind'] for it in self.items(d, 'review: main.html#claim')]
+        self.assertNotIn('described', kinds)
+
+    def test_described_is_not_asked_without_a_spec_passage(self):
+        d = self.fixture()
+        Path(d, 'notes.txt').write_text('scratch\n')
+        kinds = [it['kind'] for it in self.items(d, 'docs: add notes')]
+        self.assertNotIn('described', kinds)
+
+    def test_described_takes_confirmed_only(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        items = self.items(d, 'docs: derate')
+        ctx = evaluate_in(d, 'docs: derate')[0]
+        it = next(i for i in items if i['kind'] == 'described')
+        cwd = os.getcwd(); os.chdir(d)
+        try:
+            V = lambda *words: lspec.validate(it, given(list(words)), ctx, set())
+            self.assertEqual(V('confirmed')[1], 'Reconciled: no description duplicated')
+            with self.assertRaisesRegex(ValueError, 'not a legal answer'):
+                V('none')
+            with self.assertRaisesRegex(ValueError, 'takes no --reason'):
+                V('confirmed', 'it', 'is', 'fine')
+        finally:
+            os.chdir(cwd)
+
+    def test_described_reopens_when_a_passage_is_edited_after_answering(self):
+        d = self.fixture()
+        edit(d, 'motor.html', '120 kW', '105 kW')
+        before = next(i for i in self.items(d, 'docs: derate') if i['kind'] == 'described')
+        edit(d, 'motor.html', '105 kW', '100 kW')
+        after = next(i for i in self.items(d, 'docs: derate') if i['kind'] == 'described')
+        self.assertNotEqual(before['evidence'], after['evidence'])
 
     def test_none_is_recorded_in_the_trailers(self):
         d = self.fixture()

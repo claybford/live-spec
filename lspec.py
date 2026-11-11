@@ -3188,6 +3188,7 @@ ANSWERS = {
     },
     "watched": {"watched": (True, False), "none": (False, False)},
     "decided": {"decided": (True, False), "none": (False, False)},
+    "described": {"confirmed": (False, False)},
     "import": {"adopted": (False, True), "updated": (False, False)},
     "inherit": {
         "keep": (False, False),
@@ -3232,6 +3233,7 @@ QUESTION_ORDER = (
     "cause",
     "watched",
     "decided",
+    "described",
     "import",
     "inherit",
     "derived",
@@ -4631,7 +4633,41 @@ def asked_items(ctx, head, records):
             "the decision row added or changed in this commit, or answer none.",
         )
     )
+    described = described_item(ctx, head)
+    if described:
+        out.append(described)
     return out
+
+
+def described_item(ctx, head):
+    """Description the repository already holds: P1 across the spec-artifact
+    boundary. Asked when the commit adds or changes a passage in an owned
+    spec file; the passages are bound into the evidence, not shown (the
+    agent reads its own diff), so an edit after answering reopens it."""
+    passages = sorted(
+        (addr(p, eid), ctx.staged.specs[p].text(eid) or "")
+        for (p, eid), kind in ctx.changed.items()
+        if kind != "removed"
+        and p in ctx.staged.specs
+        and not ctx.staged.mirrored(p)
+    )
+    if not passages:
+        return None
+    return item(
+        "described",
+        "commit",
+        "any description the repository already holds?",
+        False,
+        evidence=digest(head, *[f"{n}={t}" for n, t in passages]),
+        excerpt="the passages this commit's diff adds or changes (git diff --cached)",
+        question="Does any passage added or changed by this commit's diff only "
+        "describe how the thing currently is or works, when that information "
+        "already lives elsewhere in this repository (e.g. in code)? If so, cut "
+        "it or shorten it to a pointer at that file, and rerun reconcile. A "
+        "requirement, a decision, an assumption or an open question is not "
+        "description, even where the code agrees with it. Answer confirmed "
+        "when no such passage remains.",
+    )
 
 
 def derived_item(ctx, head):
@@ -5440,6 +5476,8 @@ def validate(it, given, ctx, other_reasons):
         return [answer, text], f"Reconciled: waived {kind} {name} ({answer}) — {text}"
     if kind in ("watched", "decided"):
         return answer_asked(ctx, kind, answer, ref)
+    if kind == "described":
+        return [answer], "Reconciled: no description duplicated"
     if kind == "inherit":
         state = it["state"]
         if answer == "reopen" and not it.get("reopenable"):
@@ -10255,6 +10293,9 @@ checklist once none is left. Each answer is recorded as a Reconciled: trailer.
                unverified --ref WATCH | recurrence --ref ROW (diagnostic register)
   watched      every commit but review: and fix:: watched --ref WATCH | none
   decided      every commit but review:: decided --ref ROW | none
+  described    every commit but review: that edits a spec passage: does any
+               only describe what the repository already holds (e.g. code)?
+               cut or point at it, then confirmed
   import       an import row added: adopted --reason (the whole unit is the
                subject or component adopted); its revision or settings changed:
                updated

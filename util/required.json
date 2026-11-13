@@ -1,0 +1,20 @@
+{
+    "description": "The files an instance carries beside its main spec, and the Python libraries its optional features need. lspec.py reads this file for tool-set checks, copies and imports; util/seed.py installs the set. Keep every entry at the source revision named by main's footer.",
+    "files": [
+        "lspec.py",
+        "lspec.css",
+        "serve.sh",
+        "serve.bat",
+        ".gitattributes",
+        "util/required.json",
+        "util/seed.py",
+        "util/shape.py"
+    ],
+    "directories": [
+        "hooks",
+        "models"
+    ],
+    "python_libraries": {
+        "numpy": "Required by lspec find and serve's semantic search; the gate, checks and shape utility use the standard library only."
+    }
+}

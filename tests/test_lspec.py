@@ -1116,6 +1116,7 @@ class C(unittest.TestCase):
         self.assertIn("[toolset] serve.sh is missing", out)
         self.assertIn("[toolset] hooks/pre-commit is missing", out)
         self.assertIn(f"[toolset] models/{lspec.MODEL_NAME}/weights.npz is missing", out)
+        self.assertIn("[toolset] util/required.json is missing", out)
 
     def test_a_complete_tool_set_passes(self):
         files = {"lspec.py": "# tool\n", "lspec.css": "body{}\n",
@@ -1123,10 +1124,56 @@ class C(unittest.TestCase):
                  ".gitattributes": "lspec.py text eol=lf\n",
                  f"models/{lspec.MODEL_NAME}/weights.npz": "",
                  f"models/{lspec.MODEL_NAME}/LICENSE": ""}
+        for name in lspec.TOOLSET_FILES:
+            files.setdefault(name, "{}\n")
         for name in lspec.GATE_HOOKS + ("post-commit",):
             files[f"hooks/{name}"] = "#!/bin/sh\nexit 0\n"
         rc, out = run(files=files)
         self.assertEqual(rc, 0, out); self.assertNotIn("[toolset]", out)
+
+
+class Utilities(unittest.TestCase):
+    """The carried manifest, one-command seeder and console collection map."""
+
+    ROOT = Path(lspec.__file__).parent
+
+    def test_required_manifest_names_real_files_and_libraries(self):
+        data = lspec.required_tooling()
+        self.assertIsNotNone(data)
+        for name in data["files"] + data["directories"]:
+            self.assertTrue((self.ROOT / name).exists(), name)
+        self.assertIn("numpy", data["python_libraries"])
+        self.assertIn("util/shape.py", lspec.TOOL_FILES)
+        self.assertIn("util/seed.py", lspec.TOOL_FILES)
+
+    def test_seed_installs_the_declared_set_and_hooks(self):
+        needs_git()
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "new"
+            run = subprocess.run(
+                [sys.executable, str(self.ROOT / "util" / "seed.py"), str(dest), "spec.html", "--skip-libs"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            data = lspec.required_tooling()
+            for name in data["files"] + data["directories"]:
+                self.assertTrue((dest / name).exists(), name)
+            self.assertTrue((dest / "models" / lspec.MODEL_NAME / "weights.npz").exists())
+            self.assertIn("spec.html", (dest / "AGENTS.md").read_text())
+            for name in lspec.GATE_HOOKS + ("post-commit",):
+                self.assertTrue((dest / ".git" / "hooks" / name).exists(), name)
+            self.assertFalse(Path(dest, ".venv").exists())
+
+    def test_shape_prints_the_same_collection_map_data(self):
+        needs_git()
+        run = subprocess.run(
+            [sys.executable, str(self.ROOT / "util" / "shape.py"), "live-spec.html"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        for text in ("collection: live-spec.html", "dl-split-background", "dl-split-serve",
+                     "dl-split-portability", "depends-on edges:", "rules: The Four Cornerstones"):
+            self.assertIn(text, run.stdout)
 
 
 class W(unittest.TestCase):
@@ -2112,7 +2159,7 @@ class RevisionRegressions(unittest.TestCase):
                  'evidence confirmed(source) / provisional(source); commitment locked / open; review WATCH'),
                 ('[ADAPT: 40]', '40'),
                 ('[ADAPT: lspec]', 'lspec'),
-                ('[ADAPT: the commit this seed, lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes, hooks/ and models/ were copied from]', '0123456')]:
+                ('[ADAPT: the commit this seed, lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes, hooks/, models/ and util/ were copied from]', '0123456')]:
             seed = seed.replace(marker, fill)
         return seed
 
@@ -2603,6 +2650,7 @@ class HookIntegration(unittest.TestCase):
         """A temp repo with lspec.py committed and the gate hooks installed."""
         d = self.track(tempfile.mkdtemp())
         shutil.copy(os.path.join(self.HOOKS, '..', 'lspec.py'), os.path.join(d, 'lspec.py'))
+        shutil.copytree(os.path.join(self.HOOKS, '..', 'util'), os.path.join(d, 'util'))
         os.makedirs(os.path.join(d, 'hooks'), exist_ok=True)
         shutil.copy2(os.path.join(self.HOOKS, 'post-commit'), os.path.join(d, 'hooks', 'post-commit'))
         for name, text in (('lspec.css', 'body{}\n'), ('serve.sh', '#!/bin/sh\n'),
@@ -3749,6 +3797,7 @@ def upstream(bus="12 V"):
     Path(u, "serve.sh").write_text("#!/bin/sh\n")
     Path(u, "serve.bat").write_text("@echo off\n")
     Path(u, ".gitattributes").write_text("lspec.py text eol=lf\n")
+    shutil.copytree(Path(lspec.__file__).parent / "util", Path(u) / "util")
     Path(u, "hooks").mkdir()
     for name in ("pre-commit", "prepare-commit-msg", "commit-msg"):
         Path(u, "hooks", name).write_text(f'#!/bin/sh\npython3 lspec.py hook {name} "$@"\n')
@@ -4504,6 +4553,8 @@ class Graduation(unittest.TestCase):
         self.assertTrue(Path(b, "lspec.py").exists() and Path(b, "hooks", "pre-commit").exists())
         for name in ("lspec.css", "serve.sh", "serve.bat", ".gitattributes"):
             self.assertTrue(Path(b, name).exists(), name)
+        for name in ("util/required.json", "util/seed.py", "util/shape.py"):
+            self.assertTrue(Path(b, name).exists(), name)
         for name in lspec.GATE_HOOKS + ("post-commit",):
             self.assertTrue(Path(b, ".git", "hooks", name).exists(), name)
         self.assertIn("battery.html", Path(b, "AGENTS.md").read_text())
@@ -4645,6 +4696,8 @@ class CopyMain(unittest.TestCase):
         self.assertNotIn("data-sealed", text); self.assertIn("[ADAPT: forward design | live-system]", text)
         self.assertTrue(Path(n, "battery.html").exists())
         for name in ("lspec.py", "lspec.css", "serve.sh", "serve.bat", ".gitattributes"):
+            self.assertTrue(Path(n, name).exists(), name)
+        for name in ("util/required.json", "util/seed.py", "util/shape.py"):
             self.assertTrue(Path(n, name).exists(), name)
         for name in lspec.GATE_HOOKS + ("post-commit",):
             self.assertTrue(Path(n, ".git", "hooks", name).exists(), name)

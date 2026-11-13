@@ -2222,7 +2222,32 @@ def attribution_failure(path, raw):
     )
 
 
-TOOLSET_FILES = ("lspec.css", "serve.sh", "serve.bat", ".gitattributes")
+def required_tooling():
+    """The instance's required files, directories and Python libraries, from
+    util/required.json beside this tool: one declaration for checks, copies,
+    imports and the one-command seeder. None means the set is not carried."""
+    # A hook executes HEAD:lspec.py with no __file__; its working repository
+    # root is then the tool's directory for this read.
+    tool = globals().get("__file__") or os.path.abspath("lspec.py")
+    path = os.path.join(os.path.dirname(os.path.abspath(tool)), "util", "required.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(data.get("files"), list)
+        or not isinstance(data.get("directories"), list)
+        or not isinstance(data.get("python_libraries"), dict)
+    ):
+        return None
+    return data
+
+
+REQUIRED_TOOLING = required_tooling()
+TOOLSET_FILES = tuple(
+    name for name in (REQUIRED_TOOLING or {}).get("files", []) if name != "lspec.py"
+)
 
 
 def toolset_failures(col):
@@ -2240,6 +2265,8 @@ def toolset_failures(col):
         "the instance carries the whole tool set at one revision; copy it from "
         "the same live-spec commit (python3 lspec.py hook --help)"
     )
+    if REQUIRED_TOOLING is None:
+        return [f"[toolset] util/required.json is missing beside lspec.py — {hint}"]
     out = []
     for name in TOOLSET_FILES:
         if not at(os.path.join(root, name)):
@@ -7995,19 +8022,47 @@ def warm_elsewhere(args):
 
 
 def copy_tool(root, dest):
-    """The tool a new repository carries: this lspec.py, the stylesheet and
-    launchers beside it, ROOT's line-ending attributes and hooks, and the model
-    beside this lspec.py, so all travel at one revision."""
-    shutil.copy(__file__, os.path.join(dest, "lspec.py"))
-    for name in ("lspec.css", "serve.sh", "serve.bat", ".gitattributes"):
-        src = os.path.join(root, name)
-        if os.path.isfile(src):
-            shutil.copy(src, os.path.join(dest, name))
-    hooks = os.path.join(root, "hooks")
-    if os.path.isdir(hooks):
-        shutil.copytree(hooks, os.path.join(dest, "hooks"))
-    if os.path.isdir(model_folder()):
-        shutil.copytree(model_folder(), os.path.join(dest, MODEL_DIR))
+    """Copy exactly the required set declared by util/required.json, including
+    the utilities themselves, so every part travels at one revision. A missing
+    required path refuses the copy rather than seeding a partial instance.
+    Returns the manifest paths copied."""
+    if REQUIRED_TOOLING is None:
+        raise ImportRefused(
+            "util/required.json is missing or unreadable beside lspec.py; "
+            "copy the complete tool set from one live-spec commit"
+        )
+    copied = []
+    tool_root = os.path.dirname(os.path.abspath(__file__))
+    for name in REQUIRED_TOOLING["files"] + REQUIRED_TOOLING["directories"]:
+        # The executable, its manifest/utilities and pinned model all come from
+        # the running tool's own revision, as the model always has; the other
+        # paths come from the source repository root, as before.
+        base = tool_root if name == "lspec.py" or name.startswith("util/") else root
+        if name == "models":
+            base = os.path.dirname(os.path.dirname(model_folder()))
+        src = os.path.join(base, *name.split("/"))
+        if not os.path.exists(src):
+            raise ImportRefused(f"required tool path {name} is missing beside {rel(base)}")
+        target = os.path.join(dest, *name.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if os.path.isdir(src):
+            shutil.copytree(src, target, ignore=shutil.ignore_patterns("__pycache__"))
+        else:
+            shutil.copy(src, target)
+        copied.append(name)
+    return copied
+
+
+def write_agents(dest, main_name):
+    """The one instruction file a new instance carries, naming its own main."""
+    with open(os.path.join(dest, "AGENTS.md"), "w", encoding="utf-8") as fh:
+        fh.write(
+            "READ THIS FIRST, BEFORE ANYTHING ELSE, DO NOT SKIP:\n"
+            f"run `python3 lspec.py start {main_name}` and follow its output. Read every spec that governs "
+            "the work whole: every line, in sequential pages; skipped ranges and search instead of reading "
+            "are not a read.\nThis gates every request in this repo — questions and read-only tasks "
+            "included. If the request looks answerable without the read, read anyway.\n"
+        )
 
 
 def install_hooks(dest):
@@ -8256,14 +8311,10 @@ def cmd_pick(args):
 # (lspec/imports.json) the gate's mirror item checks. Nothing here commits.
 
 TOOL_FILES = (
-    "lspec.py",
-    "lspec.css",
-    "serve.sh",
-    "serve.bat",
-    ".gitattributes",
-    "hooks",
-    "models",
-)  # upstream's tool copy stays behind (dl-selection)
+    tuple(REQUIRED_TOOLING["files"] + REQUIRED_TOOLING["directories"])
+    if REQUIRED_TOOLING
+    else ("lspec.py", "hooks", "models")
+)  # upstream's tool copy stays behind (dl-selection); util/required.json names it
 
 
 class ImportRefused(Exception):
@@ -8442,7 +8493,7 @@ def select_unit(tmp, sha, entry):
     tool = {
         q
         for q in specs + sorted(linked)
-        if q in TOOL_FILES or q.startswith(("hooks/", "models/"))
+        if q in TOOL_FILES or q.startswith(("hooks/", "models/", "util/"))
     }
     if tool:
         notes.append("left behind, upstream's tool copy: " + ", ".join(sorted(tool)))
@@ -9274,21 +9325,14 @@ def graduate_prepare(col, args):
         fh.write(text)
     copy_tool(root, dest)
     installed = install_hooks(dest)
-    with open(os.path.join(dest, "AGENTS.md"), "w", encoding="utf-8") as fh:
-        fh.write(
-            "READ THIS FIRST, BEFORE ANYTHING ELSE, DO NOT SKIP:\n"
-            f"run `python3 lspec.py start {os.path.basename(path)}` and follow its output. Read every spec "
-            "that governs the work whole: every line, in sequential pages; skipped ranges and search "
-            "instead of reading are not a read.\nThis gates every request in this repo — questions and "
-            "read-only tasks included. If the request looks answerable without the read, read anyway.\n"
-        )
+    write_agents(dest, os.path.basename(path))
     git("add", "-A", cwd=dest)
     sha = commit_sha(at, root)
     source = args.remote or posix(dest)
     print(
         f"graduated {rel(path)} as committed at {sha[:12]} into {args.to}/{os.path.basename(path)}, "
         f"converted to a main; the tool (lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes), "
-        f"hooks/, models/ and AGENTS.md copied; "
+        f"hooks/, models/, util/ and AGENTS.md copied; "
         + (
             f"hooks installed: {', '.join(installed)}; staged, nothing committed"
             if installed
@@ -9796,9 +9840,9 @@ def copy_main(col, args):
                 and tgt not in col.specs
                 and os.path.isfile(tgt)
                 and tgt.startswith(root + os.sep)
-                and os.path.basename(tgt) not in TOOL_FILES
+                and posix(os.path.relpath(tgt, root)) not in TOOL_FILES
                 and not tgt.startswith(
-                    tuple(os.path.join(root, d) + os.sep for d in ("hooks", "models"))
+                    tuple(os.path.join(root, d) + os.sep for d in ("hooks", "models", "util"))
                 )
             ):
                 linked.add(tgt)
@@ -9810,14 +9854,7 @@ def copy_main(col, args):
     copy_tool(root, dest)
     installed = install_hooks(dest)
     main_name = os.path.basename(col.main)
-    with open(os.path.join(dest, "AGENTS.md"), "w", encoding="utf-8") as fh:
-        fh.write(
-            "READ THIS FIRST, BEFORE ANYTHING ELSE, DO NOT SKIP:\n"
-            f"run `python3 lspec.py start {main_name}` and follow its output. Read every spec that governs "
-            "the work whole: every line, in sequential pages; skipped ranges and search instead of reading "
-            "are not a read.\nThis gates every request in this repo — questions and read-only tasks "
-            "included. If the request looks answerable without the read, read anyway.\n"
-        )
+    write_agents(dest, main_name)
     git("add", "-A", cwd=dest)
     cwd = os.getcwd()
     os.chdir(dest)
@@ -10367,7 +10404,7 @@ commit-msg refuses a message whose subject or trailers differ from the receipt;
 post-commit lists files still uncommitted and prints nothing when there are
 none. Sources must keep executable modes. Upgrading an instance is one move
 from one live-spec commit, rules, tool and stylesheet together: copy that commit's
-lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes, hooks/ and models/ and install the hooks; bring every paragraph the instance took from the
+lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes, hooks/, models/ and util/ and install the hooks; bring every paragraph the instance took from the
 seed (status-line instruction, conventions, decisions, session, dependencies,
 tooling, open items, record) to that commit's seed text, keeping the
 instance's own [ADAPT] answers; set the footer line to that commit with the
@@ -10399,7 +10436,7 @@ from this collection's owned files as committed at HEAD: every confirmed(...)
 token becomes provisional(inherited from MAIN @ COMMIT; ...), every data-sealed
 is lifted (seals are reassessed at the seed), the status line is reset to
 [ADAPT] slots to re-derive whole, the tool (lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes),
-hooks/, models/ and AGENTS.md ride along, the four gate hooks installed;
+hooks/, models/, util/ and AGENTS.md ride along, the four gate hooks installed;
 all staged, nothing committed. The first commit is seed: and its gate asks one
 judgment per inherited decision row, watch entry, open item, diagnostic row,
 fence and directive, against the staged file:
@@ -10423,7 +10460,7 @@ this parent at COMMIT (default HEAD) is converted to a main — the parent's
 conventions, session and tooling paragraphs inserted after its heading, a
 status line of [ADAPT] slots for the seeding session to fill, the parent's
 footer carried — with the tool (lspec.py, lspec.css, serve.sh, serve.bat, .gitattributes),
-hooks/, models/ and AGENTS.md beside it, the four gate hooks installed, all staged.
+hooks/, models/, util/ and AGENTS.md beside it, the four gate hooks installed, all staged.
 Its first commit is a seed: (fresh history: the parent's commits name another
 main's gate), whose body names the source: graduated from <repo> @ <commit>.
 
@@ -10441,7 +10478,7 @@ portability.html). SOURCE is a git URL or local path, ENTRY the unit's entry fil
 it; --at REV picks a commit, tag or branch (default: upstream HEAD). The unit
 is ENTRY, everything its split rows reach (upstream's own imports included) and
 every other upstream file those specs link; upstream's tool (lspec.py, lspec.css,
-serve.sh, serve.bat, .gitattributes), hooks/ and models/ stay behind. It is listed, then written under imports/NAME/ with upstream's layout,
+serve.sh, serve.bat, .gitattributes), hooks/, models/ and util/ stay behind. It is listed, then written under imports/NAME/ with upstream's layout,
 and a split row dl-split-NAME is added to MAIN's decision log carrying the
 settings in one declaration: <code data-import>SOURCE @ SHA EDITS VERSION</code>.
 Both settings are explicit:

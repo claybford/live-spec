@@ -32,6 +32,10 @@ better.
   the session reads it whole. The spec reads and
   operates without it. `python3 lspec.py --help` and `python3 lspec.py VERB
   --help` are its reference.
+- **`util/`** — the carried utilities: `required.json` declares the complete
+  file set and Python libraries; `seed.py` installs that set into a new
+  repository in one command; `shape.py` prints the collection tree, sections,
+  claims and dependency edges that `lspec serve` draws in its browser map.
 - **`models/`** — the embedding model `find` runs: IBM's
   granite-embedding-small-english-r2, quantized to int8 and run in numpy by
   `lspec.py`. Apache-2.0, not MIT; its folder records the source revision, the
@@ -57,8 +61,8 @@ checkout of this repository as the artifact under test.
 ## Using it
 
 Hand this repository to an AI coding agent — a clone, or at least its HTML
-files, `lspec.py`, `lspec.css`, `hooks/`, `models/`, `serve.sh`, `serve.bat` and
-`.gitattributes` — along with the work you want
+files, `lspec.py`, `lspec.css`, `hooks/`, `models/`, `util/`, `serve.sh`,
+`serve.bat` and `.gitattributes` — along with the work you want
 captured, and say "capture this into this format." The agent instantiates a
 living specification: a persistent, cross-session, human- and machine-readable
 definition that any future session, or you, can pick up cold. The spec's
@@ -66,9 +70,15 @@ instructions are for the agent; yours is that one sentence.
 
 To look before you leap: open `live-spec.html`, then `python3 lspec.py check`.
 
-A hand-built instance installs the four gate hooks before its first commit
-(`python3 lspec.py hook --help`); `copy` and `graduate` install them in the new
-repository themselves.
+For a fresh repository, one command copies the complete set (utilities
+included), initializes git, installs the four gate hooks and creates a `.venv`
+with the declared libraries; add `--skip-libs` to defer that last step:
+
+    python3 util/seed.py /path/to/new-repo spec.html
+
+Then copy the seed into `spec.html`, resolve its slots and make the gated
+`seed:` commit. `copy` and `graduate` also carry the set and install the hooks.
+For the browser map without starting a server, run `python3 util/shape.py`.
 
 `find` needs numpy; nothing else does, the git hooks included. The preferred
 setup is a virtual environment managed by [uv](https://docs.astral.sh/uv/):
